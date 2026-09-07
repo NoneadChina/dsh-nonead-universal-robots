@@ -1,0 +1,78 @@
+{
+  "name": "dsh-nonead-universal-robots",
+  "version": "0.3.1",
+  "description": "一个让 DSH 用自然语言直接控制 Universal Robots（UR）机械臂的插件，由拓德科技（Nonead）基于自研的 nUR MCP Server 同源逻辑开发。",
+  "type": "module",
+  "main": "lib/index.js",
+  "readme": "README.md",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "CHANGELOG.md",
+    "CHANGELOG.zh.md",
+    "LICENSE",
+    "requirements.txt",
+    "python/__init__.py",
+    "python/ur_worker.py",
+    "python/URBasic/**/*.py",
+    "python/URBasic/rtdeConfigurationDefault.xml"
+  ],
+  "scripts": {
+    "prepublishOnly": "node --check lib/index.js && node --check lib/worker.js",
+    "check": "node --check lib/index.js && node --check lib/worker.js && node -e \"JSON.parse(require('fs').readFileSync('package.json','utf8'))\"",
+    "test": "node test/selftest.mjs",
+    "test:python": "python python/ur_worker.py --selfcheck"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "universal-robots",
+    "ur",
+    "robot",
+    "collaborative-robot",
+    "cobot",
+    "urtool",
+    "industrial-robot",
+    "urscript",
+    "rtde",
+    "mcp"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": {
+    "name": "拓德科技 (Suzhou Nonead Robot Technology Co., Ltd.)",
+    "url": "https://www.nonead.com"
+  },
+  "homepage": "https://www.nonead.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NoneadChina/dsh-nonead-universal-robots.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NoneadChina/dsh-nonead-universal-robots/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1",
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

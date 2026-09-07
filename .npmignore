@@ -1,0 +1,10 @@
+# Python runtime artifacts — never ship in the npm tarball
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+
+# Node / repo support files
+node_modules/
+.gitignore
+*.tgz

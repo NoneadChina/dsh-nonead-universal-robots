@@ -1,0 +1,11 @@
+# DSH plugin runtime artifacts
+python/ur_worker.log
+__pycache__/
+*.py[cod]
+
+# Node
+node_modules/
+
+# editor / os
+.DS_Store
+Thumbs.db

@@ -1,0 +1,16 @@
+# dsh-nonead-universal-robots 插件（DSH Bundle patch）
+# 作为 bundle 被合入 profile 时，自动插入本插件行。
+# 插件负责启动 Python UR 控制 worker，并把 UR 机器人控制工具注册到 ctx.tools。
+- insert:
+    - id: nonead-universal-robots
+      name: 'dsh-nonead-universal-robots'
+      config:
+        # 用于启动 python/ur_worker.py 的解释器；可改为绝对路径，例如
+        # 'C:\\Python312\\python.exe' 或 '/usr/bin/python3'。
+        pythonBin: 'python'
+        # 单条运动/脚本命令的执行超时（毫秒）。机器人到位的确认轮询在此上限内。
+        commandTimeoutMs: 60000
+        # 首次 connect 的超时（毫秒）。
+        connectTimeoutMs: 30000
+        # 运动/程序类指令是否需人工确认后再下发（true=需确认，fail-closed）。
+        requireApprovalForMotion: true

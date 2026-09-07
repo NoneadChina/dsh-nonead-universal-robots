@@ -1,0 +1,4 @@
+# dsh-nonead-universal-robots — Python 运行时依赖
+# 供 python/ur_worker.py（内部使用 vendored URBasic）使用。
+numpy>=1.21
+paramiko>=2.11
