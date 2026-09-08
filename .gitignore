@@ -2,9 +2,13 @@
 python/ur_worker.log
 __pycache__/
 *.py[cod]
+*.log
 
 # Node
 node_modules/
+
+# Release build artifacts
+Release/
 
 # editor / os
 .DS_Store

@@ -565,14 +565,14 @@ end
         '''
 
         prg = '''def ur_get_conveyor_tick_count():
-    write_output_float_register(0, get_conveyor_tick_count())
+    write_output_double_register(0, get_conveyor_tick_count())
 end
 '''
         programString = prg.format(**locals())
 
         self.robotConnector.RealTimeClient.SendProgram(programString)
         self.waitRobotIdleOrStopFlag()
-        return self.robotConnector.RobotModel.outputDoubleRegister[0]
+        return self.robotConnector.RobotModel.OutputDoubleRegister(0)
 
     def stop_conveyor_tracking(self, a=15, aRot='a', wait=True):
         '''
