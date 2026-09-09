@@ -180,4 +180,4 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 
 完整条款见 [LICENSE](./LICENSE)。商业授权请联系 [service@nonead.com](mailto:service@nonead.com)。
 
-`python/URBasic`（vendored）仍沿用其自身 **MIT** 许可（© Anthony Zhuang / Universal Robots，2009-2025）。
+`python/URBasic`（vendored）仍沿用其自身 **MIT** 许可（© Universal Robots，2009-2025）。
