@@ -180,4 +180,4 @@ This project adopts a **User-Segmented Dual Licensing** model:
 
 See [LICENSE](./LICENSE) for the full agreement. For a commercial license, contact [service@nonead.com](mailto:service@nonead.com).
 
-`python/URBasic` (vendored) remains under its own **MIT License** (© Anthony Zhuang / Universal Robots, 2009-2025).
+`python/URBasic` (vendored) remains under its own **MIT License** (© Universal Robots, 2009-2025).
