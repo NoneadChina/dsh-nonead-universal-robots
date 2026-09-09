@@ -153,9 +153,84 @@ def dashboard(ip):
     return ROBOTS[ip].robotConnector.DashboardClient
 
 
+def _remote_control(d):
+    """Probe whether the robot is in remote-control mode. Returns (bool, raw).
+
+    The dashboard `ur_is_remote_control` response is usually "true" / "false",
+    but it can also be an error-like string (e.g. "could not understand ...").
+    We treat only an exact "true" as remote; anything else (including a failed
+    probe) is reported as not-remote so callers can warn conservatively.
+    """
+    raw = ""
+    try:
+        d.ur_is_remote_control()
+        raw = (d.last_respond or "").strip().lower()
+    except Exception:
+        raw = ""
+    return raw == "true", raw
+
+
 # ---------------------------------------------------------------------------
 # Pose / confirmation helpers (mirrors the reference implementation)
 # ---------------------------------------------------------------------------
+
+def _vec(p, key, n, what):
+    """Coerce `p[key]` to a list of exactly `n` floats or raise ValueError.
+
+    Guards against malformed URScript: a joint/pose vector (q, pose, center,
+    origin, via/to) is required to have exactly the expected dimension. The old
+    code silently accepted any length, which could emit malformed `movej(...)`
+    /`movel(...)` commands or an out-of-range indexing error later.
+    """
+    raw = p.get(key)
+    if raw is None:
+        raise ValueError(what + " 缺失，需要传入 %d 维数组" % n)
+    try:
+        vals = [float(x) for x in raw]
+    except (TypeError, ValueError):
+        raise ValueError(what + " 必须是数值数组（如 [%.1f,%.1f,...]" % (n, n))
+    if len(vals) != n:
+        raise ValueError(what + " 必须是 %d 维数组，收到 %d 维" % (n, len(vals)))
+    return vals
+
+
+def _bounded_int(raw, key, lo, hi, what):
+    """Coerce `p[key]` to an int within [lo, hi] or raise ValueError.
+
+    Guards register indices and I/O port numbers: an out-of-range value would
+    otherwise reach `dataDir['output_int_register_<n>']` and raise a KeyError, or
+    an invalid port would silently return None. Used as the last line of defense
+    on top of the JSON-schema min/max already declared in the tool definitions.
+    """
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(what + " 必须是整数，收到 %r" % (raw,))
+    if not (lo <= v <= hi):
+        raise ValueError(what + " 必须在 [%d, %d] 范围内，收到 %d" % (lo, hi, v))
+    return v
+
+
+def _nonneg_float(raw, key, what, allow_zero=True):
+    """Coerce `p[key]` to a non-negative float or raise ValueError.
+
+    Guards motion parameters (acceleration, speed, blend radius, time) and
+    drawing dimensions: a negative value would make the controller behave
+    unexpectedly (negative speed/acceleration, reversed geometry). `allow_zero`
+    permits 0 for time/blend radius where 0 is meaningful; drawing dimensions
+    that must be positive use allow_zero=False.
+    """
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(what + " 必须是数值，收到 %r" % (raw,))
+    threshold = 0 if allow_zero else 0
+    if v < threshold:
+        raise ValueError(what + " 不能为负数，收到 %s" % v)
+    if not allow_zero and v == 0:
+        raise ValueError(what + " 必须大于 0，收到 0")
+    return v
+
 
 def _round_pose(pose):
     return [round(x, 3) for x in pose]
@@ -165,15 +240,25 @@ def _right_pose_joint(current, q, tol=0.1):
     return all(current[i] + tol >= q[i] >= current[i] - tol for i in range(6))
 
 
-def _right_pose_tcp(current, pose, tol=0.010):
-    return all(current[i] + tol >= pose[i] >= current[i] - tol for i in range(3))
+def _right_pose_tcp(current, pose, pos_tol=0.010, rot_tol=0.05):
+    # Compare the full 6-D pose. Position (x,y,z) uses a small linear tolerance
+    # (meters); orientation (rx,ry,rz in radians) uses a looser angular
+    # tolerance so a valid arrival in rotation is not misreported as off-target.
+    return all(current[i] + pos_tol >= pose[i] >= current[i] - pos_tol for i in range(3)) and \
+        all(current[i] + rot_tol >= pose[i] >= current[i] - rot_tol for i in range(3, 6))
 
 
 def _program_running(ip):
-    d = dashboard(ip)
-    d.ur_running()
-    respond = (d.last_respond or "").strip().lower()
-    return "true" in respond
+    try:
+        d = dashboard(ip)
+        d.ur_running()
+        respond = (d.last_respond or "").strip().lower()
+        return "true" in respond
+    except Exception:
+        # A failed dashboard probe (e.g. the RTDE/connection dropped mid-move)
+        # must not crash the single-threaded worker; treat it as "not running"
+        # so the confirm loop reports a clear outcome instead of a raw traceback.
+        return False
 
 
 def _movej_confirm(ip, q, timeout_ms=60000):
@@ -181,9 +266,11 @@ def _movej_confirm(ip, q, timeout_ms=60000):
 
     Bounded by `timeout_ms` so a robot that never reaches the target (e.g. a
     program that keeps running) cannot block the single-threaded worker forever.
+    `ok` is True only when the target was reached AND the robot settled; a
+    persistent deviation that never settles reports `ok=False`.
     """
     deadline = time.time() + timeout_ms / 1000.0
-    count = 0
+    settled_offsets = 0
     while True:
         if time.time() > deadline:
             return False, "移动未确认到位（超时 %.0fms）" % timeout_ms
@@ -191,22 +278,26 @@ def _movej_confirm(ip, q, timeout_ms=60000):
         try:
             current = _round_pose(ROBOTS[ip].get_actual_joint_positions())
         except Exception:
-            break
+            return False, "读取关节位置失败，无法确认到位"
         if _right_pose_joint(current, q):
             if not _program_running(ip):
                 return True, "移动完成"
+            # On target but the program is still running: keep waiting.
         else:
             if _program_running(ip):
                 continue
-            count += 1
-            if count > 5:
-                return True, "移动结束（位置存在偏差）"
+            # Off-target and idle: count consecutive unsettled reads. If the
+            # robot repeatedly stops off-target, report that honestly rather
+            # than claiming success.
+            settled_offsets += 1
+            if settled_offsets > 5:
+                return False, "移动结束但未到达目标（位置存在偏差）"
     return True, "移动完成"
 
 
 def _movel_confirm(ip, pose, timeout_ms=60000):
     deadline = time.time() + timeout_ms / 1000.0
-    count = 0
+    settled_offsets = 0
     while True:
         if time.time() > deadline:
             return False, "移动未确认到位（超时 %.0fms）" % timeout_ms
@@ -214,16 +305,16 @@ def _movel_confirm(ip, pose, timeout_ms=60000):
         try:
             current = _round_pose(ROBOTS[ip].get_actual_tcp_pose())
         except Exception:
-            break
+            return False, "读取 TCP 位置失败，无法确认到位"
         if _right_pose_tcp(current, pose):
             if not _program_running(ip):
                 return True, "移动完成"
         else:
             if _program_running(ip):
                 continue
-            count += 1
-            if count > 5:
-                return True, "移动结束（位置存在偏差）"
+            settled_offsets += 1
+            if settled_offsets > 5:
+                return False, "移动结束但未到达目标（位置存在偏差）"
     return True, "移动完成"
 
 
@@ -249,14 +340,7 @@ def op_connect(p):
     ip = str(p["ip"])
     try:
         robot, robot_model = ensure_connected(ip)
-        remote = ""
-        try:
-            d = robot.robotConnector.DashboardClient
-            d.ur_is_remote_control()
-            remote = (d.last_respond or "").strip().lower()
-        except Exception:
-            pass
-        in_remote = remote == "true"
+        in_remote, remote = _remote_control(robot.robotConnector.DashboardClient)
         msg = "连接成功。IP：%s" % ip
         if remote and not in_remote and not remote.startswith("could not understand"):
             msg += "（注意：机器人未处于远程控制模式，部分运动指令可能无法执行）"
@@ -289,7 +373,12 @@ def op_status(p):
             getattr(d, cmd)()
             return (d.last_respond or "").strip()
         except Exception:
-            return ""
+            # Distinguish a failed dashboard query from a genuinely empty field:
+            # an empty string would be indistinguishable from "no value", while a
+            # marker tells the caller/model that this particular field could not
+            # be read (e.g. the dashboard connection dropped) without failing the
+            # whole status snapshot.
+            return "<查询失败>"
 
     tcp = [float(x) for x in robot.get_actual_tcp_pose()]
     joint = [float(x) for x in robot.get_actual_joint_positions()]
@@ -297,9 +386,7 @@ def op_status(p):
         timestamp = model.RobotTimestamp()
     except Exception:
         timestamp = None
-    d.ur_is_remote_control()
-    raw_remote = (d.last_respond or "").strip().lower()
-    remote = raw_remote == "true"
+    remote, _ = _remote_control(d)
     data = {
         "ip": ip,
         "tcp_pose": tcp,
@@ -343,11 +430,9 @@ def op_get_robot_model(p):
     d = dashboard(ip)
     d.ur_get_robot_model()
     model = (d.last_respond or "").strip()
-    d.ur_is_remote_control()
-    remote = (d.last_respond or "").strip().lower()
-    if remote in ("true", "false"):
-        model = model + "e"
-    return ok({"message": model, "data": {"robot_model": model, "ip": ip}})
+    remote, _ = _remote_control(d)
+    return ok({"message": model,
+               "data": {"robot_model": model, "remote_control": remote, "ip": ip}})
 
 
 def op_get_serial_number(p):
@@ -443,7 +528,7 @@ def op_get_joint_temperatures(p):
 
 def op_get_int_register(p):
     ip = str(p["ip"])
-    idx = int(p["index"])
+    idx = _bounded_int(p["index"], "index", 0, 23, "int 寄存器下标")
     _, model = ensure_connected(ip)
     val = model.OutputIntRegister(idx)
     return ok({"message": "%d" % val, "data": {"index": idx, "value": val,
@@ -452,7 +537,7 @@ def op_get_int_register(p):
 
 def op_get_double_register(p):
     ip = str(p["ip"])
-    idx = int(p["index"])
+    idx = _bounded_int(p["index"], "index", 0, 23, "double 寄存器下标")
     _, model = ensure_connected(ip)
     val = model.OutputDoubleRegister(idx)
     return ok({"message": "%s" % val, "data": {"index": idx, "value": val,
@@ -461,7 +546,7 @@ def op_get_double_register(p):
 
 def op_get_bit_register(p):
     ip = str(p["ip"])
-    idx = int(p["index"])
+    idx = _bounded_int(p["index"], "index", 0, 63, "bool 寄存器下标")
     _, model = ensure_connected(ip)
     bits = model.OutputBitRegister()
     val = bits[idx]
@@ -478,8 +563,11 @@ def op_list_programs(p):
 
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(hostname=ip, port=22, username=username, password=password,
-                timeout=8)
+    try:
+        ssh.connect(hostname=ip, port=22, username=username, password=password,
+                    timeout=8)
+    except Exception as e:
+        return err("SSH 连接 %s:%d 失败（%s）。请确认机器人已启动 SSH 服务，或检查 username/password。" % (ip, 22, e))
 
     def sh(cmd, timeout=20):
         try:
@@ -529,11 +617,11 @@ def op_send_script(p):
 
 def op_movej(p):
     ip = str(p["ip"])
-    q = [float(x) for x in p["q"]]
-    a = float(p.get("a", 1))
-    v = float(p.get("v", 1))
-    t = float(p.get("t", 0))
-    r = float(p.get("r", 0))
+    q = _vec(p, "q", 6, "movej 的 q")
+    a = _nonneg_float(p.get("a", 1), "a", "movej 的加速度", allow_zero=False)
+    v = _nonneg_float(p.get("v", 1), "v", "movej 的速度", allow_zero=False)
+    t = _nonneg_float(p.get("t", 0), "t", "movej 的时长")
+    r = _nonneg_float(p.get("r", 0), "r", "movej 的交融半径")
     robot, _ = ensure_connected(ip)
     robot.movej(q, a, v, t, r, wait=False)
     ok_flag, msg = _movej_confirm(ip, q, int(p.get("_timeout_ms", 60000)))
@@ -544,11 +632,11 @@ def op_movej(p):
 
 def op_movel(p):
     ip = str(p["ip"])
-    pose = [float(x) for x in p["pose"]]
-    a = float(p.get("a", 1))
-    v = float(p.get("v", 1))
-    t = float(p.get("t", 0))
-    r = float(p.get("r", 0))
+    pose = _vec(p, "pose", 6, "movel 的 pose")
+    a = _nonneg_float(p.get("a", 1), "a", "movel 的加速度", allow_zero=False)
+    v = _nonneg_float(p.get("v", 1), "v", "movel 的速度", allow_zero=False)
+    t = _nonneg_float(p.get("t", 0), "t", "movel 的时长")
+    r = _nonneg_float(p.get("r", 0), "r", "movel 的交融半径")
     robot, _ = ensure_connected(ip)
     robot.movel(pose, a, v, t, r, wait=False)
     ok_flag, msg = _movel_confirm(ip, pose, int(p.get("_timeout_ms", 60000)))
@@ -561,7 +649,9 @@ def _axis_move(p, axis):
     ip = str(p["ip"])
     distance = float(p["distance"])
     robot, _ = ensure_connected(ip)
-    pose = list(robot.get_actual_tcp_pose())
+    pose = [float(x) for x in robot.get_actual_tcp_pose()]
+    if len(pose) != 6:
+        return err("读取当前 TCP 位姿异常（期望 6 维，收到 %d 维），无法沿轴移动" % len(pose))
     pose[axis] = pose[axis] + distance
     robot.movel(pose, wait=False)
     ok_flag, msg = _movel_confirm(ip, pose, int(p.get("_timeout_ms", 60000)))
@@ -584,8 +674,8 @@ def op_move_z(p):
 
 def op_draw_circle(p):
     ip = str(p["ip"])
-    center = [float(x) for x in p["center"]]
-    r = float(p["r"])
+    center = _vec(p, "center", 6, "draw_circle 的 center")
+    r = _nonneg_float(p["r"], "r", "draw_circle 的半径", allow_zero=False)
     coordinate = str(p.get("coordinate", "z")).lower()
     robot, _ = ensure_connected(ip)
     wp = [list(center) for _ in range(4)]
@@ -611,8 +701,8 @@ def op_draw_circle(p):
 
 def op_draw_square(p):
     ip = str(p["ip"])
-    origin = [float(x) for x in p["origin"]]
-    border = float(p["border"])
+    origin = _vec(p, "origin", 6, "draw_square 的 origin")
+    border = _nonneg_float(p["border"], "border", "draw_square 的边长", allow_zero=False)
     coordinate = str(p.get("coordinate", "z")).lower()
     robot, _ = ensure_connected(ip)
     wp = [list(origin) for _ in range(3)]
@@ -638,9 +728,9 @@ def op_draw_square(p):
 
 def op_draw_rectangle(p):
     ip = str(p["ip"])
-    origin = [float(x) for x in p["origin"]]
-    width = float(p["width"])
-    height = float(p["height"])
+    origin = _vec(p, "origin", 6, "draw_rectangle 的 origin")
+    width = _nonneg_float(p["width"], "width", "draw_rectangle 的长", allow_zero=False)
+    height = _nonneg_float(p["height"], "height", "draw_rectangle 的宽", allow_zero=False)
     coordinate = str(p.get("coordinate", "z")).lower()
     robot, _ = ensure_connected(ip)
     wp = [list(origin) for _ in range(3)]
@@ -672,8 +762,8 @@ def op_draw_star(p):
     coordinate: "z" -> vertical (y-z plane); anything else -> horizontal (x-y).
     """
     ip = str(p["ip"])
-    center = [float(x) for x in p["center"]]
-    side = float(p["side"])
+    center = _vec(p, "center", 6, "draw_star 的 center")
+    side = _nonneg_float(p["side"], "side", "draw_star 的边长", allow_zero=False)
     coordinate = str(p.get("coordinate", "xy")).lower()
     robot, _ = ensure_connected(ip)
 
@@ -810,14 +900,17 @@ def op_ping(p):
 def op_get_digital_in(p):
     ip = str(p["ip"])
     which = str(p.get("which", "std")).lower()
-    n = int(p["n"])
     robot, _ = ensure_connected(ip)
     if which == "config":
+        n = _bounded_int(p["n"], "n", 8, 15, "config 端口号")
         val = robot.get_configurable_digital_in(n)
     elif which == "tool":
-        # URBasic's get_tool_digital_in is an unimplemented stub; be upfront.
-        return err("读取工具端数字输入暂不支持（URBasic 未实现）。请改用 which=std 或 which=config。")
+        n = _bounded_int(p["n"], "n", 0, 1, "tool 端口号")
+        # Tool digital inputs are not on RTDE; get_tool_digital_in runs a
+        # URScript expression via the RealTime client and reads the result back.
+        val = robot.get_tool_digital_in(n)
     else:
+        n = _bounded_int(p["n"], "n", 0, 7, "std 端口号")
         val = robot.get_standard_digital_in(n)
     return ok({"message": "%s" % bool(val),
                "data": {"which": which, "port": n, "value": bool(val), "ip": ip}})
@@ -826,14 +919,18 @@ def op_get_digital_in(p):
 def op_set_digital_out(p):
     ip = str(p["ip"])
     which = str(p.get("which", "std")).lower()
-    n = int(p["n"])
     value = bool(p["value"])
     robot, _ = ensure_connected(ip)
     if which == "config":
+        n = _bounded_int(p["n"], "n", 8, 15, "config 端口号")
         robot.set_configurable_digital_out(n, value)
     elif which == "tool":
+        n = _bounded_int(p["n"], "n", 0, 1, "tool 端口号")
+        # Tool digital outputs are not on RTDE; set_tool_digital_out sends the
+        # URScript `write_tool_digital_out` command over the RealTime client.
         robot.set_tool_digital_out(n, value)
     else:
+        n = _bounded_int(p["n"], "n", 0, 7, "std 端口号")
         robot.set_standard_digital_out(n, value)
     return ok({"message": "已设置数字输出 %s.%d = %s" % (which, n, value),
                "data": {"which": which, "port": n, "value": value, "ip": ip}})
@@ -841,7 +938,7 @@ def op_set_digital_out(p):
 
 def op_get_analog_in(p):
     ip = str(p["ip"])
-    n = int(p["n"])
+    n = _bounded_int(p["n"], "n", 0, 1, "模拟输入端口号")
     robot, _ = ensure_connected(ip)
     val = robot.get_standard_analog_in(n)
     return ok({"message": "%s" % val, "data": {"port": n, "value": val, "ip": ip}})
@@ -849,10 +946,13 @@ def op_get_analog_in(p):
 
 def op_set_analog_out(p):
     ip = str(p["ip"])
-    n = int(p["n"])
+    n = _bounded_int(p["n"], "n", 0, 1, "模拟输出端口号")
     value = float(p["value"])
     robot, _ = ensure_connected(ip)
-    robot.set_standard_analog_out(n, value)
+    # URBasic's set_standard_analog_out is an unimplemented stub (raises
+    # NotImplementedError); send the URScript set_analog_out command directly
+    # over the RealTime client instead, the same pattern as set_tool_digital_out.
+    robot.robotConnector.RealTimeClient.Send('set_analog_out(%d, %.4f)\n' % (n, value))
     return ok({"message": "已设置模拟输出 %d = %s" % (n, value),
                "data": {"port": n, "value": value, "ip": ip}})
 
@@ -868,7 +968,7 @@ def op_set_tool_voltage(p):
 
 def op_set_tcp(p):
     ip = str(p["ip"])
-    pose = [float(x) for x in p["pose"]]
+    pose = _vec(p, "pose", 6, "set_tcp 的 pose")
     robot, _ = ensure_connected(ip)
     robot.set_tcp(pose)
     return ok({"message": "已设置 TCP：%s" % pose,
@@ -878,7 +978,7 @@ def op_set_tcp(p):
 def op_set_payload(p):
     ip = str(p["ip"])
     mass = float(p["mass"])
-    cog = [float(x) for x in p.get("cog", [0.0, 0.0, 0.0])]
+    cog = _vec(p, "cog", 3, "set_payload 的 cog") if p.get("cog") is not None else [0.0, 0.0, 0.0]
     robot, _ = ensure_connected(ip)
     # URBasic's base `set_payload(m, CoG)` is a NotImplementedError stub; send the
     # two implemented URScript commands directly instead.
@@ -891,10 +991,10 @@ def op_set_payload(p):
 
 def op_movep(p):
     ip = str(p["ip"])
-    pose = [float(x) for x in p["pose"]]
-    a = float(p.get("a", 1.2))
-    v = float(p.get("v", 0.25))
-    r = float(p.get("r", 0))
+    pose = _vec(p, "pose", 6, "movep 的 pose")
+    a = _nonneg_float(p.get("a", 1.2), "a", "movep 的加速度", allow_zero=False)
+    v = _nonneg_float(p.get("v", 0.25), "v", "movep 的速度", allow_zero=False)
+    r = _nonneg_float(p.get("r", 0), "r", "movep 的交融半径")
     robot, _ = ensure_connected(ip)
     robot.movep(pose, a, v, r, wait=False)
     cmd = "movep(p%s, a=%s, v=%s, r=%s)" % (pose, a, v, r)
@@ -904,11 +1004,11 @@ def op_movep(p):
 
 def op_movec(p):
     ip = str(p["ip"])
-    via = [float(x) for x in p["pose_via"]]
-    to = [float(x) for x in p["pose_to"]]
-    a = float(p.get("a", 1.2))
-    v = float(p.get("v", 0.25))
-    r = float(p.get("r", 0))
+    via = _vec(p, "pose_via", 6, "movec 的 pose_via")
+    to = _vec(p, "pose_to", 6, "movec 的 pose_to")
+    a = _nonneg_float(p.get("a", 1.2), "a", "movec 的加速度", allow_zero=False)
+    v = _nonneg_float(p.get("v", 0.25), "v", "movec 的速度", allow_zero=False)
+    r = _nonneg_float(p.get("r", 0), "r", "movec 的交融半径")
     robot, _ = ensure_connected(ip)
     robot.movec(via, to, a, v, r, wait=False)
     cmd = "movec(p%s, p%s, a=%s, v=%s, r=%s)" % (via, to, a, v, r)
@@ -918,7 +1018,7 @@ def op_movec(p):
 
 def op_servoj(p):
     ip = str(p["ip"])
-    q = [float(x) for x in p["q"]]
+    q = _vec(p, "q", 6, "servoj 的 q")
     t = float(p.get("t", 0.008))
     look = float(p.get("lookahead_time", 0.1))
     gain = int(p.get("gain", 100))

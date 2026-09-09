@@ -97,7 +97,9 @@ class UrScriptExt(URBasic.urScript.UrScript):
         out (bool or float), The signal level.
         '''
         if 'BCI' == port[:3]:
-            return self.get_configurable_digital_in(int(port[4:]), wait)
+            # get_configurable_digital_in takes only n (no wait), matching its
+            # RobotModel.ConfigurableInputBits implementation.
+            return self.get_configurable_digital_in(int(port[4:]))
         elif 'BDI' == port[:3]:
             return self.get_standard_digital_in(int(port[4:]), wait)
         elif 'BAI' == port[:3]:
@@ -117,16 +119,17 @@ class UrScriptExt(URBasic.urScript.UrScript):
 
         if 'BCO' == port[:3]:
             self.set_configurable_digital_out(int(port[4:]), value)
+            return True
         elif 'BDO' == port[:3]:
             self.set_standard_digital_out(int(port[4:]), value)
+            return True
         elif 'BAO' == port[:3]:
-            pass
+            # Standard analog out is not implemented in URBasic (set_standard_analog_out
+            # is a stub); surface that instead of silently passing.
+            raise NotImplementedError('Standard analog output is not implemented in URBasic')
         elif 'TDO' == port[:3]:
-            pass
-
-            # if self.sendData():
-            #    return True
-            return True  # Vi har sendt det .. vi checker ikke
+            self.set_tool_digital_out(int(port[4:]), value)
+            return True
         else:
             return False
     # def reset_registers(self):

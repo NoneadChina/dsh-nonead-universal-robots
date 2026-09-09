@@ -153,28 +153,28 @@ class RobotModel(object):
         return self.stopRunningFlag
 
     def DigitalInputbits(self, n):
-        if n >= 0 & n < 8:
+        if 0 <= n < 8:
             n = pow(2, n)
             return n & self.dataDir['actual_digital_input_bits'] == n
         else:
             return None
 
     def ConfigurableInputBits(self, n):
-        if n >= 8 & n < 16:
+        if 8 <= n < 16:
             n = pow(2, n + 8)
             return n & self.dataDir['actual_digital_input_bits'] == n
         else:
             return None
 
     def DigitalOutputBits(self, n):
-        if n >= 0 & n < 8:
+        if 0 <= n < 8:
             n = pow(2, n)
             return n & self.dataDir['actual_digital_output_bits'] == n
         else:
             return None
 
     def ConfigurableOutputBits(self, n):
-        if n >= 8 & n < 16:
+        if 8 <= n < 16:
             n = pow(2, n + 8)
             return n & self.dataDir['actual_digital_output_bits'] == n
         else:

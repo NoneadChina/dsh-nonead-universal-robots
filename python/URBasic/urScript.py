@@ -1372,7 +1372,7 @@ end
         Return Value:
         boolean, The signal level.
         '''
-        return self.robotConnector.RobotModel.DigitalInputBits(n)
+        return self.robotConnector.RobotModel.DigitalInputbits(n)
 
     def get_standard_digital_out(self, n):
         '''
@@ -1416,7 +1416,14 @@ end
         Return Value:
         boolean, The signal level.
         '''
-        raise NotImplementedError('Function Not yet implemented')
+        # Tool digital inputs are NOT carried by RTDE — only via URScript.
+        # `read_tool_digital_in` is an expression, so it must run inside a
+        # program; we stash its result into output_int_register_0 and read it
+        # back over RTDE (same pattern as get_conveyor_tick_count).
+        prg = 'def ur_get_tool_digital_in():\n    write_output_int_register(0, read_tool_digital_in({n}))\nend\n'.format(**locals())
+        self.robotConnector.RealTimeClient.SendProgram(prg)
+        self.waitRobotIdleOrStopFlag()
+        return bool(self.robotConnector.RobotModel.OutputIntRegister(0))
 
     def get_tool_digital_out(self, n):
         '''
@@ -1431,7 +1438,11 @@ end
         Return Value:
         boolean, The signal level.
         '''
-        raise NotImplementedError('Function Not yet implemented')
+        # Not implemented. Tool digital outputs are set with `write_tool_digital_out`
+        # and are not carried by RTDE; there is no reliable `read_tool_digital_out`
+        # expression to run, so a read-back is not supported. Use `set_tool_digital_out`
+        # to control the output and treat the level as write-only.
+        raise NotImplementedError('Function Not yet implemented (tool digital output has no reliable read-back; use set_tool_digital_out)')
 
     def modbus_add_signal(self, IP, slave_number, signal_address, signal_type, signal_name):
         '''
@@ -1998,7 +2009,11 @@ end
         n: The number (id) of the output, integer: [0:1]
         b: The signal level. (boolean)
         '''
-        raise NotImplementedError('Function Not yet implemented')
+        # Tool digital outputs are not exposed to RTDE, so they must be set via
+        # URScript. `write_tool_digital_out` is a command (not an expression), so
+        # a fire-and-forget Send is enough — there is nothing to read back.
+        value = 1 if b else 0
+        self.robotConnector.RealTimeClient.Send('write_tool_digital_out({n}, {value})\n'.format(n=n, value=value))
 
     def set_tool_voltage(self, voltage):
         '''

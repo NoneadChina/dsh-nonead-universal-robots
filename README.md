@@ -17,11 +17,11 @@ This plugin shares the same ancestry as the company's `Nonead-Universal-Robots-M
 | Connection | `ur_connect` / `ur_disconnect` | Connect / disconnect a UR robot by IP |
 | Status | `ur_get_status` | One-shot read of TCP, joints, model, serial, version, safety mode, run/program state, voltage, current, temperatures, uptime |
 | Pose | `ur_get_tcp_pose` / `ur_get_joint_pose` | Read current TCP pose / joint angles |
-| Device info | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_robot_mode` | Model / serial / uptime / software version / safety mode / run state |
+| Device info | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_robot_mode` | Model (with `remote_control` field) / serial / uptime / software version / safety mode / run state |
 | Programs | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` | Program state, load, run, stop, pause, SSH listing (`list_programs` works with the real robot's `/programs` and URSim `~/URSim_Linux-*/programs.*`; `load/run` accept full/URSim paths and `programs_dir`) |
 | Registers | `ur_get_int_register` / `ur_get_double_register` / `ur_get_bit_register` | Read Int / Double / Bool registers |
 | Health | `ur_ping` | Check worker/Python/URBasic readiness without a robot |
-| I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` | Digital in/out (incl. **bit-mask reads**), standard analog in/out |
+| I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` | Digital in/out (incl. **bit-mask reads**, plus `which="tool"` for the tool-flange digital I/O), standard analog in/out |
 | Tool config | `ur_set_tool_voltage` / `ur_set_tcp` / `ur_set_payload` | Tool voltage, TCP, payload mass/center of gravity |
 | Conveyor | `ur_get_conveyor` / `ur_set_conveyor_tick` | Conveyor tick read / set |
 | Motion | `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_x` / `ur_move_y` / `ur_move_z` | Joint-space / linear / path / circular / continuous servo / axis-aligned motion |
@@ -42,7 +42,7 @@ Every tool except `connect` takes an `ip` argument and requires that IP to be **
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.3.0"
+       "dsh-nonead-universal-robots": "^0.3.8"
      },
      "dsh": {
        "profile": {
@@ -164,6 +164,7 @@ This plugin shares the same ancestry as Nonead's [`Nonead-Universal-Robots-MCP`]
 
 - **Connection persistence** — the worker process lives for the plugin's lifetime and keeps robot connections by IP; after a worker crash or a DSH restart you must `connect` again.
 - **Remote control mode** — some UR robots must be in "remote control" to execute motion/program commands; `ur_connect` reports that state.
+- **Tool digital I/O** — `ur_get_digital_in` / `ur_set_digital_out` with `which="tool"` control the tool-flange digital I/O. Tool digital signals are **not carried by RTDE**, so reading a tool input runs a short URScript program (via `SendProgram`) that may **interrupt a running program**; writing a tool output sends the URScript `write_tool_digital_out` command. Tool digital **output read-back is not supported** (no reliable `read_tool_digital_out` expression).
 - **Joint current** — the current RTDE recipe does not expose per-joint current directly, so `ur_get_joint_current` is not provided (the reference implementation's version of this tool has a value bug; this implementation does not carry it over).
 - **Threading / cancel** — motion commands poll until arrival within `commandTimeoutMs`; for long trajectories, remind the model in the prompt to set a reasonable timeout or split the motion into steps.
 - **Not a safety boundary** — this plugin is on par with the `bash` tool and can drive physical equipment; test thoroughly on a real robot before production use.
