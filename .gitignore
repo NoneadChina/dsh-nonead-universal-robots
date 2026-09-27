@@ -36,3 +36,8 @@ pnpm-workspace.yaml
 # UR 官方手册 PDF（约 3.8 MB）仅供本机离线查阅，不作为仓库内容分发。
 # 需要时按型号/版本从 UR 支持站点下载：https://www.universal-robots.com/download/
 ScriptManual/
+
+# 本机专属的解释器 shim（含本机用户名路径，且刻意不在 package.json 的 files 里）。
+# 它只解决「这台机器的 python 找不到 numpy/paramiko」，见文件头部说明；
+# 提交它会泄露本机路径，也会让别人的机器套用错误的 site-packages。
+python/sitecustomize.py
