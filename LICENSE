@@ -1,52 +1,3 @@
-# License Agreement
-
-This project (`dsh-nonead-universal-robots`) adopts a **User-Segmented Dual Licensing** model.
-
-## Basic Principles
-
-- **Individual users** and **organizations/companies with ≤10 people**: AGPLv3 license applies automatically.
-- **Organizations/companies with >10 people**: **Commercial license** required.
-
-### Definition of "≤10 people":
-
-This refers to situations where the total number of individuals in your organization (including companies, non-profits, government agencies, educational institutions, etc.) who directly or indirectly access, use, or benefit from `dsh-nonead-universal-robots` does not exceed 10. This includes but is not limited to developers, testers, operators, end-users, and users through integrated systems.
-
-## 1. Open Source License (AGPLv3) — For individuals and organizations with ≤10 people
-
-If you are an individual user or your organization meets the "≤10 people" definition, you may freely use, modify, and redistribute `dsh-nonead-universal-robots` under AGPLv3 terms. The full AGPLv3 license can be found at [https://www.gnu.org/licenses/agpl-3.0.html](https://www.gnu.org/licenses/agpl-3.0.html).
-
-> **Key obligations**: As a core requirement of AGPLv3, you must provide recipients with complete source code under AGPLv3 if you distribute modified versions of `dsh-nonead-universal-robots` or offer it as a network service. Even if your organization meets the "≤10 people" criteria, you should consider a commercial license (see below) if you wish to avoid this source code disclosure requirement.
-
-Read and understand all AGPLv3 terms thoroughly before use.
-
-## 2. Commercial License — For organizations with >10 people or users wishing to avoid AGPLv3 obligations
-
-- **Mandatory requirement**: If your organization does not meet the "≤10 people" definition (i.e., 11+ people access/use/benefit from the software), you must enter a commercial license agreement with us before using `dsh-nonead-universal-robots`.
-- **Optional application**: Even if your organization meets the "≤10 people" criteria, a commercial license is required if your usage scenario does not comply with AGPLv3 terms (especially source code disclosure requirements) or if you need specific commercial provisions (such as warranties, indemnification, or absence of Copyleft restrictions) not offered under AGPLv3.
-
-Common cases requiring a commercial license (non-exhaustive):
-- Organizations with >10 people.
-- (Regardless of size) Distributing modified versions of `dsh-nonead-universal-robots` without disclosing source code as required by AGPLv3.
-- (Regardless of size) Offering `dsh-nonead-universal-robots` as a network service (SaaS) without providing users access to modified source code.
-- (Regardless of size) When company policies, customer contracts, or project requirements prohibit use of AGPLv3-licensed software or require closed distribution/confidentiality.
-
-**Obtaining a commercial license**: Contact the `dsh-nonead-universal-robots` development team at [service@nonead.com](mailto:service@nonead.com).
-
-## 3. Contributions
-
-We welcome community contributions to `dsh-nonead-universal-robots`. All contributions to the project are considered made under the AGPLv3 license.
-
-By submitting a contribution (e.g., a Pull Request), you agree that your code will be made available to the project and all future users (regardless of whether they choose AGPLv3 or a commercial license) under AGPLv3 terms.
-
-You also agree that your contribution may be included in versions of `dsh-nonead-universal-robots` distributed under a commercial license.
-
-## 4. Other Terms
-
-- Specific commercial license terms are established in the formal commercial license agreement.
-- Project maintainers reserve the right to update this license policy (including user size definitions and thresholds) as needed. Any updates will be announced via the project's official channels (code repository, website, etc.).
-
----
-
 # 许可协议 / License Agreement
 
 本项目（`dsh-nonead-universal-robots`）采用区分用户的双重许可 (User-Segmented Dual Licensing) 模式。
@@ -96,5 +47,55 @@ You also agree that your contribution may be included in versions of `dsh-nonead
 
 ---
 
+# License Agreement
+
+This project (`dsh-nonead-universal-robots`) adopts a **User-Segmented Dual Licensing** model.
+
+## Basic Principles
+
+- **Individual users** and **organizations/companies with ≤10 people**: AGPLv3 license applies automatically.
+- **Organizations/companies with >10 people**: **Commercial license** required.
+
+### Definition of "≤10 people":
+
+This refers to situations where the total number of individuals in your organization (including companies, non-profits, government agencies, educational institutions, etc.) who directly or indirectly access, use, or benefit from `dsh-nonead-universal-robots` does not exceed 10. This includes but is not limited to developers, testers, operators, end-users, and users through integrated systems.
+
+## 1. Open Source License (AGPLv3) — For individuals and organizations with ≤10 people
+
+If you are an individual user or your organization meets the "≤10 people" definition, you may freely use, modify, and redistribute `dsh-nonead-universal-robots` under AGPLv3 terms. The full AGPLv3 license can be found at [https://www.gnu.org/licenses/agpl-3.0.html](https://www.gnu.org/licenses/agpl-3.0.html).
+
+> **Key obligations**: As a core requirement of AGPLv3, you must provide recipients with complete source code under AGPLv3 if you distribute modified versions of `dsh-nonead-universal-robots` or offer it as a network service. Even if your organization meets the "≤10 people" criteria, you should consider a commercial license (see below) if you wish to avoid this source code disclosure requirement.
+
+Read and understand all AGPLv3 terms thoroughly before use.
+
+## 2. Commercial License — For organizations with >10 people or users wishing to avoid AGPLv3 obligations
+
+- **Mandatory requirement**: If your organization does not meet the "≤10 people" definition (i.e., 11+ people access/use/benefit from the software), you must enter a commercial license agreement with us before using `dsh-nonead-universal-robots`.
+- **Optional application**: Even if your organization meets the "≤10 people" criteria, a commercial license is required if your usage scenario does not comply with AGPLv3 terms (especially source code disclosure requirements) or if you need specific commercial provisions (such as warranties, indemnification, or absence of Copyleft restrictions) not offered under AGPLv3.
+
+Common cases requiring a commercial license (non-exhaustive):
+- Organizations with >10 people.
+- (Regardless of size) Distributing modified versions of `dsh-nonead-universal-robots` without disclosing source code as required by AGPLv3.
+- (Regardless of size) Offering `dsh-nonead-universal-robots` as a network service (SaaS) without providing users access to modified source code.
+- (Regardless of size) When company policies, customer contracts, or project requirements prohibit use of AGPLv3-licensed software or require closed distribution/confidentiality.
+
+**Obtaining a commercial license**: Contact the `dsh-nonead-universal-robots` development team at [service@nonead.com](mailto:service@nonead.com).
+
+## 3. Contributions
+
+We welcome community contributions to `dsh-nonead-universal-robots`. All contributions to the project are considered made under the AGPLv3 license.
+
+By submitting a contribution (e.g., a Pull Request), you agree that your code will be made available to the project and all future users (regardless of whether they choose AGPLv3 or a commercial license) under AGPLv3 terms.
+
+You also agree that your contribution may be included in versions of `dsh-nonead-universal-robots` distributed under a commercial license.
+
+## 4. Other Terms
+
+- Specific commercial license terms are established in the formal commercial license agreement.
+- Project maintainers reserve the right to update this license policy (including user size definitions and thresholds) as needed. Any updates will be announced via the project's official channels (code repository, website, etc.).
+
+---
+
 ## Third-party notice
+
 `python/URBasic` is vendored from the URBasic library and **remains under its own MIT License** (© Anthony Zhuang / Universal Robots, 2009-2025). It is **not** covered by the AGPLv3 / commercial dual license above. See its per-file headers under `python/URBasic/`.

@@ -1,5 +1,8 @@
 # DSH plugin runtime artifacts
 python/ur_worker.log
+# 日志限幅会把写满的日志滚成 ur_worker.log.1 —— `*.log` 不匹配带后缀的滚动档，必须单独盖住，
+# 否则每个会话都会留一个 8 MB 的未跟踪文件（还有被 git add 误提交的风险）。
+python/ur_worker.log.*
 __pycache__/
 *.py[cod]
 *.log
@@ -13,3 +16,23 @@ Release/
 # editor / os
 .DS_Store
 Thumbs.db
+
+# SDD / superpowers scratch
+.superpowers/
+
+# pnpm project-local content-addressable store (created by `pnpm add`)
+.pnpm-store/
+
+# pnpm must never run inside this workspace member: the outer repo is a Yarn
+# workspace, and the topology gate (`verify-layout`) rejects a pnpm lock/workspace
+# file on disk. Ignoring them here keeps an accidental `pnpm install` from being
+# committed; the gate still fails loudly until they are removed.
+pnpm-lock.yaml
+pnpm-workspace.yaml
+
+# DSH local project memory store (agent indexing scratch)
+.dsh-project-memory/
+
+# UR 官方手册 PDF（约 3.8 MB）仅供本机离线查阅，不作为仓库内容分发。
+# 需要时按型号/版本从 UR 支持站点下载：https://www.universal-robots.com/download/
+ScriptManual/

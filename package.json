@@ -1,16 +1,18 @@
 {
   "name": "dsh-nonead-universal-robots",
-  "version": "0.3.8",
+  "version": "0.5.0",
   "description": "一个让 DSH 用自然语言直接控制 Universal Robots（UR）机械臂的插件，由拓德科技（Nonead）基于自研的 nUR MCP Server 同源逻辑开发。",
   "type": "module",
   "main": "lib/index.js",
   "readme": "README.md",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "assets",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
@@ -21,17 +23,26 @@
     "python/__init__.py",
     "python/ur_worker.py",
     "python/URBasic/**/*.py",
+    "python/URBasic/rtdeConfiguration.xml",
     "python/URBasic/rtdeConfigurationDefault.xml"
   ],
   "scripts": {
     "prepublishOnly": "node --check lib/index.js && node --check lib/worker.js",
     "check": "node --check lib/index.js && node --check lib/worker.js && node -e \"JSON.parse(require('fs').readFileSync('package.json','utf8'))\"",
-    "test": "node test/selftest.mjs",
-    "test:python": "python python/ur_worker.py --selfcheck"
+    "test": "node scripts/run-tests.mjs",
+    "test:node": "node scripts/run-tests.mjs --skip-python",
+    "test:python": "python python/ur_worker.py --selfcheck",
+    "build:client": "node scripts/build-client.mjs",
+    "verify:models": "python scripts/verify-models.py",
+    "verify:host": "node scripts/check-host-compat.mjs"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
     }
   },
   "keywords": [
@@ -67,12 +78,16 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": "^0.1.2-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1",
     "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh": "^0.1.2-rc.1 || ^0.1.7-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1 || ^0.1.7-rc.2",
     "@deepseek-ai/schemastery": "^3.18.2"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "three": "^0.180.0"
   }
 }

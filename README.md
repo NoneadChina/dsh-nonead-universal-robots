@@ -6,29 +6,47 @@ This plugin shares the same ancestry as the company's `Nonead-Universal-Robots-M
 
 > ⚠️ **Safety notice**: this plugin drives a real robotic arm directly. Always keep the robot in sight, keep the emergency stop within reach, and keep the workspace clear of people/obstacles. Treat it with the same care as granting the `bash` tool. You (or the model) bear full responsibility for any motion command.
 
-> 🛡️ **Motion approval gate**: commands that physically move the arm or run a program — `ur_movej` / `ur_movel` / `ur_move_x|y|z` / `ur_draw_*` / `ur_load_program` / `ur_run_program` / `ur_send_script` / `ur_reset_error` — **pause and wait for human confirmation** before being sent to the robot. In an interactive deployment (approval policy `ask`) a confirmation dialog is shown in the UI; a call made without an approval service or without an agent **fails closed** (the command is rejected) and never moves without approval. Set `requireApprovalForMotion: false` to disable this gate.
+> 🛡️ **Motion approval gate**: commands that physically move the arm, run a program, **take the arm out of program control, or remove its rigidity** — `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_x|y|z` / `ur_move_tool_x|y|z` / `ur_draw_*` / `ur_load_program` / `ur_run_program` / `ur_send_script` / `ur_reset_error`, plus (0.5.0) `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` / `ur_zero_ftsensor` / `ur_set_conveyor_tracking` — **pause and wait for human confirmation** before being sent to the robot. In an interactive deployment (approval policy `ask`) a confirmation dialog is shown in the UI; a call made without an approval service or without an agent **fails closed** (the command is rejected) and never moves without approval. Set `requireApprovalForMotion: false` to disable this gate.
 
 ---
 
 ## Feature overview
 
+**67** tools (`ur_*`) in total.
+
 | Category | Tool(s) (`ur_*`) | Description |
 |---|---|---|
 | Connection | `ur_connect` / `ur_disconnect` | Connect / disconnect a UR robot by IP |
-| Status | `ur_get_status` | One-shot read of TCP, joints, model, serial, version, safety mode, run/program state, voltage, current, temperatures, uptime |
+| Status | `ur_get_status` | One-shot read of TCP, joints, model, serial, version, safety mode, run/program state, voltage, current, temperatures, uptime, joint currents/voltages/speeds, TCP speed and wrench, speed scaling |
 | Pose | `ur_get_tcp_pose` / `ur_get_joint_pose` | Read current TCP pose / joint angles |
-| Device info | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_robot_mode` | Model (with `remote_control` field) / serial / uptime / software version / safety mode / run state |
-| Programs | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` | Program state, load, run, stop, pause, SSH listing (`list_programs` works with the real robot's `/programs` and URSim `~/URSim_Linux-*/programs.*`; `load/run` accept full/URSim paths and `programs_dir`) |
+| Device info | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_safety_status` / `ur_get_robot_mode` | Model (with `remote_control` field) / serial / uptime / software version / safety mode / **safety and robot status bits** (which safety function fired, incl. violation / fault; numeric limits must be read from PolyScope's Safety page) / run state |
+| Programs | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` | Program state, load, run, stop, pause, SSH listing (`list_programs` works with the real robot's `/programs` and URSim `~/URSim_Linux-*/programs.*`; `load/run` accept full/URSim paths and `programs_dir`). **Run/stop/pause now check the controller's reply and report the run state**, instead of treating "could not understand" as success |
 | Registers | `ur_get_int_register` / `ur_get_double_register` / `ur_get_bit_register` | Read Int / Double / Bool registers |
 | Health | `ur_ping` | Check worker/Python/URBasic readiness without a robot |
-| I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` | Digital in/out (incl. **bit-mask reads**, plus `which="tool"` for the tool-flange digital I/O), standard analog in/out |
-| Tool config | `ur_set_tool_voltage` / `ur_set_tcp` / `ur_set_payload` | Tool voltage, TCP, payload mass/center of gravity |
-| Conveyor | `ur_get_conveyor` / `ur_set_conveyor_tick` | Conveyor tick read / set |
-| Motion | `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_x` / `ur_move_y` / `ur_move_z` | Joint-space / linear / path / circular / continuous servo / axis-aligned motion |
-| Drawing | `ur_draw_circle` / `ur_draw_square` / `ur_draw_rectangle` / `ur_draw_star` | Draw a circle / square / rectangle / pentagram (incl. URSim paths) |
-| Script / emergency | `ur_send_script` / `ur_reset_error` | Send URScript / reset errors |
+| I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` / `ur_get_tool_analog_in` | Digital in/out (incl. **bit-mask reads**, plus `which="tool"` for the tool-flange digital I/O), standard analog in/out (**in engineering units**: URScript's `set_analog_out` takes a relative level [0,1], and the old code sent 5 as full scale; `full_scale` may be 20 for a current-domain port), tool analog in (function name confirmed against the bundled official manuals; argument semantics not verified on hardware) |
+| Tool config | `ur_set_tool_voltage` / `ur_set_tcp` / `ur_set_payload` / `ur_set_gravity` / `ur_zero_ftsensor` | Tool voltage (**0/12/24 — the old implementation called a `NotImplementedError` stub and had never once succeeded**), TCP, payload mass/centre of gravity, gravity direction (for non-horizontal mounting), force/torque sensor zeroing |
+| Control mode / power / safety | `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` | Freedrive / teach mode (move the arm by hand), power on / off / **brake release** (⚠️ the arm may fall under gravity), **protective-stop unlock only** (no power-on, no brake release — that is what distinguishes it from `ur_reset_error`), controller shutdown |
+| Live telemetry | `ur_get_runtime_telemetry` / `ur_get_speed_scaling` / `ur_get_tcp_force` | Joint currents/voltages/speeds, TCP speed and wrench, tool accelerometer, speed scaling, robot voltage/current, joint temperatures. **These fields are already in the 500 Hz RTDE stream**, so reading them is free and needs no reconfiguration |
+| Conveyor | `ur_get_conveyor` / `ur_set_conveyor_tick` / `ur_set_conveyor_tracking` | Conveyor tick read / set, and **starting/stopping linear or circular tracking** |
+| Motion | `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_x` / `ur_move_y` / `ur_move_z` / `ur_move_tool_x` / `ur_move_tool_y` / `ur_move_tool_z` | Joint-space / linear / path / **genuine circular motion** (the old implementation hardcoded `movetype='p'` internally, so it actually sent `movep` and discarded the via point) / continuous servo / axis-aligned motion — the `_move_*` tools move along **base** axes, the `_move_tool_*` ones along the **current tool** axes (converted in the worker with a rotation matrix, so it does not depend on URScript `pose_trans`) |
+| Drawing | `ur_draw_circle` / `ur_draw_square` / `ur_draw_rectangle` / `ur_draw_star` | Draw a circle / square / rectangle / pentagram. **"Completed" is only reported after the script was actually observed running** — the old code probed immediately after sending, inevitably saw "not running", and reported success whether or not the script ever executed |
+| Script / emergency | `ur_send_script` / `ur_reset_error` | Send URScript (**execution-verified**: sentinels are injected *inside the function body* / between top-level statements and read back, so "sent" never masquerades as "ran"; with several functions and no visible call site it refuses to verify and returns `verified: null`) / reset errors |
 
 Every tool except `connect` takes an `ip` argument and requires that IP to be **connected first**.
+
+### Read-only 3D digital twin
+
+The plugin also ships a **read-only 3D digital twin** of the robot, rendered with three.js: the entry is a card in the **right sidebar's Start panel**, directly below the "Workspace files / New terminal / Browser" cards, and selecting it fills the right sidebar's content area with the live 3D view. The view polls a single state source, so it stays in sync with the live robot's **joint poses, tool (TCP) coordinate frame and recent motion trajectory**. The twin is **strictly read-only — it never sends a command to the robot**: it only polls the host's read-only routes and renders what it receives.
+
+Host-side routes (all fenced to loopback callers):
+
+| Route | Description |
+|---|---|
+| `GET /dsh-nonead-ur/twin/state[?ip=<ip>][&detail=1]` | Live pose (joint angles / TCP / model). `detail=1` adds the dashboard-side state (safety mode, run state, speed scaling, joint temperatures/currents); the pose channel keeps polling independently and a failing detail query never takes it down |
+| `GET /dsh-nonead-ur/twin/asset?model=<urXX>` | GLB mesh, with a content-hash `ETag` + `immutable` and `If-None-Match` → 304 support |
+| `GET /dsh-nonead-ur/twin/models` | The model list actually present locally |
+
+Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_connected` / `ambiguous_robot` / `worker_unavailable` / `robot_error`) and echo the resolved `ip`, so the UI can say which of four very different failures happened (it used to render one "not connected" line for all of them).
 
 ---
 
@@ -42,7 +60,7 @@ Every tool except `connect` takes an `ip` argument and requires that IP to be **
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.3.8"
+       "dsh-nonead-universal-robots": "^0.4.0"
      },
      "dsh": {
        "profile": {
@@ -86,6 +104,17 @@ pip install -r requirements.txt
 
 `pythonBin` (default `python`), `commandTimeoutMs` (motion/script timeout, default `60000`), and `connectTimeoutMs` (first-connect timeout, default `30000`) in `cordis.patch.yml` can all be overridden per deployment. If `python` is not on PATH, use an absolute path, e.g. `"C:\\Python312\\python.exe"` or `"/usr/bin/python3"`.
 
+> ⚠️ **The dependencies must be installed for the interpreter the worker actually uses (a real trap)**
+> `lib/worker.js` points `PYTHONPATH` at the plugin's `python/` directory, and CPython imports
+> `sitecustomize.py` from there at startup if it exists. This repository once carried a
+> **machine-local** `python/sitecustomize.py` that hardcoded a user-level `site-packages` path into
+> `sys.path` — so it worked on that one machine, while on any other machine, or from a published
+> install (the file is **not** in the `files` list), `import numpy` fails outright and every tool call
+> dies. The correct setup is to **install the dependencies for the interpreter `pythonBin` points at**
+> (or point it at a venv). `ur_ping` / `npm run test:python` is the self-check for that chain, and
+> `npm run verify:host` validates tool registration through the host's real schema DSL (it should
+> report 67/67).
+
 ---
 
 ## Health check / testing
@@ -94,14 +123,30 @@ Verify the plugin and Python runtime without touching a real robot:
 
 ```sh
 npm run test:python   # python ur_worker.py --selfcheck: verify Python/numpy/paramiko/URBasic/RTDE config
-npm test              # start a real worker, run ping + an invalid op (verify the stdio protocol & process mgmt)
+npm test              # run all 21 test files (e2e protocol self-check, twin routes, client state machine, vendored-library regressions)
+npm run test:node     # Node-side tests only (skips the ones that need Python)
+npm run verify:host   # validate every tool schema through the host's real value-schema DSL, plus peer ranges
+npm run verify:models # validate the structural contract of the 14 GLBs
 ```
 
-`npm test` prints `selftest passed.` or exits non-zero. If `python` is not on PATH, set it via the environment:
+`npm test` prints a per-file summary and exits non-zero if anything failed. If `python` is not on PATH, set it via the environment:
 
 ```sh
 UR_PYTHON=C:\\Python312\\python.exe npm test
 ```
+
+> Before 0.5.0 `npm test` ran **one worker ping** and none of the other 20-plus `*.test.mjs` files —
+> so a green `npm test` said nothing about the plugin. `scripts/run-tests.mjs` now enumerates and runs
+> them all and summarises the result.
+
+Run the **host compatibility check** before a release and whenever the DSH runtime is upgraded — it validates the plugin against an installed host instead of a copy of its keyword list:
+
+```sh
+npm run verify:host                                # auto-discovers a real DSH installation
+node scripts/check-host-compat.mjs <node_modules>  # or an explicit host
+```
+
+It checks the peer ranges against the installed versions, compiles **every** tool parameter schema with the host's real value-schema DSL (a rejected schema silently drops that tool), drives the host route registration, and validates the `dsh.client` declaration plus the client bundle's `__ModuleLoader__` id. Exit code `0` means this plugin works with that host. Against DSH 0.1.7-rc.2 it reports **67/67 tools registered**.
 
 > The first `ur_connect` to a robot has an ~20s RTDE readiness wait; on timeout it returns a clear error rather than hanging.
 
@@ -163,11 +208,29 @@ This plugin shares the same ancestry as Nonead's [`Nonead-Universal-Robots-MCP`]
 ## Notes / limitations
 
 - **Connection persistence** — the worker process lives for the plugin's lifetime and keeps robot connections by IP; after a worker crash or a DSH restart you must `connect` again.
-- **Remote control mode** — some UR robots must be in "remote control" to execute motion/program commands; `ur_connect` reports that state.
+- **Remote control mode** — some UR robots must be in "remote control" before they execute motion/program commands, and `ur_connect` reports that state. **CB3 robots running URSoftware 3.1 through 3.20 already allow remote control by default (nothing to enable at the settings level)**; a `remote_control: false` reading still means the controller is *currently* not in remote mode — in local/teach-pendant mode URScript and motion commands are silently discarded, so switch the pendant to remote control. Other firmware (e-Series, or CB3 outside that range) needs Remote Control enabled in PolyScope first. `ur_status` also reports `remote_control_raw`, and an unreadable state is reported as unknown rather than pretended to be `false`.
 - **Tool digital I/O** — `ur_get_digital_in` / `ur_set_digital_out` with `which="tool"` control the tool-flange digital I/O. Tool digital signals are **not carried by RTDE**, so reading a tool input runs a short URScript program (via `SendProgram`) that may **interrupt a running program**; writing a tool output sends the URScript `write_tool_digital_out` command. Tool digital **output read-back is not supported** (no reliable `read_tool_digital_out` expression).
 - **Joint current** — the current RTDE recipe does not expose per-joint current directly, so `ur_get_joint_current` is not provided (the reference implementation's version of this tool has a value bug; this implementation does not carry it over).
 - **Threading / cancel** — motion commands poll until arrival within `commandTimeoutMs`; for long trajectories, remind the model in the prompt to set a reasonable timeout or split the motion into steps.
 - **Not a safety boundary** — this plugin is on par with the `bash` tool and can drive physical equipment; test thoroughly on a real robot before production use.
+- **Package size** — the published package is about **35 MB**, almost entirely the **14 `assets/models/*.glb`** meshes; the plugin's own code adds only a few hundred KB. If size matters for your deployment, regenerate a subset with `python scripts/convert-meshes.py --only <model…>`.
+- **Unknown models fall back** — a robot whose model has no bundled mesh (unknown or customized model string) is rendered with **approximate geometry instead of failing**; the twin never errors out on an unknown model.
+- **Asset pipeline** — the meshes are generated by `python scripts/convert-meshes.py` and their structure contract (7 named nodes per GLB, embedded textures) is validated by `python scripts/verify-models.py` (also exposed as `npm run verify:models`).
+
+---
+
+## Third-party assets & licensing
+
+Beyond its own code, this package distributes 14 robot meshes under `assets/models/*.glb` (≈35 MB) plus `assets/kinematics.json`, all derived from Universal Robots' [`Universal_Robots_ROS2_Description`](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description) (branch `humble`, fetched 2026-09-21).
+
+Two licence regimes apply, split by model, and they are never mixed within a model:
+
+- **BSD-3-Clause** (9 models): `ur3`, `ur5`, `ur10`, `ur3e`, `ur5e`, `ur7e`, `ur10e`, `ur12e`, `ur16e` — this covers the meshes and the kinematic / joint-limit configuration that `assets/kinematics.json` is derived from.
+- **UR "Graphical Documentation" terms** (5 models): `ur8long`, `ur15`, `ur18`, `ur20`, `ur30`. These meshes are **not** BSD-3-Clause; they are UR "Graphical Documentation" and their use is governed by UR's *Terms and Conditions for use of Graphical Documentation*, which is not an OSI open-source licence but does allow use, modification and sharing under certain restrictions. Questions: <legal@universal-robots.com>.
+
+The client-side 3D renderer builds on [three.js](https://threejs.org/) (MIT); [esbuild](https://esbuild.github.io/) (MIT) is used only at build time.
+
+See [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) for the per-model derivation list, the conversion parameters and the licence texts.
 
 ---
 
@@ -180,4 +243,4 @@ This project adopts a **User-Segmented Dual Licensing** model:
 
 See [LICENSE](./LICENSE) for the full agreement. For a commercial license, contact [service@nonead.com](mailto:service@nonead.com).
 
-`python/URBasic` (vendored) remains under its own **MIT License** (© Universal Robots, 2009-2025).
+`python/URBasic` (vendored) remains under its own **MIT License** (© Anthony Zhuang / Universal Robots, 2009-2025).
