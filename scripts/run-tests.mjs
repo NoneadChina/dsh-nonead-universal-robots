@@ -17,7 +17,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,24 +25,48 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const testDir = join(root, 'test');
 const skipPython = process.argv.includes('--skip-python');
 
-/** 需要 Python 解释器的用例：环境没装 Python 时给出可跳过的明确说明。 */
-const PYTHON_DEPENDENT = new Set([
-  'connect-timeout.test.mjs',
-  'remote-control.test.mjs',
-  'rtde-config.test.mjs',
-  'safety-status.test.mjs',
-  'send-script-verify.test.mjs',
-  'tool-frame-moves.test.mjs',
-  'vendored-fixes.test.mjs',
-  'worker-log.test.mjs',
-  'worker.test.mjs',
-  'tool-schema-dsl.test.mjs',
-]);
+/**
+ * 需要「可用的 Python」的用例。
+ *
+ * ⚠️ 这份名单必须与实际 spawn Python 的文件一致，否则 `--skip-python` 会一边宣称
+ * "跳过需要 Python 的用例"、一边把漏掉的那个跑起来并以 exit 1 收场（`test/selftest.test.mjs`
+ * 就这样让 `npm run test:node` 长期不可能通过）。
+ *
+ * 唯一来源是 `test/test-manifest.json`；`scripts/check-test-manifest.mjs` 会扫描 `test/**`
+ * 里真实的 Python 调用并与它对账，所以"漏登记"会变成一次失败的自检而不是一次误报的失败。
+ */
+const manifest = JSON.parse(readFileSync(join(testDir, 'test-manifest.json'), 'utf8'));
+const PYTHON_DEPENDENT = new Set(manifest.pythonDependent);
 
+/**
+ * 解释器可用吗？**必须验证 worker 真正需要的依赖**，而不是"Python 能启动"。
+ *
+ * 旧探针只跑 `python -c print(1)`：在一个没有 numpy 的解释器上它会成功，于是这些用例被
+ * **执行**（而不是跳过）并以失败收场，`npm test` 的结论就变成了"插件坏了"——实际只是环境
+ * 没装依赖。`ur_worker.py` 顶层就 `import numpy`，所以这里以"能否 import numpy"为准；
+ * paramiko 只有 list_programs 用得到，缺失时给一条提示但仍视为可用。
+ */
 function probePython() {
-  const bin = process.env.PYTHON ?? 'python';
-  const r = spawnSync(bin, ['-c', 'print(1)'], { encoding: 'utf8' });
-  return r.status === 0;
+  // `UR_PYTHON` 在前：README 与 test/selftest.test.mjs 一直是这样约定的
+  // （`UR_PYTHON || PYTHON || 'python'`）。
+  const bin = process.env.UR_PYTHON ?? process.env.PYTHON ?? 'python';
+  const probe = 'import numpy; print("ok")';
+  const r = spawnSync(bin, ['-c', probe], { encoding: 'utf8' });
+  if (r.status !== 0) {
+    const why = (r.stderr ?? '').trim().split('\n').pop() ?? '';
+    console.log(
+      `note  ${bin} 不能 import numpy${why ? `（${why}）` : ''}：跳过需要 Python 的用例。` +
+        '\n      这是环境问题，不是插件缺陷。装依赖或指定解释器：' +
+        '\n        pip install -r requirements.txt' +
+        '\n        UR_PYTHON=C:\\Python312\\python.exe npm test',
+    );
+    return false;
+  }
+  const p = spawnSync(bin, ['-c', 'import paramiko'], { encoding: 'utf8' });
+  if (p.status !== 0) {
+    console.log(`note  ${bin} 没有 paramiko：ur_list_programs 的 SSH 用例会失败（其余用例不受影响）`);
+  }
+  return true;
 }
 
 const files = readdirSync(testDir)
@@ -82,14 +106,57 @@ for (const file of files) {
 const failed = results.filter((r) => r.status === 'fail');
 const skipped = results.filter((r) => r.status === 'skipped');
 
+/*
+ * `npm test` 也必须跑**静态与跨语言门禁**，否则它们只是"仓库里放着、从没人跑"的脚本 ——
+ * 审计发现过好几条只有脚本、没有接入的症状（未跟踪的配方、落后的 bundle、门禁无行为测试）。
+ * Python 依赖的门禁在解释器不可用时跳过，并说明这是环境问题。
+ */
+const CHECKS = [
+  { name: 'node scripts/check-test-manifest.mjs', bin: process.execPath, args: ['scripts/check-test-manifest.mjs'] },
+  { name: 'node scripts/check-package-metadata.mjs', bin: process.execPath, args: ['scripts/check-package-metadata.mjs'] },
+  { name: 'node scripts/check-client-bundle.mjs', bin: process.execPath, args: ['scripts/check-client-bundle.mjs'] },
+  { name: 'node scripts/check-doc-tools.mjs', bin: process.execPath, args: ['scripts/check-doc-tools.mjs'] },
+  { name: 'python scripts/check-worker-ops.py', needsPython: true },
+  { name: 'python scripts/check-tool-params.py', needsPython: true },
+  { name: 'python scripts/check-rtde-recipe.py', needsPython: true },
+  { name: 'python scripts/check-approval-gate.py', needsPython: true },
+  // Needs numpy/paramiko (it imports the worker), unlike the four static gates above.
+  { name: 'python scripts/check-new-ops.py', needsPython: true, needsDeps: true },
+];
+
+const pythonBin = process.env.UR_PYTHON ?? process.env.PYTHON ?? 'python';
+for (const check of CHECKS) {
+  const label = check.name;
+  if (check.needsPython && skipPython) {
+    results.push({ file: label, status: 'skipped', detail: '--skip-python' });
+    continue;
+  }
+  if (check.needsPython && !hasPython) {
+    results.push({ file: label, status: 'skipped', detail: '环境无可用依赖（numpy/paramiko），非插件缺陷' });
+    continue;
+  }
+  process.stdout.write(`\n── ${label} ──\n`);
+  const r = check.needsPython
+    ? spawnSync(pythonBin, [check.name.split(' ')[1]], { stdio: 'inherit', env: process.env })
+    : spawnSync(check.bin, check.args, { stdio: 'inherit', env: process.env });
+  results.push({
+    file: label,
+    status: r.status === 0 ? 'pass' : 'fail',
+    detail: r.status === 0 ? '' : `exit ${r.status}`,
+  });
+}
+
+const failedAll = results.filter((r) => r.status === 'fail');
+const skippedAll = results.filter((r) => r.status === 'skipped');
+
 console.log('\n================ 汇总 ================');
 for (const r of results) {
   const mark = r.status === 'pass' ? 'PASS' : r.status === 'skipped' ? 'SKIP' : 'FAIL';
   console.log(`${mark}  ${r.file}${r.detail ? ` — ${r.detail}` : ''}`);
 }
 console.log(
-  `\n共 ${results.length} 个测试文件：通过 ${results.length - failed.length - skipped.length}，` +
-    `失败 ${failed.length}，跳过 ${skipped.length}`,
+  `\n共 ${results.length} 项（测试文件 + 门禁）：通过 ${results.length - failedAll.length - skippedAll.length}，` +
+    `失败 ${failedAll.length}，跳过 ${skippedAll.length}`,
 );
 
-process.exit(failed.length === 0 ? 0 : 1);
+process.exit(failedAll.length === 0 ? 0 : 1);

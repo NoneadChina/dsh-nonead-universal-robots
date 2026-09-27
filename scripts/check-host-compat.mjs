@@ -31,8 +31,8 @@ const PEER_PACKAGES = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/schemastery',
 ]
-/** 工具表当前规模（当前的 67 个）；注册数少于它即为「静默丢工具」。 */
-const EXPECTED_TOOLS = 67
+/** 工具表当前规模（当前的 83 个）；注册数少于它即为「静默丢工具」。 */
+const EXPECTED_TOOLS = 83
 const TWIN_ROUTE_COUNT = 3
 
 const failures = []

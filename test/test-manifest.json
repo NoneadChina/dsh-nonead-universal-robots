@@ -1,0 +1,30 @@
+{
+  "comment": "测试文件清单与依赖声明。run-tests.mjs 读取它来决定哪些用例在没有可用 Python 时跳过；scripts/check-test-manifest.mjs 会扫描 test/** 里真实的 Python 调用并与这份清单对账，所以「漏登记某个需要 Python 的用例」会变成一次失败的自检，而不是一次莫名其妙的 exit 1。",
+  "pythonDependent": [
+    "connect-timeout.test.mjs",
+    "readback-fixes.test.mjs",
+    "remote-control.test.mjs",
+    "safety-status.test.mjs",
+    "selftest.test.mjs",
+    "send-script-verify.test.mjs",
+    "tool-frame-moves.test.mjs",
+    "vendored-fixes.test.mjs",
+    "worker-log.test.mjs",
+    "worker.test.mjs",
+    "tool-schema-dsl.test.mjs"
+  ],
+  "nodeOnly": [
+    "approval-gate.test.mjs",
+    "fk.test.mjs",
+    "interpolate.test.mjs",
+    "loader.test.mjs",
+    "model-contract.test.mjs",
+    "right-dock-entry.test.mjs",
+    "rtde-config.test.mjs",
+    "scene-alignment.test.mjs",
+    "state.test.mjs",
+    "trajectory.test.mjs",
+    "twin-panel.test.mjs",
+    "twin-routes.test.mjs"
+  ]
+}

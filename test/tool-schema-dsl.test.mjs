@@ -28,8 +28,9 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
-/** 工具表规模（0.5.0：53 → 67）。改动工具表时**必须**同步这个数与 check-host-compat.mjs。 */
-const EXPECTED_TOOLS = 67
+/** 工具表规模（0.5.0：53 → 67；0.6.0 按三本官方手册补齐后：67 → 83）。
+ *  改动工具表时**必须**同步这个数与 check-host-compat.mjs。 */
+const EXPECTED_TOOLS = 83
 const pythonDir = fileURLToPath(new URL('../python/', import.meta.url))
 const workerSource = readFileSync(join(pythonDir, 'ur_worker.py'), 'utf8').replace(/\r\n/g, '\n')
 const indexSource = readFileSync(fileURLToPath(new URL('../lib/index.js', import.meta.url)), 'utf8')
