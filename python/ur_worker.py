@@ -991,11 +991,51 @@ def _read_status_word(model, field):
     vendored `RobotModel` 只提供解码成布尔标志的 `SafetyStatus()` / `RobotStatus()`，没有"原始值"
     访问器；而原始值本身有诊断价值（未列出的位也要能看到），所以这里直接读 `dataDir`。
     """
+    value = _rtde_field(model, field)
     try:
-        value = model.dataDir[field]
         return None if value is None else int(value)
     except Exception:
         return None
+
+
+def _rtde_field(model, name):
+    """读一个 RTDE 接收字段的**原始**值（字段缺失 / 尚未更新时返回 None）。
+
+    为什么不走 URBasic 的访问器：工具遥测与工具模拟输入那一批
+    （`ToolOutputCurrent` / `ToolOutputVoltage` / `IoCurrent` / `ToolAnalogInput0/1`）
+    在 vendored `robotModel.py` 里全是 `NotImplementedError` **桩** —— 桩只会抛异常，
+    调用方于是拿到 None（表现为"全 null"，看起来像控制器没数据，其实是代码里根本没有读）。
+    这里直接读 `dataDir`，并且**原样返回**（不做单位换算）。
+    """
+    try:
+        getattr(model, "dataDir")
+    except Exception:
+        return None
+    try:
+        return model.dataDir[name]
+    except Exception:
+        return None
+
+
+def _wait_robot_power(ip, want_on, timeout=8.0):
+    """等 RTDE `robot_status_bits` 的 PowerOn 位到达期望状态。
+
+    Returns: (reached, last_bits)。model 不存在（未连接）时返回 (None, None)。
+
+    为什么用它判断下电：`power off` 生效的瞬间控制器就停止应答 dashboard（它正在断电），
+    所以"命令有没有生效"不能问 dashboard，只能看控制器自己的状态位。
+    """
+    model = ROBOT_MODELS.get(ip)
+    if model is None:
+        return None, None
+    deadline = time.time() + timeout
+    bits = None
+    while time.time() < deadline:
+        bits = _read_status_word(model, "robot_status_bits")
+        if bits is not None and bool(bits & 1) == bool(want_on):
+            return True, bits
+        time.sleep(0.2)
+    return False, bits
 
 
 def _status_bit_names(raw, table):
@@ -1198,12 +1238,25 @@ def op_list_programs(p):
 # 代价：该 int 输出寄存器的旧值会被覆盖（默认取最后一个 23，可用 register 参数改）。
 DEFAULT_SENTINEL_REGISTER = 23
 SEND_SCRIPT_VERIFY_TIMEOUT_S = 2.0
+# 脚本类运动（draw_* 等）"到底有没有被执行"的探测窗：足够短到能立刻给出结论。
+SCRIPT_START_CHECK_TIMEOUT_S = 1.5
 
 
 def _read_int_register(model, index):
-    """回读 int 输出寄存器；读不到（未连接 / 该字段不在接收配方里）返回 None。"""
+    """回读 int 输出寄存器；读不到返回 None。
+
+    先用 URBasic 的访问器，访问器缺失（或它自己抛异常）时回落到原始 RTDE 字段 —— 两条路
+    都读不到才算"读不到"，避免把一个可用的字段因为访问器不存在而误判为不可用。
+    """
+    value = None
+    if model is not None:
+        try:
+            value = model.OutputIntRegister(index)
+        except Exception:
+            value = None
+    if value is None:
+        value = _rtde_field(model, "output_int_register_%d" % index)
     try:
-        value = model.OutputIntRegister(index)
         return None if value is None else int(value)
     except Exception:
         return None
@@ -1406,8 +1459,10 @@ def op_send_script(p):
 def op_movej(p):
     ip = str(p["ip"])
     q = _vec(p, "q", 6, "movej 的 q")
-    a = _nonneg_float(p.get("a", 1), "a", "movej 的加速度", allow_zero=False)
-    v = _nonneg_float(p.get("v", 1), "v", "movej 的速度", allow_zero=False)
+    # 默认值取自手册：Poly5 15.29 / PolyScope X 15.28 的 `movej(q, a=1.4, v=1.05, t=0, r=0)`
+    # （旧代码给的是 a=1/v=1，既不是手册默认值、也不是 URBasic 的默认值，纯粹是随手写的）。
+    a = _nonneg_float(p.get("a", 1.4), "a", "movej 的加速度", allow_zero=False)
+    v = _nonneg_float(p.get("v", 1.05), "v", "movej 的速度", allow_zero=False)
     t = _nonneg_float(p.get("t", 0), "t", "movej 的时长")
     r = _nonneg_float(p.get("r", 0), "r", "movej 的交融半径")
     robot, _ = ensure_connected(ip)
@@ -1422,8 +1477,11 @@ def op_movej(p):
 def op_movel(p):
     ip = str(p["ip"])
     pose = _vec(p, "pose", 6, "movel 的 pose")
-    a = _nonneg_float(p.get("a", 1), "a", "movel 的加速度", allow_zero=False)
-    v = _nonneg_float(p.get("v", 1), "v", "movel 的速度", allow_zero=False)
+    # 手册默认值：Poly5 15.30 / PolyScope X 15.29 的 `movel(pose, a=1.2, v=0.25, t=0, r=0)`
+    # —— 250 mm/s。旧代码默认 v=1（1 m/s，是手册默认的 4 倍），对协作臂来说是"没写速度就按
+    # 手册跑得最快的那一档"，这里改回手册值。
+    a = _nonneg_float(p.get("a", 1.2), "a", "movel 的加速度", allow_zero=False)
+    v = _nonneg_float(p.get("v", 0.25), "v", "movel 的速度", allow_zero=False)
     t = _nonneg_float(p.get("t", 0), "t", "movel 的时长")
     r = _nonneg_float(p.get("r", 0), "r", "movel 的交融半径")
     robot, _ = ensure_connected(ip)
@@ -1539,19 +1597,52 @@ def op_draw_circle(p):
         wp[1][1] = wp[1][1] + r
         wp[2][0] = wp[2][0] + r
         wp[3][1] = wp[3][1] - r
+    # `movec` 的 mode 参数省略（默认就是 0）：某些固件对多余的关键字参数更严格，省略可提高跨版本兼容性。
     cmd = ("movep(p%s, a=1, v=0.25, r=0.025)\n"
-           "movec(p%s, p%s, a=1, v=0.25, r=0.025, mode=0)\n"
-           "movec(p%s, p%s, a=1, v=0.25, r=0.025, mode=0)" %
+           "movec(p%s, p%s, a=1, v=0.25, r=0.025)\n"
+           "movec(p%s, p%s, a=1, v=0.25, r=0.025)" %
            (wp[0], wp[1], wp[2], wp[3], wp[0]))
     _assert_remote_control(ip, "draw_circle")
-    if not _send_program(robot, cmd):
+
+    # 「控制器到底有没有执行这段脚本」必须当场确认：固件差异会让这段指令组合被拒（真机实测：
+    # CB3/3.15 正常，UR20/PS5.21 一动不动），而旧实现只会在 _wait_robot_idle 里干等满预算
+    # （60 s 后才报超时，且说明不了原因）。前置一行起始哨兵即可把"完全不动"变成即时结论。
+    index = _bounded_int(p.get("register", DEFAULT_SENTINEL_REGISTER), "register", 0, 23,
+                         "执行哨兵寄存器编号")
+    model = ROBOT_MODELS.get(ip)
+    token = _sentinel_token(_read_int_register(model, index))
+    script = "write_output_integer_register(%d, %d)\n%s\n" % (index, token, cmd)
+    if not _send_program(robot, script):
         return err("draw_circle 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    deadline = time.time() + SCRIPT_START_CHECK_TIMEOUT_S
+    while time.time() < deadline:
+        if _read_int_register(model, index) == token:
+            break
+        time.sleep(0.1)
+    else:
+        return err("控制器**没有执行** draw_circle 脚本：%.1fs 内没看到起始哨兵（寄存器 %d）。"
+                   "机器人不会移动 —— 旧版就是在这里干等满 60 s 再报超时。可能原因：该固件不接受这段"
+                   "指令组合（movep/movec），或控制器未处于远程控制模式。"
+                   % (SCRIPT_START_CHECK_TIMEOUT_S, index), "NOT_EXECUTED",
+                   {"command": cmd, "register": index, "token": token, "ip": ip})
+
     ok_flag, confirm = _wait_robot_idle(ip, _budget_ms(p))
-    return ok({"message": "命令已发送，%s：%s" % (confirm, cmd),
-               "data": {"ok": ok_flag, "command": cmd, "ip": ip}})
+    return ok({"message": "命令已发送（控制器已开始执行），%s：%s" % (confirm, cmd),
+               "data": {"ok": ok_flag, "command": cmd, "register": index, "ip": ip}})
 
 
 def op_draw_square(p):
+    """以 origin 为一个角、border 为边长，走一个闭合正方形。
+
+    ★ 位姿向量的下标：0-2 是 x/y/z（**米**），3-5 是 rx/ry/rz（**弧度**）。
+    `coordinate="z"` 表示在 **y-z 竖直平面**内画（与 draw_circle / draw_star 的约定一致），
+    因此竖直那条边必须写 **下标 2（z，米）**。
+
+    ⚠️ 这里曾经写成 `wp[1][3] -= border` / `wp[2][3] -= border` —— 把米写进了**旋转分量**，
+    于是 `draw_square(border=0.2, coordinate="z")` 实际是让工具绕 rx 转 ±0.2 rad（≈11.5°）
+    而不是画方。同一函数里水平分支用的是位置分量，draw_circle/draw_star 的 z 分支也用下标 2，
+    所以这是笔误而非设计。
+    """
     ip = str(p["ip"])
     origin = _vec(p, "origin", 6, "draw_square 的 origin")
     border = _nonneg_float(p["border"], "border", "draw_square 的边长", allow_zero=False)
@@ -1559,11 +1650,13 @@ def op_draw_square(p):
     robot, _ = ensure_connected(ip)
     wp = [list(origin) for _ in range(3)]
     if coordinate == "z":
+        # y-z 竖直平面：先沿 +y 走 border，再沿 z 走 border（回到原 x）
         wp[0][1] = wp[0][1] + border
         wp[1][1] = wp[1][1] + border
-        wp[1][3] = wp[1][3] - border
-        wp[2][3] = wp[2][3] - border
+        wp[1][2] = wp[1][2] - border
+        wp[2][2] = wp[2][2] - border
     else:
+        # x-y 水平平面：先沿 +y 走 border，再沿 +x 走 border
         wp[0][1] = wp[0][1] + border
         wp[1][1] = wp[1][1] + border
         wp[1][0] = wp[1][0] + border
@@ -1581,6 +1674,12 @@ def op_draw_square(p):
 
 
 def op_draw_rectangle(p):
+    """以 origin 为一个角、width × height 走一个闭合长方形。
+
+    ★ 同 `op_draw_square`：竖直方向的位移必须落在**位置**分量上
+    （`coordinate="z"` 时是下标 2 = z，米），不能落在旋转分量（下标 3 = rx，弧度）。
+    这里同样修掉了 `wp[1][3] -= height` 的笔误。
+    """
     ip = str(p["ip"])
     origin = _vec(p, "origin", 6, "draw_rectangle 的 origin")
     width = _nonneg_float(p["width"], "width", "draw_rectangle 的长", allow_zero=False)
@@ -1591,8 +1690,8 @@ def op_draw_rectangle(p):
     if coordinate == "z":
         wp[0][1] = wp[0][1] + width
         wp[1][1] = wp[1][1] + width
-        wp[1][3] = wp[1][3] - height
-        wp[2][3] = wp[2][3] - height
+        wp[1][2] = wp[1][2] - height
+        wp[2][2] = wp[2][2] - height
     else:
         wp[0][1] = wp[0][1] + width
         wp[1][1] = wp[1][1] + width
@@ -1881,10 +1980,21 @@ def op_set_analog_out(p):
         read_back = float(ROBOT_MODELS[ip].StandardAnalogOutput(n))
     except Exception:
         pass
-    return ok({"message": "已设置模拟输出 %d = %s（相对电平 %.4f；回读 %s）"
-                          % (n, value, fraction, read_back if read_back is not None else "不可用"),
+    # ⚠️ 回读的是该通道的**电压**量。若通道被配置成电流域（0-20 mA），这个读数与你设定的电流
+    # 根本不是同一个量（真机实测：设 5 V、通道为电流域时回读只有 0.012 V）——所以把类型字一起给出。
+    io_types = _rtde_field(ROBOT_MODELS.get(ip), "analog_io_types")
+    try:
+        io_types = None if io_types is None else int(io_types)
+    except Exception:
+        io_types = None
+    return ok({"message": "已设置模拟输出 %d = %s（相对电平 %.4f；回读 %s%s）"
+                          % (n, value, fraction,
+                             read_back if read_back is not None else "不可用",
+                             "；注意：回读的是电压量，若该通道是电流域则与设定值不是同一个量"
+                             if read_back is not None and abs(read_back - value) > 0.05 else ""),
                "data": {"port": n, "value": value, "full_scale": full_scale,
-                        "fraction": fraction, "read_back": read_back, "ip": ip}})
+                        "fraction": fraction, "read_back": read_back,
+                        "analog_io_types": io_types, "ip": ip}})
 
 
 def op_set_tool_voltage(p):
@@ -1966,11 +2076,16 @@ def op_movec(p):
     a = _nonneg_float(p.get("a", 1.2), "a", "movec 的加速度", allow_zero=False)
     v = _nonneg_float(p.get("v", 0.25), "v", "movec 的速度", allow_zero=False)
     r = _nonneg_float(p.get("r", 0), "r", "movec 的交融半径")
+    # 手册新增参数（Poly5 15.28 / PolyScope X 15.27）：`mode=0` 沿途插补姿态，
+    # `mode=1` 姿态相对圆弧切线保持不变（即"固定姿态"圆弧）。旧实现根本没发这个参数，
+    # 于是想走固定姿态圆弧只能绕开这个工具。
+    mode = _bounded_int(p.get("mode", 0), "mode", 0, 1, "movec 的 mode（0 插补姿态 / 1 固定姿态）")
     robot, _ = ensure_connected(ip)
     _assert_remote_control(ip, "movec")
-    cmd = "movec(p[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f], p[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f], a=%s, v=%s, r=%s)" % (
+    cmd = ("movec(p[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f], p[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f], "
+           "a=%s, v=%s, r=%s, mode=%d)") % (
         via[0], via[1], via[2], via[3], via[4], via[5],
-        to[0], to[1], to[2], to[3], to[4], to[5], a, v, r)
+        to[0], to[1], to[2], to[3], to[4], to[5], a, v, r, mode)
     if not _send_program(robot, cmd):
         return err("movec 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
     ok_flag, msg = _movel_confirm(ip, to, _budget_ms(p))
@@ -1981,9 +2096,14 @@ def op_movec(p):
 def op_servoj(p):
     ip = str(p["ip"])
     q = _vec(p, "q", 6, "servoj 的 q")
-    t = _nonneg_float(p.get("t", 0.008), "t", "servoj 的控制时长")
+    # 手册的 t 默认值随版本变化：3.15.4 写的是 t=0.008，Poly5 15.44 / PolyScope X 15.43 改成
+    # t=0.002（"preferred to call this function with a new setpoint in each timestep"）。
+    # 这里保留 0.008 作为默认值以兼容 CB3，但把范围放宽到 0.002 —— 调用方显式给 0.002 时
+    # 不会因为"低于旧下限"被拒。
+    t = _bounded_float(p.get("t", 0.008), "t", 0.002, 1.0, "servoj 的控制时长")
+    # lookahead_time 的下限同样随版本变化：3.15.4 是 0.03，Poly5/PolyScope X 是 0.01。
     look = _bounded_float(p.get("lookahead_time", 0.1), "lookahead_time",
-                         0.03, 0.2, "servoj 的前瞻时间")
+                         0.01, 0.2, "servoj 的前瞻时间")
     gain = int(_bounded_float(p.get("gain", 100), "gain", 100, 2000, "servoj 的比例增益"))
     robot, _ = ensure_connected(ip)
     _assert_remote_control(ip, "servoj")
@@ -1992,6 +2112,621 @@ def op_servoj(p):
         return err("servoj 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
     return ok({"message": "servoj 已下发（连续流单步）：%s" % q,
                "data": {"q": q, "t": t, "lookahead_time": look, "gain": gain, "ip": ip}})
+
+
+# ---------------------------------------------------------------------------
+# 力控 / 速度控制 / 目标值 / 稳态等待（手册交叉核对后新增）
+# ---------------------------------------------------------------------------
+#
+# 这一组全部直接拼 URScript（理由与 movec/draw_* 一致：URBasic 里对应的包装要么是
+# NotImplementedError 桩，要么会阻塞等待一段**永不结束**的程序）。参数名与语义逐条对照
+# 仓库内的三本官方手册：
+#   ScriptManual/scriptManual_3.15.4.pdf          （URSoftware 3.x / CB3）
+#   ScriptManual/script_directory_Poly5.pdf       （PolyScope 5 / e-Series）
+#   ScriptManual/script_directory_PolyscopeX.pdf  （PolyScope X / 10.x）
+# 三个版本的签名一致处才写成"通用"；版本差异见工具描述与 docs/urscript-manual-analysis.md。
+
+# 手册给出的力控参数范围（Poly5 15.12 / 15.16 / 15.17；PolyScope X 15.11 / 15.14 / 15.15）。
+FORCE_MODE_TYPES = (1, 2, 3)
+FORCE_MODE_DAMPING_RANGE = (0.0, 1.0)
+FORCE_MODE_GAIN_RANGE = (0.0, 2.0)
+
+
+def _float_list(raw, n, what):
+    """把 JSON 数组强转成 n 个有限浮点数（力控的 selection_vector/wrench/limits 用）。"""
+    if raw is None:
+        raise ValueError(what + " 缺失，需要传入 %d 维数组" % n)
+    try:
+        vals = [float(x) for x in raw]
+    except (TypeError, ValueError):
+        raise ValueError(what + " 必须是数值数组（如 [1,0,0,0,0,0]）")
+    if len(vals) != n:
+        raise ValueError(what + " 必须是 %d 维数组，收到 %d 维" % (n, len(vals)))
+    for v in vals:
+        if not math.isfinite(v):
+            raise ValueError(what + " 含非有限数值（NaN/Infinity），已拒绝")
+    return vals
+
+
+def _ur_number(v):
+    """URScript 里数值的字面量写法。
+
+    整数必须写成 `2` 而不是 `2.0`（`force_mode` 的 type 只接受整数 1/2/3），
+    其余用 `%g`：既保留足够精度，又不会把 `0.05` 写成 `0.050000` —— 这些脚本会被写进
+    日志和工具返回值里供人核对，短一点的数字更容易看出"我传的到底是几"。
+    """
+    f = float(v)
+    if f.is_integer() and abs(f) < 1e15:
+        return "%d" % int(f)
+    return "%g" % f
+
+
+def _ur_list(vals):
+    return "[%s]" % ",".join(_ur_number(v) for v in vals)
+
+
+def op_force_mode(p):
+    """进入力控（Force Mode）。
+
+    Poly5 15.12 / PolyScope X 15.11：`force_mode(task_frame, selection_vector, wrench, type, limits)`
+
+    ⚠️ 行为要点（手册原文的直译）：
+      - selection_vector 里 1 = 该轴**柔性**（机器人会沿/绕该轴运动以达成 wrench），0 = 刚性；
+      - limits 对柔性轴是**最大 TCP 速度**，对刚性轴是**允许的最大位置偏差**；
+      - 手册明确建议进入力控前先 `sleep(0.02)`，并避免沿柔性轴的运动与高减速 ——
+        这里采纳该建议，在脚本里先 sleep 再进力控；
+      - type=1/3 会对力坐标系做变换（1：y 轴指向力坐标系原点；3：x 轴为 TCP 速度在
+        力坐标系 xy 面的投影），type=2 不做变换。
+
+    实现方式与 URBasic 的 `UrScript.force_mode()` 相同：把 `force_mode(...)` 放进一个
+    永不退出的程序（`while True: force_mode(...) sync() end`），这样力控在控制器侧持续生效，
+    而 worker 不会被阻塞。**退出**用 `ur_end_force_mode`（它发一条新脚本抢占该程序，并调用
+    `end_force_mode()`），或直接停止控制器上的程序。
+    """
+    ip = str(p["ip"])
+    task_frame = _float_list(p.get("task_frame", [0, 0, 0, 0, 0, 0]), 6, "force_mode 的 task_frame")
+    selection = _float_list(p.get("selection_vector", [0, 0, 1, 0, 0, 0]), 6,
+                            "force_mode 的 selection_vector")
+    wrench = _float_list(p.get("wrench", [0, 0, 0, 0, 0, 0]), 6, "force_mode 的 wrench")
+    f_type = _bounded_int(p.get("type", 2), "type", 1, 3, "force_mode 的 type（1/2/3）")
+    limits = _float_list(p.get("limits", [2, 2, 1.5, 1, 1, 1]), 6, "force_mode 的 limits")
+    damping = None
+    if p.get("damping") is not None:
+        damping = _bounded_float(p["damping"], "damping",
+                                 FORCE_MODE_DAMPING_RANGE[0], FORCE_MODE_DAMPING_RANGE[1],
+                                 "force_mode 的 damping")
+    gain = None
+    if p.get("gain_scaling") is not None:
+        gain = _bounded_float(p["gain_scaling"], "gain_scaling",
+                              FORCE_MODE_GAIN_RANGE[0], FORCE_MODE_GAIN_RANGE[1],
+                              "force_mode 的 gain_scaling")
+    # selection_vector 只能是 0/1：别的值控制器会直接报错，提前拦住并说明。
+    for i, s in enumerate(selection):
+        if s not in (0.0, 1.0):
+            raise ValueError("force_mode 的 selection_vector 只能由 0/1 组成，第 %d 个是 %s"
+                             % (i, s))
+    robot, _ = ensure_connected(ip)
+    _assert_remote_control(ip, "force_mode")
+    prelude = ""
+    if damping is not None:
+        # 手册 15.16 / 15.15：这两个值必须**在进入力控之前**设置才会生效。
+        prelude += "force_mode_set_damping(%s)\n" % _ur_number(damping)
+    if gain is not None:
+        prelude += "force_mode_set_gain_scaling(%s)\n" % _ur_number(gain)
+    call = "force_mode(p%s, %s, %s, %d, %s)" % (
+        _ur_list(task_frame), _ur_list(selection), _ur_list(wrench), f_type, _ur_list(limits))
+    # 永不退出的程序：力控需要持续被"重新声明"，程序一旦结束力控就退出（手册亦如此说明）。
+    script = (prelude
+              + "def ur_force_mode():\n"
+                "  sleep(0.02)\n"
+                "  while(True):\n"
+                "    %s\n"
+                "    sync()\n"
+                "  end\n"
+                "end\nur_force_mode()\n" % call)
+    if not _send_program(robot, script):
+        return err("force_mode 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    return ok({"message": "力控已进入：%s（退出请调用 ur_end_force_mode，或在示教器停止程序）" % call,
+               "data": {"command": call, "task_frame": task_frame,
+                        "selection_vector": selection, "wrench": wrench, "type": f_type,
+                        "limits": limits, "damping": damping, "gain_scaling": gain,
+                        "ip": ip}})
+
+
+def op_end_force_mode(p):
+    """退出手动/力控模式（`end_force_mode()`）。
+
+    手册 15.8 / PolyScope X 15.7。向 30003 发一段新脚本会抢占正在运行的力控程序，
+    `end_force_mode()` 随之执行（与 `_set_control_mode` 的关闭路径同一机制）。
+    """
+    ip = str(p["ip"])
+    robot, _ = ensure_connected(ip)
+    if not _send_program(robot, "end_force_mode()\n"):
+        return err("end_force_mode 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    return ok({"message": "已退出力控（end_force_mode）", "data": {"ip": ip}})
+
+
+def op_force_mode_settings(p):
+    """读取/设置力控的 damping 与 gain_scaling。
+
+    ⚠️ 这两个值**没有回读通道**：手册只定义了 `force_mode_set_*`（Poly5 15.16/15.17、
+    PolyScope X 15.15/15.14），本插件因此只记住**本次会话通过本工具设置过的值**，
+    并在返回值里把这一点写清楚 —— 不做"读回来的当前值"这种假装。
+    """
+    ip = str(p["ip"])
+    robot, _ = ensure_connected(ip)
+    applied = {}
+    if p.get("damping") is not None:
+        damping = _bounded_float(p["damping"], "damping",
+                                 FORCE_MODE_DAMPING_RANGE[0], FORCE_MODE_DAMPING_RANGE[1],
+                                 "力控 damping")
+        if not _realtime_send(robot, "force_mode_set_damping(%s)\n" % _ur_number(damping)):
+            return err("force_mode_set_damping 未能送达控制器：%s" % _last_send_failure(robot),
+                       "SEND_FAILED")
+        applied["damping"] = damping
+    if p.get("gain_scaling") is not None:
+        gain = _bounded_float(p["gain_scaling"], "gain_scaling",
+                              FORCE_MODE_GAIN_RANGE[0], FORCE_MODE_GAIN_RANGE[1],
+                              "力控 gain_scaling")
+        if not _realtime_send(robot, "force_mode_set_gain_scaling(%s)\n" % _ur_number(gain)):
+            return err("force_mode_set_gain_scaling 未能送达控制器：%s"
+                       % _last_send_failure(robot), "SEND_FAILED")
+        applied["gain_scaling"] = gain
+    if not applied:
+        raise ValueError("至少要给出 damping 或 gain_scaling 之一（这两个值无法回读）")
+    return ok({"message": "已设置力控参数 %s（该值在控制器侧无法回读，这里只回报本次设置值）"
+                          % applied,
+               "data": {"applied": applied, "readback_supported": False, "ip": ip}})
+
+
+def op_speedj(p):
+    """关节速度控制 `speedj(qd, a, t)`（Poly5 15.48 / PolyScope X 15.47）。
+
+    线性加速到恒定关节速度后**持续运动**。手册给出 t 是可选的：给了 t，函数在 t 秒后返回；
+    没给，则在达到目标速度时返回 —— **此时机器人仍在以该速度运动**，直到 stopj 或新指令。
+    因此这里把"没给 t"如实写进返回值（否则调用方会以为指令已经结束）。
+    """
+    ip = str(p["ip"])
+    qd = _vec(p, "qd", 6, "speedj 的 qd")
+    a = _nonneg_float(p.get("a", 0.5), "a", "speedj 的关节加速度", allow_zero=False)
+    t = _nonneg_float(p.get("t", 0), "t", "speedj 的时长")
+    robot, _ = ensure_connected(ip)
+    _assert_remote_control(ip, "speedj")
+    cmd = "speedj(%s, %s, %s)" % (_ur_list(qd), _ur_number(a), _ur_number(t))
+    if not _send_program(robot, cmd + "\n"):
+        return err("speedj 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    looped = "持续运动" if t == 0 else ("%.3fs 后返回，机械臂仍可以该速度运动" % t)
+    return ok({"message": "speedj 已下发（%s；停止请调用 ur_stopj）" % looped,
+               "data": {"command": cmd, "qd": qd, "a": a, "t": t, "ip": ip}})
+
+
+def op_speedl(p):
+    """TCP 速度控制 `speedl(xd, a, t, aRot='a')`（Poly5 15.49 / PolyScope X 15.48）。
+
+    ⚠️ **这是全插件最"放得开"的运动指令**：它绕过正常的位置轨迹规划，直接给 TCP 速度。
+    手册要求 a > 0；aRot 省略时按 a 处理（`aRot='a'` 即此意）。
+    """
+    ip = str(p["ip"])
+    xd = _vec(p, "xd", 6, "speedl 的 xd")
+    a = _nonneg_float(p.get("a", 0.5), "a", "speedl 的加速度", allow_zero=False)
+    t = _nonneg_float(p.get("t", 0), "t", "speedl 的时长")
+    a_rot = None
+    if p.get("a_rot") is not None:
+        a_rot = _nonneg_float(p["a_rot"], "a_rot", "speedl 的旋转加速度", allow_zero=False)
+    robot, _ = ensure_connected(ip)
+    _assert_remote_control(ip, "speedl")
+    args = "%s, %s, %s" % (_ur_list(xd), _ur_number(a), _ur_number(t))
+    if a_rot is not None:
+        args += ", aRot=%s" % _ur_number(a_rot)
+    cmd = "speedl(%s)" % args
+    if not _send_program(robot, cmd + "\n"):
+        return err("speedl 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    looped = "持续运动" if t == 0 else ("%.3fs 后返回，TCP 仍可以该速度运动" % t)
+    return ok({"message": "speedl 已下发（%s；停止请调用 ur_stopl）" % looped,
+               "data": {"command": cmd, "xd": xd, "a": a, "t": t, "a_rot": a_rot, "ip": ip}})
+
+
+def op_stopj(p):
+    """减速到关节速度为零 `stopj(a)`（Poly5 15.51 / PolyScope X 15.50）。"""
+    ip = str(p["ip"])
+    a = _nonneg_float(p.get("a", 2.0), "a", "stopj 的关节减速度", allow_zero=False)
+    robot, _ = ensure_connected(ip)
+    _assert_remote_control(ip, "stopj")
+    cmd = "stopj(%s)" % _ur_number(a)
+    if not _send_program(robot, cmd + "\n"):
+        return err("stopj 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    return ok({"message": "stopj 已下发（关节减速，a=%s rad/s²）" % a,
+               "data": {"command": cmd, "a": a, "ip": ip}})
+
+
+def op_stopl(p):
+    """减速到 TCP 速度为零 `stopl(a, aRot='a')`（Poly5 15.52 / PolyScope X 15.51）。"""
+    ip = str(p["ip"])
+    a = _nonneg_float(p.get("a", 0.5), "a", "stopl 的减速度", allow_zero=False)
+    a_rot = None
+    if p.get("a_rot") is not None:
+        a_rot = _nonneg_float(p["a_rot"], "a_rot", "stopl 的旋转减速度", allow_zero=False)
+    robot, _ = ensure_connected(ip)
+    _assert_remote_control(ip, "stopl")
+    args = _ur_number(a) + (", aRot=%s" % _ur_number(a_rot) if a_rot is not None else "")
+    cmd = "stopl(%s)" % args
+    if not _send_program(robot, cmd + "\n"):
+        return err("stopl 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    return ok({"message": "stopl 已下发（TCP 减速，a=%s）" % a,
+               "data": {"command": cmd, "a": a, "a_rot": a_rot, "ip": ip}})
+
+
+def op_wait_steady(p):
+    """等待机器人完全静止（对应手册的 `is_steady()`）。
+
+    ⚠️ **没有调用 URScript 的 `is_steady()`**，理由是它没法可靠地用在本 worker 的形态里：
+    `is_steady()` 是表达式，需要在控制器上跑一段程序把结果写进寄存器再读回；更关键的是
+    手册（Poly5 16.39）明确写着"在非标准位置模式（力控、示教）下它**总是返回 false**"，
+    而在标准位置模式里等它变 true，与直接观察 RTDE 的速度量是同一件事。
+    这里改为轮询**已在 RTDE 数据流里**的 `actual_TCP_speed` 与 `actual_qd`：
+    零额外往返、不受程序运行状态影响，且在力控/示教模式下同样能给出真实的静止判断。
+    """
+    ip = str(p["ip"])
+    _, model = ensure_connected(ip)
+    timeout_s = _bounded_float(p.get("timeout_s", 10.0), "timeout_s", 0.1, 300.0,
+                               "等待静止的超时（秒）")
+    lin_tol = _bounded_float(p.get("linear_tolerance", 0.005), "linear_tolerance", 1e-4, 1.0,
+                             "TCP 线速度静止阈值（m/s）")
+    ang_tol = _bounded_float(p.get("angular_tolerance", 0.01), "angular_tolerance", 1e-4, 10.0,
+                             "TCP 角速度静止阈值（rad/s）")
+    deadline = time.time() + timeout_s
+    last = None
+    while True:
+        try:
+            tcp_speed = [float(x) for x in model.ActualTCPSpeed()]
+            qd = [float(x) for x in model.ActualQD()]
+        except Exception as exc:                                      # noqa: BLE001
+            return err("读取速度量失败，无法判断是否静止：%s" % exc, "NOT_CONNECTED")
+        lin = math.sqrt(sum(x * x for x in tcp_speed[:3]))
+        ang = math.sqrt(sum(x * x for x in tcp_speed[3:6]))
+        joint = max(abs(x) for x in qd)
+        last = {"tcp_linear_speed": round(lin, 6), "tcp_angular_speed": round(ang, 6),
+                "max_joint_speed": round(joint, 6)}
+        steady = lin <= lin_tol and ang <= ang_tol
+        if steady:
+            return ok({"message": "机器人已静止（TCP 线速度 %.4f m/s ≤ %.4f，角速度 %.4f rad/s ≤ %.4f）"
+                                  % (lin, lin_tol, ang, ang_tol),
+                       "data": dict(last, steady=True, waited_tolerance=True, ip=ip)})
+        if time.time() >= deadline:
+            return ok({"message": "等待静止超时（%.1fs）：TCP 线速度 %.4f m/s、角速度 %.4f rad/s，"
+                                  "**未达到静止判据**" % (timeout_s, lin, ang),
+                       "data": dict(last, steady=False, timeout_s=timeout_s, ip=ip)})
+        time.sleep(0.05)
+
+
+def _vec_or_none(model, getter, n):
+    try:
+        vals = [float(x) for x in getter()]
+    except Exception:
+        return None
+    return vals if len(vals) == n else None
+
+
+def op_get_target_values(p):
+    """读取"控制器打算去哪"：目标关节角/速度/加速度 与 目标 TCP 位姿/速度。
+
+    数据来自 RTDE 的 `target_*` 字段（本插件已把它们加入接收配方，见
+    URBasic/rtdeConfiguration.xml）—— 零额外往返。与 `actual_*`（实际值）的差值是唯一能
+    直接看出"指令已下发但还没执行 / 被交融 / 被安全限速拉住"的观测量；手册里对应的
+    URScript 函数是 `get_target_joint_positions/speeds`、`get_target_tcp_speed`（Poly5 16.24 /
+    16.25 / 16.30）等。
+    """
+    ip = str(p["ip"])
+    _, model = ensure_connected(ip)
+    data = {
+        "target_q": _vec_or_none(model, model.TargetQ, 6),
+        "target_qd": _vec_or_none(model, model.TargetQD, 6),
+        "target_qdd": _vec_or_none(model, model.TargetQDD, 6),
+        "target_tcp_pose": _vec_or_none(model, model.TargetTCPPose, 6),
+        "target_tcp_speed": _vec_or_none(model, model.TargetTCPSpeed, 6),
+        "actual_q": _vec_or_none(model, model.ActualQ, 6),
+        "actual_tcp_pose": _vec_or_none(model, model.ActualTCPPose, 6),
+        "ip": ip,
+    }
+    if data["target_tcp_pose"] is None and data["target_q"] is None:
+        return err("RTDE 的 target_* 字段尚不可用（数据流可能刚建立或配方被替换）",
+                   "TIMEOUT", {"ip": ip})
+    return ok({"message": "目标值读取成功（target_* 来自 RTDE 数据流）", "data": data})
+
+
+def op_tool_communication(p):
+    """开关工具端 RS-485/TCP 通信（Tool Communication Interface）。
+
+    手册：`set_tool_communication(enabled, baud_rate, parity, stop_bits, rx_idle_chars, tx_idle_chars)`
+    （Poly5 18.50 / PolyScope X 18.50）。**手册明确警告：启用 TCI 会禁用工具模拟输入。**
+    """
+    ip = str(p["ip"])
+    enabled = bool(p.get("enabled", True))
+    baud = _bounded_int(p.get("baud_rate", 115200), "baud_rate", 9600, 5000000, "波特率")
+    if baud not in (9600, 19200, 38400, 57600, 115200, 1000000, 2000000, 5000000):
+        raise ValueError("波特率只能是手册列出的 9600/19200/38400/57600/115200/1000000/"
+                         "2000000/5000000，收到 %d" % baud)
+    parity = _bounded_int(p.get("parity", 2), "parity", 0, 2, "校验位（0 无 / 1 奇 / 2 偶）")
+    stop_bits = _bounded_int(p.get("stop_bits", 1), "stop_bits", 1, 2, "停止位（1 或 2）")
+    rx_idle = _bounded_float(p.get("rx_idle_chars", 1.0), "rx_idle_chars", 1.0, 40.0,
+                             "RX idle chars")
+    tx_idle = _bounded_float(p.get("tx_idle_chars", 3.5), "tx_idle_chars", 0.0, 40.0,
+                             "TX idle chars")
+    robot, _ = ensure_connected(ip)
+    cmd = "set_tool_communication(%s, %d, %d, %d, %s, %s)" % (
+        "True" if enabled else "False", baud, parity, stop_bits,
+        _ur_number(rx_idle), _ur_number(tx_idle))
+    if not _realtime_send(robot, cmd + "\n"):
+        return err("set_tool_communication 脚本未能送达控制器：%s"
+                   % _last_send_failure(robot), "SEND_FAILED")
+    return ok({"message": "已%s工具通信接口（%s）%s"
+                          % ("启用" if enabled else "禁用", cmd,
+                             "；⚠️ 工具模拟输入已被禁用" if enabled else ""),
+               "data": {"enabled": enabled, "baud_rate": baud, "parity": parity,
+                        "stop_bits": stop_bits, "rx_idle_chars": rx_idle,
+                        "tx_idle_chars": tx_idle, "command": cmd, "ip": ip}})
+
+
+def op_set_tool_output_mode(p):
+    """工具输出模式：1 = power（双针供电模式）/ 0 = 普通数字输出。
+
+    手册 Poly5 18.52 / PolyScope X 18.52：mode 1 表示数字输出针被用作**附加电源**。
+    """
+    ip = str(p["ip"])
+    mode = _bounded_int(p.get("mode", 1), "mode", 0, 1, "工具输出模式（0 普通 / 1 power）")
+    robot, _ = ensure_connected(ip)
+    cmd = "set_tool_output_mode(%d)" % mode
+    if not _realtime_send(robot, cmd + "\n"):
+        return err("set_tool_output_mode 脚本未能送达控制器：%s"
+                   % _last_send_failure(robot), "SEND_FAILED")
+    return ok({"message": "已设置工具输出模式为 %d%s" % (mode, "（power/双针供电）" if mode == 1 else ""),
+               "data": {"mode": mode, "command": cmd, "ip": ip}})
+
+
+def op_set_payload_inertia(p):
+    """设置负载的**质量 + 重心 + 惯性矩阵**（PolyScope X 16.52 `set_target_payload`）。
+
+    手册要点：
+      - 惯性矩阵对角线（Ixx, Iyy, Izz）不得为负，每个元素上限 ±133 kg·m²；
+      - `set_payload(m, cog)` 会**重置**惯性矩阵（手册把它标为 deprecated，因为会出现
+        "质量/重心/惯量不一致"的组合），所以要设惯量就用这个工具一次设全；
+      - 设置负载会**自动把力/力矩测量归零**（等效于 zero_ftsensor）；
+      - transition_time > 0 可以让负载切换时机器人不"跳"一下（抓/放重物时有用）。
+
+    CB3（URSoftware 3.x）上控制器**没有**这个函数 —— 手册 3.15.4 只有 `set_payload(m, cog)`。
+    因此本工具在旧固件上会退回只设置质量与重心，并在返回值里说明。
+    """
+    ip = str(p["ip"])
+    mass = _nonneg_float(p.get("mass"), "mass", "负载质量（kg）", allow_zero=True)
+    cog = _vec(p, "cog", 3, "负载重心 cog")
+    inertia = None
+    if p.get("inertia") is not None:
+        inertia = _float_list(p["inertia"], 9, "负载惯性矩阵 inertia（行主序 3×3，kg·m²）")
+        for i, name in ((0, "Ixx"), (4, "Iyy"), (8, "Izz")):
+            if inertia[i] < 0:
+                raise ValueError("惯性矩阵对角线不得为负：%s = %s" % (name, inertia[i]))
+        for i, v in enumerate(inertia):
+            if abs(v) > 133.0:
+                raise ValueError("惯性矩阵元素上限为 ±133 kg·m²，第 %d 个是 %s" % (i, v))
+    transition = _bounded_float(p.get("transition_time", 0.0), "transition_time", 0.0, 60.0,
+                                "负载切换过渡时间（秒）")
+    robot, _ = ensure_connected(ip)
+    _assert_remote_control(ip, "set_payload")
+    if inertia is None:
+        # 与既有 op_set_payload 相同的两条 URScript，三个手册版本都有。**刻意不用**
+        # `set_payload(m, cog)`：手册明确说它会**重置惯性矩阵**（5.10.0 起被标为 deprecated），
+        # 于是"只想改质量"会顺手把惯量清零，质量/重心/惯量三者不再自洽。
+        # 分成 set_payload_mass + set_payload_cog 两条就不会动惯量矩阵。
+        script = ("set_payload_mass(%s)\nset_payload_cog(%s)\n"
+                  % (_ur_number(mass), _ur_list(cog)))
+        note = "只设置了质量与重心（未给 inertia）：用 set_payload_mass + set_payload_cog，不会重置惯性矩阵"
+    else:
+        m = ",".join(_ur_list(inertia[i * 3:i * 3 + 3]) for i in range(3))
+        script = "set_target_payload(%s, %s, [%s], %s)\n" % (
+            _ur_number(mass), _ur_list(cog), m, _ur_number(transition))
+        note = "已同时设置质量、重心与惯性矩阵"
+    if not _send_program(robot, script):
+        return err("负载设置脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    return ok({"message": "%s（⚠️ 设置负载会同时把力/力矩测量归零）" % note,
+               "data": {"mass": mass, "cog": cog, "inertia": inertia,
+                        "transition_time": transition, "command": script.strip(), "ip": ip}})
+
+
+def op_move_optimized(p):
+    """OptiMove 平滑运动：`optimovej(goal, a=0.3, v=0.3, r=0)` / `optimovel(...)`。
+
+    手册：Poly5 15.32/15.33、PolyScope X 15.31/15.32。与 movej/movel 的区别是
+    **jerk 受限**的速度剖面，运动更平滑、振动更小；`a`/`v` 不是 rad/s 或 m/s，而是
+    "机器人能力的一个比例"，取值范围 (0, 1]，1 表示该构型下能达到的最快。
+
+    `goal` 在手册里可写四种形态（关节、基座位姿、`struct{pose,frame}`、世界模型对象名）。
+    本工具支持前两种 —— 后两种需要 PolyScope 侧的坐标系/世界模型对象，脚本里写错只会得到
+    控制器的一句运行期错误，因此**在这里明确拒绝**并说明原因，而不是把含糊的脚本发出去。
+
+    ⚠️ 手册说明 OptiMove **不受 Motion Version 设置影响**，且只能与 movej/l、optimovej/l
+    互相交融（从其它运动类型切入时机器人应处于静止）。
+    """
+    ip = str(p["ip"])
+    kind = str(p.get("goal_type", "")).lower()
+    a = _bounded_float(p.get("a", 0.3), "a", 0.0001, 1.0, "optimove 的加速度比例")
+    v = _bounded_float(p.get("v", 0.3), "v", 0.0001, 1.0, "optimove 的速度比例")
+    r = _nonneg_float(p.get("r", 0), "r", "optimove 的交融半径")
+    frame = p.get("frame")
+    if frame is not None:
+        raise ValueError("optimove 的 frame（坐标系名/世界模型对象）需要 PolyScope 侧的对象，"
+                         "本插件不支持：请不要传 frame，或改用 movej/movel 自行换算到基座系")
+    if kind in ("j", "joint", "joints", "optimovej"):
+        q = _vec(p, "goal", 6, "optimovej 的 goal（六关节角）")
+        call = "optimovej(%s, a=%s, v=%s, r=%s)" % (_ur_list(q), _ur_number(a),
+                                                    _ur_number(v), _ur_number(r))
+        confirm = lambda: _movej_confirm(ip, q, _budget_ms(p))          # noqa: E731
+        goal_desc = {"goal_type": "joints", "goal": q}
+    elif kind in ("l", "pose", "linear", "optimovel"):
+        pose = _vec(p, "goal", 6, "optimovel 的 goal（六维位姿）")
+        call = "optimovel(p%s, a=%s, v=%s, r=%s)" % (_ur_list(pose), _ur_number(a),
+                                                     _ur_number(v), _ur_number(r))
+        confirm = lambda: _movel_confirm(ip, pose, _budget_ms(p))       # noqa: E731
+        goal_desc = {"goal_type": "pose", "goal": pose}
+    else:
+        raise ValueError('optimove 的 goal_type 必须是 "joints"（optimovej）或 "pose"（optimovel），'
+                         "收到 %r" % kind)
+    robot, _ = ensure_connected(ip)
+    _assert_remote_control(ip, "optimove")
+    if not _send_program(robot, call + "\n"):
+        return err("optimove 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
+    ok_flag, msg = confirm()
+    data = {"ok": ok_flag, "command": call, "a": a, "v": v, "r": r, "ip": ip}
+    data.update(goal_desc)
+    return ok({"message": "命令 %s 已发送（a/v 是能力比例，不是物理单位），%s" % (call, msg),
+               "data": data})
+
+
+def op_motion_version(p):
+    """读取/设置 Motion Version（Poly5 14.x、PolyScope X 14.x），以及 jerk 增益。
+
+    - 版本 1：与旧版 PolyScope 相同的运动剖面；
+    - 版本 2：规划时把速度/加速度**钳到硬件上限**，交融半径重叠时**动态收缩**而不是跳过该段
+      （版本 1 在交融重叠时会跳过整段运动并给 "Overlapping Blends" 警告）。
+
+    ⚠️ 手册明确：**新机型与 PolyScope X 只支持版本 2**，而 CB3（3.x）没有这个设置。
+
+    `jerk_gain_scaling`（PolyScope X 15.23/15.24）只作用于**jerk 受限**的剖面 ——
+    手册点名的正是 `movej[motion_version>=2]`、`movel[...>=2]`、`optimovej`、`optimovel`，
+    也就是 `ur_move_optimized` 与版本 2 的运动。范围 [0.01, 1.0]，默认 1.0；
+    手册建议"需要更平滑的运动就调小"，并把它写在程序开头（值会保留到下次设置或重启）。
+    """
+    ip = str(p["ip"])
+    robot, _ = ensure_connected(ip)
+    version = p.get("version")
+    jerk = None
+    if p.get("jerk_gain_scaling") is not None:
+        jerk = _bounded_float(p["jerk_gain_scaling"], "jerk_gain_scaling", 0.01, 1.0,
+                              "jerk 增益（1.0 = 默认，越小越平滑）")
+    if version is None and jerk is None:
+        raise ValueError("至少要给出 version 或 jerk_gain_scaling 之一")
+    applied = {}
+    if version is not None:
+        ver = _bounded_int(version, "version", 1, 2, "Motion Version")
+        if not _realtime_send(robot, "motion_version_set(%d)\n" % ver):
+            return err("motion_version_set 未能送达控制器：%s" % _last_send_failure(robot),
+                       "SEND_FAILED")
+        applied["version"] = ver
+    if jerk is not None:
+        if not _realtime_send(robot, "jerk_gain_scaling_set(%s)\n" % _ur_number(jerk)):
+            return err("jerk_gain_scaling_set 未能送达控制器：%s"
+                       % _last_send_failure(robot), "SEND_FAILED")
+        applied["jerk_gain_scaling"] = jerk
+    return ok({"message": "已设置 %s（这两个设置都没有回读通道，返回值只报告本次设置值）" % applied,
+               "data": {"applied": applied, "readback_supported": False, "ip": ip}})
+
+
+def op_get_freedrive_status(p):
+    """读取 freedrive（手动拖动）当前姿态的**奇异点接近程度**（PolyScope X 15.20）。
+
+    ⚠️ 这个函数的返回值**不是**"freedrive 开着还是关着"，而是当前姿态离奇异点多远：
+    `0` = 正常、`1` = 接近奇异点、`2` = 太接近（拖动阻力明显变大）。
+    手册原话：受限 freedrive（`freedrive_mode(freeAxes=...)`）在奇异点附近可用性下降，
+    因此这个值用来**建议操作员换一条路径或改用不受限的 freedrive**。
+
+    它需要控制器能执行 URScript 表达式并回读寄存器，因此会向输出寄存器写一个值
+    （默认 21 号 int 寄存器，旧值会被覆盖）；读不到时如实报失败并说明可能原因。
+    """
+    ip = str(p["ip"])
+    robot, _ = ensure_connected(ip)
+    register = _bounded_int(p.get("register", 21), "register", 0, 23,
+                            "回读用的 int 输出寄存器编号")
+
+    # 两步走，才能区分「固件不支持」与「真的读到 0」：
+    #   第一步：写一个与旧值不同的 token，确认 **该寄存器可被这段脚本改写**（通道通）；
+    #   第二步：让 get_freedrive_status() 去覆盖它。若固件不认识该函数，整段脚本会编译失败，
+    #           寄存器就停在 token 上 ⇒ 如实报「不支持/未执行」，而不是把陈旧的 0 说成"正常"。
+    token = _sentinel_token(_read_int_register(ROBOT_MODELS.get(ip), register))
+    setter = ("def ur_write_token():\n"
+              "  write_output_integer_register(%d, %d)\n"
+              "end\nur_write_token()\n" % (register, token))
+    if not _send_program(robot, setter):
+        return err("get_freedrive_status 通道探测脚本未能送达控制器：%s"
+                   % _last_send_failure(robot), "SEND_FAILED")
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if _read_int_register(ROBOT_MODELS.get(ip), register) == token:
+            break
+        time.sleep(0.1)
+    else:
+        return err("未能写入哨兵值（寄存器 output_int_register_%d 上一直看不到 %d）⇒ 控制器没有执行"
+                   "这段脚本，可能是未处于远程控制模式" % (register, token), "NOT_EXECUTED",
+                   {"register": register, "token": token, "ip": ip})
+
+    program = ("def ur_get_freedrive_status():\n"
+               "  write_output_integer_register(%d, get_freedrive_status())\n"
+               "end\nur_get_freedrive_status()\n" % register)
+    if not _send_program(robot, program):
+        return err("get_freedrive_status 脚本未能送达控制器：%s"
+                   % _last_send_failure(robot), "SEND_FAILED")
+    deadline = time.time() + 2.0
+    raw = token
+    while time.time() < deadline:
+        raw = _read_int_register(ROBOT_MODELS.get(ip), register)
+        if raw is not None and raw != token:
+            break
+        time.sleep(0.1)
+    if raw is None or raw == token:
+        return err("该控制器**不支持** get_freedrive_status()：脚本没有执行，寄存器仍停在通道探测用的"
+                   "哨兵值 %d（PolyScope 版本可能低于 5.24；这不是「读到 0 = 正常」）"
+                   % token, "UNSUPPORTED",
+                   {"register": register, "token": token, "observed": raw, "ip": ip})
+    code = int(raw)
+    names = {0: "正常（离奇异点足够远）", 1: "接近奇异点", 2: "太接近奇异点（拖动阻力明显）"}
+    return ok({"message": "freedrive 姿态状态：%d —— %s%s"
+                          % (code, names.get(code, "未知"), "" if code == 0 else "；建议换路径或改用不受限 freedrive"),
+               "data": {"status": code, "status_name": names.get(code, "unknown"),
+                        "supported": True, "register": register, "ip": ip}})
+
+
+def op_get_tool_telemetry(p):
+    """读取工具端电气遥测：工具电压/电流、I/O 电流、工具模式（全部来自 RTDE 数据流）。
+
+    ⚠️ 这三个访问器在 vendored `robotModel.py` 里都是 `NotImplementedError` 桩，且它们的
+    RTDE 字段以前**不在接收配方里** —— 两个原因叠加，旧实现必然返回全 null（看起来像
+    "控制器没数据"，其实是插件根本没读）。现在字段已加进配方，这里直接读 `dataDir`。
+
+    ⚠️ 单位：UR RTDE 文档把 `tool_output_voltage` 定义为 **INT32**（不是浮点伏特），
+    所以这里原样回报，不擅自换算；需要物理量时请按控制器文档解释该整数。
+    """
+    ip = str(p["ip"])
+    _, model = ensure_connected(ip)
+
+    def num(name, accessor=None):
+        """优先用访问器（某些控制器/测试替身实现了它），失败或为 None 时回落到原始 RTDE 字段。"""
+        if accessor is not None:
+            try:
+                value = getattr(model, accessor)()
+                if value is not None:
+                    return float(value)
+            except Exception:
+                pass
+        value = _rtde_field(model, name)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    data = {
+        "tool_output_voltage": num("tool_output_voltage", "ToolOutputVoltage"),
+        "tool_output_current": num("tool_output_current", "ToolOutputCurrent"),
+        "io_current": num("io_current", "IoCurrent"),
+        "tool_mode": num("tool_mode"),
+        "ip": ip,
+    }
+    missing = [name for name in ("tool_output_voltage", "tool_output_current", "io_current")
+               if data[name] is None]
+    message = "工具电气遥测读取成功（来自 RTDE 数据流）"
+    if missing:
+        message += ("；以下字段读不到：%s。若控制器固件未提供该 RTDE 字段，它会一直是 null —— "
+                    "这表示「该控制器不支持」，而不是「读取出错」" % "、".join(missing))
+    return ok({"message": message, "data": data})
 
 
 def _bit_masks(model):
@@ -2105,9 +2840,37 @@ def op_power_on(p):
     return _dashboard_switch(p, "ur_power_on", "机器人上电")
 
 
+# 下电 / 关机类命令的验证预算：命令生效后控制器会停止应答 dashboard，所以只能等状态位。
+POWER_OFF_VERIFY_TIMEOUT_S = 8.0
+
+
 def op_power_off(p):
-    """机器人下电。⚠️ 会让机械臂失去刚性支撑。"""
-    return _dashboard_switch(p, "ur_power_off", "机器人下电")
+    """机器人下电。⚠️ 会让机械臂失去刚性支撑。
+
+    为什么不能只看 dashboard 的应答：`power off` 生效的瞬间控制器就**停止应答**（它正在断电），
+    旧实现把"无应答"当成失败 ⇒ 真机上明明已下电却报「失败（控制器无应答）」的**假阴性**。
+    现在以控制器自己的状态为准：等 RTDE `robot_status_bits` 的 PowerOn 位清零；等到了就报成功
+    （附证据），等不到才报失败，并把看到的状态位交出来供复核。
+    """
+    ip = str(p["ip"])
+    ensure_connected(ip)
+    sent, resp = _dashboard_cmd(ip, "ur_power_off")
+    reached, bits = _wait_robot_power(ip, want_on=False, timeout=POWER_OFF_VERIFY_TIMEOUT_S)
+    if reached:
+        return ok({"message": "机器人已下电（RTDE 的 PowerOn 位已清零%s）"
+                              % ("；dashboard 未应答 —— 这正是断电时的预期行为，不是失败"
+                                 if not sent else "；dashboard 应答：%s" % resp),
+                   "data": {"power_on": False, "robot_status_bits": bits,
+                            "dashboard_sent": sent, "dashboard_respond": resp, "ip": ip}})
+    if sent and _dashboard_ok(resp):
+        return ok({"message": "下电命令已被控制器接受（应答：%s），但 %.0fs 内没看到 PowerOn 位清零；"
+                              "请用 ur_status 复核（状态位更新有延迟时也会这样）"
+                              % (resp, POWER_OFF_VERIFY_TIMEOUT_S),
+                   "data": {"power_on": None, "robot_status_bits": bits,
+                            "dashboard_sent": sent, "dashboard_respond": resp, "ip": ip}})
+    return err("下电失败：dashboard 未应答，且 %.0fs 内 RTDE 的 PowerOn 位仍为 1（应答：%s）"
+               % (POWER_OFF_VERIFY_TIMEOUT_S, resp), "TIMEOUT",
+               {"robot_status_bits": bits, "ip": ip})
 
 
 def op_brake_release(p):
@@ -2142,8 +2905,26 @@ def op_unlock_protective_stop(p):
 
 
 def op_shutdown(p):
-    """关闭控制器（电源）。⚠️ 需要人工重新上电。"""
-    return _dashboard_switch(p, "ur_shutdown", "关闭控制器")
+    """关闭控制器（电源）。⚠️ 需要人工重新上电。
+
+    与 `ur_power_off` 同理：控制器关机时不会给你一个"成功"应答，所以"无应答"不能算失败 ——
+    这里把「命令已发出 + 之后再问一次 dashboard 已经不通」作为成功的**旁证**并明确标注为旁证。
+    """
+    ip = str(p["ip"])
+    ensure_connected(ip)
+    sent, resp = _dashboard_cmd(ip, "ur_shutdown")
+    if sent and _dashboard_ok(resp):
+        return ok({"message": "关闭控制器命令已被接受（应答：%s）；控制器将断开，需要人工重新上电" % resp,
+                   "data": {"accepted": True, "dashboard_respond": resp, "ip": ip}})
+    time.sleep(2.0)
+    alive, alive_resp = _dashboard_cmd(ip, "ur_robotmode")
+    if not alive:
+        return ok({"message": "已发出关闭控制器命令；2s 后 dashboard 已不可达 —— 与关机行为一致"
+                              "（旁证，不是确定性证据：%s）" % alive_resp,
+                   "data": {"accepted": None, "dashboard_reachable": False,
+                            "dashboard_respond": resp, "ip": ip}})
+    return err("关闭控制器命令未生效：dashboard 仍可应答（%s / %s）" % (resp, alive_resp), "TIMEOUT",
+               {"ip": ip})
 
 
 def op_get_runtime_telemetry(p):
@@ -2182,11 +2963,31 @@ def op_get_runtime_telemetry(p):
 
 
 def op_get_speed_scaling(p):
-    """读取速度倍率（0-1）。"""
+    """读取速度倍率。
+
+    ⚠️ 两个字段语义完全不同，旧实现只给了前者，于是"静止时读 0"看起来像"速度被压到 0"：
+      - `speed_scaling`：控制器**实际**的倍率。**静止时控制器就报 0**，这是正常的。
+      - `target_speed_fraction`：**请求**的倍率（速度滑块 / 程序里 `set_speed_slider` 的值）。
+    判断"速度有没有被限制"请看 target_speed_fraction；判断"此刻跑多快"看运动中的 speed_scaling。
+    """
     ip = str(p["ip"])
     _, model = ensure_connected(ip)
-    return ok({"message": "速度倍率：%s" % model.SpeedScaling(),
-               "data": {"speed_scaling": float(model.SpeedScaling()), "ip": ip}})
+
+    def num(name):
+        value = _rtde_field(model, name)
+        try:
+            return None if value is None else float(value)
+        except Exception:
+            return None
+
+    actual = num("speed_scaling")
+    target = num("target_speed_fraction")
+    return ok({"message": ("实际速度倍率（speed_scaling）：%s；请求倍率（target_speed_fraction）：%s。"
+                           "注意：speed_scaling 在**静止时**读 0 属正常（它反映的是「此刻实际」），"
+                           "要判断速度是否被限制请看请求倍率。"
+                           % (actual if actual is not None else "不可用",
+                              target if target is not None else "不可用")),
+               "data": {"speed_scaling": actual, "target_speed_fraction": target, "ip": ip}})
 
 
 def op_set_gravity(p):
@@ -2227,38 +3028,112 @@ def op_get_tcp_force(p):
 
 
 def op_conveyor_tracking(p):
-    """传送带跟踪（线性/圆形）的开启与关闭。
+    """传送带跟踪：编码器设置 / 线性跟踪 / 圆盘跟踪 / 停止。
 
-    action = "linear" / "circular" 需要给出编码器与传送带参数；action = "stop" 停止跟踪。
-    ⚠️ 会改变机器人的运动学行为：开启后机器人会跟随传送带运动，请确认机械臂周围安全。
+    ## 这一版是**按手册重写**的（旧版每个实参都在错误的位置）
+
+    旧实现发的是 `conveyor_pulse_decode(a, b, 0)` /
+    `set_conveyor_tick_count(0, ticks_per_meter)` /
+    `track_conveyor_linear(p[0,…], speed)` / `track_conveyor_circular(p[0,…], radius, speed)`。
+    逐条对照 PolyScope 5 手册（`ScriptManual/txt/script_directory_Poly5.txt`）：
+
+    - `conveyor_pulse_decode(type,A,B)`（15.1，764 行）—— 第一个槽是**解码方式**，而旧代码把
+      "编码器 A 通道"放了进去；默认 `encoder_a=0` 恰好等于手册里 "0 is no encoder, pulse
+      decoding is disabled"（770 行），也就是**解码根本没开**。
+    - `set_conveyor_tick_count(tick_count, absolute_encoder_resolution)`（15.45，1595 行）——
+      第二个槽是 0-4 的**位宽枚举**，旧代码把"每米脉冲数"塞了进去；而且该参数被
+      `allow_zero=False` 校验，恰恰拒绝了唯一合理的值 0。
+    - `track_conveyor_linear(direction, ticks_per_meter, encoder_index=0)`（15.57，1772 行）——
+      第一个参是**方向位姿**，旧代码传的是零位姿；第二个参是每米脉冲数，旧代码传的是"速度"。
+    - `track_conveyor_circular(center, ticks_per_revolution, rotate_tool='False',
+      encoder_index=0)`（15.56，1746 行）—— 旧代码把"半径"当成每转脉冲数、把浮点数当成布尔量。
+
+    ⇒ 现在每个参数都按手册的槽位与量纲传，且**不再有默认的"速度"这种手册里不存在的概念**。
+
+    ⚠️ **未经真机验证**：本实现只保证"发出去的 URScript 与手册签名/语义一致"，签名本身已用
+    手册逐条核对（见上），但跟踪行为需要一台真的带编码器的传送带才能确认。请先在 URSim 上
+    试，并在真机上空载验证后再接工件。
+
+    action：
+      "setup_pulse"   —— 把控制器脉冲解码器挂到编码器上（`encoder_enable_pulse_decode`）
+      "setup_absolute"—— 告诉控制器编码器通过 `encoder_set_tick_count` 喂绝对值
+      "linear" / "circular" —— 开始跟踪（不含编码器设置，便于先设置一次、之后反复启停）
+      "stop"          —— 停止跟踪
     """
     ip = str(p["ip"])
     action = str(p.get("action", "")).lower()
     robot, _ = ensure_connected(ip)
     _assert_remote_control(ip, "conveyor_tracking")
+
+    def encoder_index():
+        return _bounded_int(p.get("encoder_index", 0), "encoder_index", 0, 1,
+                            "编码器编号（手册：只能是 0 或 1）")
+
     if action == "stop":
         script = "stop_conveyor_tracking()\n"
+        note = "已停止传送带跟踪"
+    elif action == "setup_pulse":
+        # encoder_enable_pulse_decode(encoder_index, decoder_type, A, B)
+        enc = encoder_index()
+        decoder = _bounded_int(p.get("decoder_type", 1), "decoder_type", 1, 4,
+                               "解码方式（1 正交 / 2 升降沿 / 3 升沿 / 4 降沿；手册里的 0 表示"
+                               "关闭解码，作为设置动作没有意义，故不接受）")
+        # 引脚范围随固件不同：CB3（3.x）脉冲解码器只有数字输入 0-3，
+        # e-Series / PolyScope X 是 8-11（手册 15.3：「A: Encoder input A pin. Must be 8-11」）。
+        # 两种都被接受，但由调用方显式给出 —— 猜错会让解码静默失效。
+        a = _bounded_int(p.get("encoder_a"), "encoder_a", 0, 11, "编码器 A 引脚")
+        b = _bounded_int(p.get("encoder_b"), "encoder_b", 0, 11, "编码器 B 引脚")
+        script = "encoder_enable_pulse_decode(%d, %d, %d, %d)\n" % (enc, decoder, a, b)
+        note = ("已把脉冲解码器挂到编码器 %d（方式 %d，引脚 A=%d B=%d）。"
+                "⚠️ 引脚合法范围随固件不同：CB3(3.x) 用 0-3，e-Series/PolyScope X 用 8-11"
+                % (enc, decoder, a, b))
+    elif action == "setup_absolute":
+        # encoder_enable_set_tick_count(encoder_index, range_id)
+        enc = encoder_index()
+        range_id = _bounded_int(p.get("range_id", 0), "range_id", 0, 4,
+                                "编码器计数范围（0=32 位有符号 … 4=32 位无符号）")
+        script = "encoder_enable_set_tick_count(%d, %d)\n" % (enc, range_id)
+        if p.get("tick_count") is not None:
+            tick = int(p["tick_count"])
+            script += "encoder_set_tick_count(%d, %d)\n" % (enc, tick)
+        note = "已把编码器 %d 配置为外部喂计数值（范围 %d）" % (enc, range_id)
     elif action in ("linear", "circular"):
-        # 编码器：a = 通道 A 输入、b = 通道 B 输入、ticks_per_meter = 每米脉冲数。
-        a = _bounded_int(p.get("encoder_a", 0), "encoder_a", 0, 7, "编码器 A 通道")
-        b = _bounded_int(p.get("encoder_b", 1), "encoder_b", 0, 7, "编码器 B 通道")
-        ticks = _nonneg_float(p.get("ticks_per_meter", 0), "ticks_per_meter",
-                              "每米脉冲数", allow_zero=False)
-        script = ("conveyor_pulse_decode({a}, {b}, 0)\nset_conveyor_tick_count(0, {t})\n"
-                  .format(a=a, b=b, t=ticks))
+        enc = encoder_index()
         if action == "linear":
-            script += ("track_conveyor_linear(p[0,0,0,0,0,0], %s)\n"
-                       % _bounded_float(p.get("speed", 0.1), "speed", 0.0, 5.0, "跟踪速度"))
+            # track_conveyor_linear(direction, ticks_per_meter, encoder_index=0)
+            direction = _vec(p, "direction", 6,
+                             "track_conveyor_linear 的 direction（基座系下传送带的方向位姿，"
+                             "例如 x 轴方向为 [1,0,0,0,0,0]）")
+            ticks = _nonneg_float(p.get("ticks_per_meter"), "ticks_per_meter",
+                                  "每米脉冲数（>0；手册：编码器走过 1 米产生的脉冲数）",
+                                  allow_zero=False)
+            script = "track_conveyor_linear(p%s, %s, %d)\n" % (
+                _ur_list(direction), _ur_number(ticks), enc)
+            note = "已开始线性跟踪（方向 p%s，%s 脉冲/米）" % (_ur_list(direction), _ur_number(ticks))
         else:
-            script += ("track_conveyor_circular(p[0,0,0,0,0,0], %s, %s)\n"
-                       % (_nonneg_float(p.get("radius", 0.1), "radius", "半径", allow_zero=False),
-                          _bounded_float(p.get("speed", 0.1), "speed", 0.0, 5.0, "跟踪速度")))
+            # track_conveyor_circular(center, ticks_per_revolution, rotate_tool='False',
+            #                          encoder_index=0)
+            center = _vec(p, "center", 6, "track_conveyor_circular 的 center（基座系下的圆心位姿）")
+            ticks = _nonneg_float(p.get("ticks_per_revolution"), "ticks_per_revolution",
+                                  "每转脉冲数（>0；手册：传送带转一圈编码器看到的脉冲数）",
+                                  allow_zero=False)
+            rotate_raw = p.get("rotate_tool", False)
+            rotate = "True" if (rotate_raw is True or str(rotate_raw).lower() in ("true", "1")) else "False"
+            script = "track_conveyor_circular(p%s, %s, %s, %d)\n" % (
+                _ur_list(center), _ur_number(ticks), rotate, enc)
+            note = "已开始圆盘跟踪（圆心 p%s，%s 脉冲/转，工具随传送带旋转=%s）" % (
+                _ur_list(center), _ur_number(ticks), rotate)
     else:
-        raise WorkerError("BADARG", 'action 必须是 "linear" / "circular" / "stop"，收到 %r' % action)
+        raise WorkerError(
+            "BADARG",
+            'action 必须是 "setup_pulse" / "setup_absolute" / "linear" / "circular" / "stop"，收到 %r'
+            % action)
+
     if not _send_program(robot, script):
         return err("传送带跟踪脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "传送带跟踪已下发：%s" % script.strip(),
-               "data": {"action": action, "command": script.strip(), "ip": ip}})
+    return ok({"message": "%s。下发脚本：%s" % (note, script.strip()),
+               "data": {"action": action, "command": script.strip(),
+                        "hardware_verified": False, "ip": ip}})
 
 
 def op_get_tool_analog_in(p):
@@ -2279,6 +3154,21 @@ def op_get_tool_analog_in(p):
     register = _bounded_int(p.get("read_register", 22), "read_register", 0, 23, "回读用寄存器")
     robot, model = ensure_connected(ip)
     _assert_remote_control(ip, "get_tool_analog_in")
+
+    # 优先走 RTDE 直读（tool_analog_input0/1）：零代价、也不打断当前运行的程序。
+    # 只有该字段读不到时，才退回下面"发脚本 + 回读寄存器"的笨办法。
+    direct = _rtde_field(model, "tool_analog_input%d" % n)
+    if direct is not None:
+        types_raw = _rtde_field(model, "tool_analog_input_types")
+        try:
+            types_value = None if types_raw is None else int(types_raw)
+        except Exception:
+            types_value = None
+        return ok({"message": "工具模拟输入 %d = %s（RTDE 直读；该通道类型编码 %s，按控制器文档解释）"
+                              % (n, direct, types_value if types_value is not None else "不可用"),
+                   "data": {"n": n, "value": float(direct), "source": "rtde",
+                            "tool_analog_input_types": types_value, "ip": ip}})
+
     before = None
     try:
         before = float(model.OutputDoubleRegister(register))
@@ -2402,6 +3292,24 @@ HANDLERS = {
     "movep": op_movep,
     "movec": op_movec,
     "servoj": op_servoj,
+    # ── 力控 / 速度控制 / 目标值（0.6.0，手册 15.x / 16.x / 18.x 交叉核对后新增）──
+    "force_mode": op_force_mode,
+    "end_force_mode": op_end_force_mode,
+    "force_mode_settings": op_force_mode_settings,
+    "speedj": op_speedj,
+    "speedl": op_speedl,
+    "stopj": op_stopj,
+    "stopl": op_stopl,
+    "wait_steady": op_wait_steady,
+    "get_target_values": op_get_target_values,
+    "tool_communication": op_tool_communication,
+    "set_tool_output_mode": op_set_tool_output_mode,
+    "set_payload_inertia": op_set_payload_inertia,
+    "get_tool_telemetry": op_get_tool_telemetry,
+    # OptiMove（jerk 受限的平滑运动）与 Motion Version 设置
+    "move_optimized": op_move_optimized,
+    "motion_version": op_motion_version,
+    "get_freedrive_status": op_get_freedrive_status,
     "get_digital_input_bits": op_get_digital_input_bits,
     "get_digital_output_bits": op_get_digital_output_bits,
     "get_conveyor": op_get_conveyor,

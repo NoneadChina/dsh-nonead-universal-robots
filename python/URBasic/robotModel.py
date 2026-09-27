@@ -211,13 +211,18 @@ class RobotModel(object):
         raise NotImplementedError('Function Not yet implemented')
 
     def TargetQ(self):
-        raise NotImplementedError('Function Not yet implemented')
+        '''目标关节角（rad）。字段 `target_q` 已加入 RTDE 输出配方（见
+        URBasic/rtdeConfiguration.xml）；上游此处是 NotImplementedError 桩，所以
+        「控制器打算去哪」这件事以前完全读不到，只能读实际位置。'''
+        return self.dataDir['target_q']
 
     def TargetQD(self):
-        raise NotImplementedError('Function Not yet implemented')
+        '''目标关节角速度（rad/s）。'''
+        return self.dataDir['target_qd']
 
     def TargetQDD(self):
-        raise NotImplementedError('Function Not yet implemented')
+        '''目标关节角加速度（rad/s²）。'''
+        return self.dataDir['target_qdd']
 
     def TargetCurrent(self):
         raise NotImplementedError('Function Not yet implemented')
@@ -247,10 +252,12 @@ class RobotModel(object):
         return self.dataDir['actual_TCP_force']
 
     def TargetTCPPose(self):
-        raise NotImplementedError('Function Not yet implemented')
+        '''目标 TCP 位姿（基座系）。字段 `target_TCP_pose` 已加入 RTDE 输出配方。'''
+        return self.dataDir['target_TCP_pose']
 
     def TargetTCPSpeed(self):
-        raise NotImplementedError('Function Not yet implemented')
+        '''目标 TCP 速度（基座系）。字段 `target_TCP_speed` 已加入 RTDE 输出配方。'''
+        return self.dataDir['target_TCP_speed']
 
     def JointTemperatures(self):
         return self.dataDir['joint_temperatures']

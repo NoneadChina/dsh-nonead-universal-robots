@@ -14,6 +14,18 @@
     RobotModel.OutputBitRegister() only fills 32..63 when that field is present, so
     without it indexes 32..63 read back null.
 
+    The five `target_*` fields (target_q / target_qd / target_qdd / target_TCP_pose /
+    target_TCP_speed) were added so the plugin can answer "where is the controller
+    *taking* the arm", not just "where is it now" — the difference is what makes a
+    blended/queued move, a cancelled program, or a robot held back by an obstacle
+    visible at all. They were previously absent, which is why
+    RobotModel.TargetQ/TargetTCPPose/TargetTCPSpeed were NotImplementedError stubs.
+
+    Total: 79 fields. UR accepts at most 96 *data values* in a receive configuration
+    (the two `output_bit_registers*` entries count as one 64-bit value, not two), so
+    there is room for a handful more — but every added field widens the 500 Hz packet,
+    so add only what a tool actually reads.
+
     There is intentionally NO `send` (input) recipe. This plugin performs every RTDE
     write over URScript instead (`RealTimeClient.Send("set_standard_digital_out(...)")`
     etc., see python/ur_worker.py's op_set_digital_out / op_set_payload and
@@ -37,6 +49,11 @@
         <field name="actual_TCP_pose" type="VECTOR6D"/>
         <field name="actual_TCP_speed" type="VECTOR6D"/>
         <field name="actual_TCP_force" type="VECTOR6D"/>
+        <field name="target_q" type="VECTOR6D"/>
+        <field name="target_qd" type="VECTOR6D"/>
+        <field name="target_qdd" type="VECTOR6D"/>
+        <field name="target_TCP_pose" type="VECTOR6D"/>
+        <field name="target_TCP_speed" type="VECTOR6D"/>
         <field name="actual_digital_input_bits" type="UINT64"/>
         <field name="joint_temperatures" type="VECTOR6D"/>
         <field name="robot_mode" type="INT32"/>
@@ -105,5 +122,22 @@
         <field name="output_double_register_21" type="DOUBLE"/>
         <field name="output_double_register_22" type="DOUBLE"/>
         <field name="output_double_register_23" type="DOUBLE"/>
+
+        <!-- 工具端电气遥测 / 模拟输入。URBasic 里对应的访问器（ToolOutputCurrent /
+             ToolOutputVoltage / IoCurrent / ToolAnalogInput0/1）全是 NotImplementedError 桩，
+             所以工具侧直接读这些字段。缺了它们：ur_get_tool_telemetry 只能返回 null，
+             ur_get_tool_analog_in 只能退回到"发脚本 + 回读寄存器"的笨办法（还会打断当前程序）。 -->
+        <field name="tool_output_voltage" type="INT32"/>
+        <field name="tool_output_current" type="DOUBLE"/>
+        <field name="tool_mode" type="UINT32"/>
+        <field name="tool_analog_input_types" type="UINT32"/>
+        <field name="tool_analog_input0" type="DOUBLE"/>
+        <field name="tool_analog_input1" type="DOUBLE"/>
+        <field name="io_current" type="DOUBLE"/>
+
+        <!-- 速度倍率：speed_scaling 是**实际**倍率（静止时控制器报 0 是正常的，不代表被限速），
+             target_speed_fraction 才是**请求**值。两个一起给，调用方才能区分
+             "速度被压到 0" 与 "只是没在动"。 -->
+        <field name="target_speed_fraction" type="DOUBLE"/>
     </receive>
 </rtde_config>
