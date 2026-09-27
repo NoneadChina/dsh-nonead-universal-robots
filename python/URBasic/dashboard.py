@@ -367,7 +367,12 @@ class DashBoard(threading.Thread):
 
         if self.__stop_event is False:
             self.__stop_event = True
-            self.join()
+            # 带超时的 join：接收线程可能正卡在 `__receive()` 里，无界 join 会把一次
+            # "断开连接" 变成新的卡死点。
+            try:
+                self.join(5.0)
+            except Exception:
+                pass
         if self.__sock:
             self.__sock.close()
             self.__sock = None
@@ -395,7 +400,15 @@ class DashBoard(threading.Thread):
             raise ValueError("UR Dashboard interface not able to connect and timed out!")
             # return
         
-        while (not self.__stop_event) and (time.time()-t0<self.__reconnectTimeout):
+        # ⚠️ 循环**不能**再带 `time.time()-t0<self.__reconnectTimeout` 这个条件。
+        # 上游写法会让接收线程在启动 60 s 后"正常"退出（退出时把状态置为 PAUSED，
+        # **但 socket 还开着**）⇒ `dbs_is_running()` 依旧返回 True、`__sock` 依旧可写，
+        # 可是再没有任何线程会去 `__receive()` 并 notify。于是 60 s 之后每一次
+        # `__send()` 都会把命令发出去、然后永久卡在 `wait_dbs()` 上：
+        # **整个单线程 worker 就此死掉**，而 Node 侧只看得到自己那句笼统超时。
+        # 这与 rtde.py 里同族缺陷（"60 s 后健康连接自杀"）是同一个根因。
+        # 现在只有 `__stop_event` 能结束接收循环；断链由 except 分支重连并继续。
+        while not self.__stop_event:
             try:
                 msg = self.__receive()
                 if msg is not None:
@@ -418,23 +431,59 @@ class DashBoard(threading.Thread):
                         pass
                     self.__sock = None
                     self.__connect()
+                    # 重连成功后必须回到"已启动"状态：否则 `dbs_is_running()` 永远为
+                    # False，而 `__send()` 的 select 又需要 socket 可写 ⇒ 命令有去无回。
+                    if self.__conn_state == ConnectionState.CONNECTED:
+                        self.__conn_state = ConnectionState.STARTED
 
-                if self.__conn_state >= ConnectionState.CONNECTED:
+                if self.__conn_state >= ConnectionState.STARTED:
                     # self._logger.info("Dashboard server interface reconnected")
                     print("Dashboard server interface reconnected")
                 else:
                     # self._logger.warning("Dashboard server reconnection failed!")
                     print("Dashboard server reconnection failed!")
+                time.sleep(0.5)
 
         self.__conn_state = ConnectionState.PAUSED
         with self.__dataEvent:
             self.__dataEvent.notifyAll()
         #self._logger.info("Dashboard server interface is stopped")
 
-    def wait_dbs(self):
-        '''Wait while the data receiving thread is receiving a new message.'''
+    def wait_dbs(self, timeout=None):
+        '''Wait while the data receiving thread is receiving a new message.
+
+        `timeout` 默认取 `__reconnectTimeout`：**必须**有上限。上游是无参的
+        `Condition.wait()` —— 一旦接收线程已经退出（见 run() 的注释），这个等待就再也
+        不会被唤醒，调用方（单线程 worker）永久卡死。
+        '''
+        if timeout is None:
+            timeout = self.__reconnectTimeout
         with self.__dataEvent:
-            self.__dataEvent.wait()
+            return bool(self.__dataEvent.wait(timeout))
+
+    def sendCommand(self, cmd):
+        '''发送一条 Dashboard 命令并**同步等待**它自己的应答。
+
+        Return value: (ok: bool, respond: str)
+
+        ## 为什么需要这个包装（陈旧应答）
+        上游 `__send()` 的流程是「sendall → `wait_dbs()` → return」，而 `wait_dbs()`
+        只等"任意一次 notify"，**不校验应答属于哪条命令**；`last_respond` 也只在真正
+        收到消息时才被覆盖。结果：如果接收线程恰好死掉（或应答还没回来），调用方读到的
+        是**上一条命令的应答**。这对 `is in remote control` 是致命的 —— 例如上一条
+        `isProgramSaved` 刚回过 "True"，于是一台**没在远程控制模式**的机器人被报成
+        `remote_control: true`，模型据此下发 URScript 并被控制器静默丢弃。
+        ⇒ 这里先清空 `last_respond`，再发送，然后只认"发送之后新到达"的应答。
+        '''
+        self.last_respond = None
+        try:
+            getattr(self, cmd)()
+        except Exception as exc:
+            return False, '%s: %s' % (type(exc).__name__, exc)
+        respond = self.last_respond
+        if respond is None:
+            return False, ''
+        return True, str(respond).strip()
         
     def __send(self, cmd):
         '''
@@ -447,24 +496,38 @@ class DashBoard(threading.Thread):
         success (boolean)
         '''
         t0 = time.time()
+        last_fail_log = 0.0
         while (time.time()-t0<self.__reconnectTimeout):
+            if self.__sock is None:
+                # 接收线程已判定断链：这里不能再去 select([None]) —— 那会抛 TypeError
+                # 被下面的裸 except 吞掉，变成"静默失败 + 空转"，调用方拿不到任何原因。
+                if not self.__connect():
+                    time.sleep(0.2)
+                    continue
             try:
                 buf = bytes(cmd, 'utf-8')
                 (_, writable, _) = select.select([], [self.__sock], [], DEFAULT_TIMEOUT)
                 if len(writable):
                     self.__sock.sendall(buf)
-                    self.wait_dbs()
+                    # 带超时地等应答：sendCommand() 依赖"发送之后新到达的应答"来避免
+                    # 读到陈旧值，超时返回 False 而不是永久阻塞。
+                    self.wait_dbs(DEFAULT_TIMEOUT * 2)
                     return True
             except:
-                # self._logger.error('Could not send program!')
-                print("Could not send program!")
+                # NOTE: this `except` sits inside the reconnect loop. With a dead socket
+                # `select.select` raises immediately, so upstream's unconditional print
+                # turns into a tight loop — measured 296,644 lines of
+                # "Could not send program!" in one session (it pushed the worker log to
+                # the 8 MB cap) while burning CPU. Throttle the line to one per 5 s and
+                # give the loop real time back (each iteration is a failed send anyway).
+                now = time.time()
+                if now - last_fail_log >= 5:
+                    print("Could not send program!")
+                    last_fail_log = now
+                time.sleep(0.2)
 
         # self._logger.error('Program re-sending timed out - Could not send program!')
         return False
-
-
-
-      
 
     def __receive(self):
         '''
@@ -473,6 +536,10 @@ class DashBoard(threading.Thread):
         Return value:
         Output from Robot controller (type is depended on the input parameters)
         '''
+        if self.__sock is None:
+            # 同上：断链后 `select.select([None], ...)` 抛 TypeError 会冲出接收线程，
+            # 线程一死 `wait_dbs()` 就再也不会被唤醒。
+            return None
         (readable, _, _) = select.select([self.__sock], [], [], DEFAULT_TIMEOUT)
         if len(readable):
             data = self.__sock.recv(1024)

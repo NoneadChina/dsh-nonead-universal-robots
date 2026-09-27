@@ -55,8 +55,21 @@ class UrScript(object):
     #############   Module motion   ###############
 
     def waitRobotIdleOrStopFlag(self):
+        '''等程序跑完（或收到停止标志）。
 
+        **必须有时间上限**：上游是 `while RuntimeState() and not StopRunningFlag: sleep(0.002)`
+        的忙等。`RuntimeState()` 就是 `RobotModel.rtcProgramRunning`，而它是被
+        `RealTimeClient.__waitForProgram2Finish` 那个守护线程清掉的 —— 那个线程一旦因异常
+        （RTDE 数据未就绪时 `SafetyStatus()` 会抛 TypeError）或未复位标志而死，这里就会
+        **永久自旋**，把单线程 worker 整条调用链锁死。现在超时后抛 TimeoutError，
+        让 worker 回报一句可读的错误而不是卡住。
+        '''
+        deadline = time.time() + self.robotConnector.RobotModel.idleTimeout
         while (self.robotConnector.RobotModel.RuntimeState() and not self.robotConnector.RobotModel.StopRunningFlag()):
+            if time.time() > deadline:
+                raise TimeoutError(
+                    '等待机器人程序结束超时（%.0fs）：程序可能仍在运行，或程序状态位不可用'
+                    % self.robotConnector.RobotModel.idleTimeout)
             time.sleep(0.002)
 
         if self.robotConnector.RobotModel.rtcProgramExecutionError:
@@ -1194,13 +1207,26 @@ end
         '''
         time.sleep(t)
 
-    def sync(self):
+    def sync(self, timeout=None):
         '''
         Uses up the remaining "physical" time a thread has in the current
         frame/sample.
+
+        **必须有时间上限**：上游是 `while RobotTimestamp() == initialRobotTime: sleep(0.001)`
+        —— 只要 RTDE 的时间戳不再推进就永久自旋。所有 `get_actual_*` 读取都默认
+        `wait=True` ⇒ 经 sync() 进来，因此这条自旋曾经能把 worker 卡死在最基础的
+        "读一次关节角"上。时间戳不推进既可能是链路已死，也可能是 RTDE 接收线程已退出
+        （见 rtde.py 的 `__wait` 注释），两种情况都不该等下去。
         '''
+        if timeout is None:
+            timeout = self.robotConnector.RobotModel.syncTimeout
         initialRobotTime = self.robotConnector.RobotModel.RobotTimestamp()
+        deadline = time.time() + timeout
         while (self.robotConnector.RobotModel.RobotTimestamp() == initialRobotTime):
+            if time.time() > deadline:
+                raise TimeoutError(
+                    '等待新的 RTDE 数据超时（%.0fs）：控制器没有更新机器人时间戳，'
+                    '连接可能已断开或 RTDE 数据流已停止' % timeout)
             time.sleep(0.001)
 
     def textmsg(self, s1, s2=''):
@@ -1348,16 +1374,15 @@ end
         Return Value:
         float, The signal level [0;1]
         '''
-        if n == 0:
-            if (wait):
-                self.sync()
-            return self.robotConnector.RobotModel.StandardAnalogOutput0
-        elif n == 1:
-            if (wait):
-                self.sync()
-                return self.robotConnector.RobotModel.StandardAnalogOutput1
-        else:
+        # ⚠️ 上游读的是 `RobotModel.StandardAnalogOutput0` / `...1` —— **这两个属性都不存在**
+        # （只有无参的 `StandardAnalogOutput()`），因此分支只会抛 AttributeError；而且 `n == 1`
+        # 那条把 `return` 写进了 `if wait:` 里，`wait=False` 时返回 None。
+        # 现在统一走存在的 `StandardAnalogOutput(n)`（读 RTDE 的 standard_analog_output{0,1}）。
+        if n not in (0, 1):
             raise KeyError('Index out of range')
+        if (wait):
+            self.sync()
+        return self.robotConnector.RobotModel.StandardAnalogOutput(n)
 
     def get_standard_digital_in(self, n, wait=True):
         '''
@@ -1417,10 +1442,18 @@ end
         boolean, The signal level.
         '''
         # Tool digital inputs are NOT carried by RTDE — only via URScript.
-        # `read_tool_digital_in` is an expression, so it must run inside a
+        # `get_tool_digital_in(n)` is an expression, so it must run inside a
         # program; we stash its result into output_int_register_0 and read it
         # back over RTDE (same pattern as get_conveyor_tick_count).
-        prg = 'def ur_get_tool_digital_in():\n    write_output_int_register(0, read_tool_digital_in({n}))\nend\n'.format(**locals())
+        #
+        # ⚠️ 上游这里写的是 `write_output_int_register(0, read_tool_digital_in(n))` ——
+        # **两个函数名在 UR 脚本手册里都不存在**（手册里是 `write_output_integer_register`
+        # 与 `get_tool_digital_in`；已用仓库内 ScriptManual/*.pdf 逐一核对）。
+        # 也就是说这个"读取工具数字输入"从来没能工作过：控制器会因未知函数拒收整段脚本，
+        # 而本函数随后仍然回读寄存器 0 的值 ⇒ **把陈旧值当成输入电平报出去**。
+        prg = ('def ur_get_tool_digital_in():\n'
+               '    write_output_integer_register(0, get_tool_digital_in({n}))\n'
+               'end\n').format(**locals())
         self.robotConnector.RealTimeClient.SendProgram(prg)
         self.waitRobotIdleOrStopFlag()
         return bool(self.robotConnector.RobotModel.OutputIntRegister(0))
@@ -1438,11 +1471,15 @@ end
         Return Value:
         boolean, The signal level.
         '''
-        # Not implemented. Tool digital outputs are set with `write_tool_digital_out`
-        # and are not carried by RTDE; there is no reliable `read_tool_digital_out`
-        # expression to run, so a read-back is not supported. Use `set_tool_digital_out`
-        # to control the output and treat the level as write-only.
-        raise NotImplementedError('Function Not yet implemented (tool digital output has no reliable read-back; use set_tool_digital_out)')
+        # `get_tool_digital_out(n)` exists in the UR script manual (verified
+        # against ScriptManual/*.pdf), so the read-back the old version declared
+        # impossible is available after all. Same stash-and-read-back pattern.
+        prg = ('def ur_get_tool_digital_out():\n'
+               '    write_output_integer_register(1, get_tool_digital_out({n}))\n'
+               'end\n').format(**locals())
+        self.robotConnector.RealTimeClient.SendProgram(prg)
+        self.waitRobotIdleOrStopFlag()
+        return bool(self.robotConnector.RobotModel.OutputIntRegister(1))
 
     def modbus_add_signal(self, IP, slave_number, signal_address, signal_type, signal_name):
         '''
@@ -2010,10 +2047,15 @@ end
         b: The signal level. (boolean)
         '''
         # Tool digital outputs are not exposed to RTDE, so they must be set via
-        # URScript. `write_tool_digital_out` is a command (not an expression), so
-        # a fire-and-forget Send is enough — there is nothing to read back.
-        value = 1 if b else 0
-        self.robotConnector.RealTimeClient.Send('write_tool_digital_out({n}, {value})\n'.format(n=n, value=value))
+        # URScript.
+        #
+        # ⚠️ 上游发的是 `write_tool_digital_out(n, value)` —— **手册里没有这个函数**
+        # （正确名称是 `set_tool_digital_out(n, b)`；已用仓库内 ScriptManual/*.pdf 核对）。
+        # 后果是控制器拒收这段脚本，而调用方只看到"已发送" ⇒ **数字输出永远没被设置，
+        # 工具却回报成功**。这里改用手册里的真名。
+        value = 'True' if b else 'False'
+        self.robotConnector.RealTimeClient.Send(
+            'set_tool_digital_out({n}, {value})\n'.format(n=n, value=value))
 
     def set_tool_voltage(self, voltage):
         '''

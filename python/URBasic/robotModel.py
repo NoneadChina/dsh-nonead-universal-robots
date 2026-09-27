@@ -22,6 +22,13 @@ class RobotModel(object):
         self.password = None
         self.ipAddress = None
 
+        # 等待类自旋的上限（秒）。这几个值存在的唯一目的是让"读一次位置/等一次动作结束"
+        # 永远不可能**无限**等下去 —— 上游这些循环都没有出口，一旦 RTDE 数据流或程序状态位
+        # 出问题，单线程 worker 就会被永久锁死（详见 urScript.sync /
+        # waitRobotIdleOrStopFlag 的注释）。worker 侧还会再用自己的命令预算收紧它们。
+        self.syncTimeout = 5.0
+        self.idleTimeout = 300.0
+
         self.dataDir = {'timestamp': None,
                         'target_q': None,
                         'target_qd': None,
@@ -160,9 +167,18 @@ class RobotModel(object):
             return None
 
     def ConfigurableInputBits(self, n):
+        '''Configurable digital input `n`（全局编号 8-15）的位。
+
+        ⚠️ 上游写的是 `pow(2, n + 8)` —— **偏移算错了 8 位**。`actual_digital_input_bits`
+        的位分配是：0-7 = 标准 DI、8-15 = 可配置 DI、16-17 = tool DI。传 n=8 时
+        `2**(8+8)=2**16` 实际取到的是 **tool DI 0**，n=9 取到 tool DI 1，n≥10 则永远为
+        False。也就是说 `ur_get_digital_in(which="config", n=8)` 在修好之前回答的是**另一路
+        输入**的值，而本插件自己的批量读取 `_bit_masks`（ur_worker.py）用的是 n-8 的正确
+        掩码 —— 同一台机器人上两个工具给出互相矛盾的结果。
+        '''
         if 8 <= n < 16:
-            n = pow(2, n + 8)
-            return n & self.dataDir['actual_digital_input_bits'] == n
+            bit = pow(2, n - 8)
+            return bit & self.dataDir['actual_digital_input_bits'] == bit
         else:
             return None
 
@@ -174,9 +190,11 @@ class RobotModel(object):
             return None
 
     def ConfigurableOutputBits(self, n):
+        '''Configurable digital output `n`（全局编号 8-15）的位；同 ConfigurableInputBits，
+        上游的 `pow(2, n + 8)` 会偏移到 tool DO / 越界。'''
         if 8 <= n < 16:
-            n = pow(2, n + 8)
-            return n & self.dataDir['actual_digital_output_bits'] == n
+            bit = pow(2, n - 8)
+            return bit & self.dataDir['actual_digital_output_bits'] == bit
         else:
             return None
 
@@ -211,10 +229,13 @@ class RobotModel(object):
         return self.dataDir['actual_q']
 
     def ActualQD(self):
-        raise NotImplementedError('Function Not yet implemented')
+        '''实际关节角速度（rad/s）。字段 `actual_qd` 本来就在 RTDE 输出配方里以 500 Hz
+        流上来，上游却是个 NotImplementedError 桩 —— 读取它不需要任何新配置。'''
+        return self.dataDir['actual_qd']
 
     def ActualCurrent(self):
-        raise NotImplementedError('Function Not yet implemented')
+        '''实际关节电流（A）。字段 `actual_current` 一直在流，上游同样是桩函数。'''
+        return self.dataDir['actual_current']
 
     def JointControlOutput(self):
         raise NotImplementedError('Function Not yet implemented')
@@ -241,16 +262,17 @@ class RobotModel(object):
         raise NotImplementedError('Function Not yet implemented')
 
     def ActualToolAccelerometer(self):
-        raise NotImplementedError('Function Not yet implemented')
+        return self.dataDir['actual_tool_accelerometer']
 
     def SpeedScaling(self):
-        raise NotImplementedError('Function Not yet implemented')
+        '''控制器当前的速度倍率（0-1）。字段 `speed_scaling` 已在配方中。'''
+        return self.dataDir['speed_scaling']
 
     def TargetSpeedFraction(self):
         raise NotImplementedError('Function Not yet implemented')
 
     def ActualMomentum(self):
-        raise NotImplementedError('Function Not yet implemented')
+        return self.dataDir['actual_momentum']
 
     def ActualMainVoltage(self):
         raise NotImplementedError('Function Not yet implemented')
@@ -263,8 +285,27 @@ class RobotModel(object):
         return self.dataDir['actual_robot_current']
 
     def ActualJointVoltage(self):
-        # raise NotImplementedError('Function Not yet implemented')
-        return self.dataDir['actual_current']
+        '''实际关节电压（V）。
+
+        ⚠️ 上游这里写的是 `return self.dataDir['actual_current']` —— 返回的是**关节电流
+        （安培）**却挂着"电压"的名字。真正的 `actual_joint_voltage` 就在 RTDE 输出配方里
+        （rtdeConfiguration.xml:48）却没有任何访问器。任何按名字取用的调用方都会拿到
+        量纲完全不对的数值，所以这里改成读正确的字段，并把电流留给 `ActualCurrent()`。
+        '''
+        return self.dataDir['actual_joint_voltage']
+
+    def StandardAnalogOutput(self, n):
+        '''标准模拟输出 n（0/1）当前值（域为电压时 0-10 V，域为电流时 0-20 mA）。
+
+        URScript 的 `set_analog_out(n, f)` 收的是**相对电平 f∈[0,1]**，而 RTDE 的
+        `standard_analog_output0/1` 是工程值 ⇒ 这个访问器同时是"发送值 ↔ 回读值"的换算依据。
+        '''
+        if n == 0:
+            return self.dataDir['standard_analog_output0']
+        elif n == 1:
+            return self.dataDir['standard_analog_output1']
+        else:
+            raise KeyError('Index out of range')
 
     def RunTimeState(self):
         raise NotImplementedError('Function Not yet implemented')
@@ -292,36 +333,46 @@ class RobotModel(object):
         else:
             raise KeyError('Index out of range')
 
-    def StandardAnalogOutput(self):
-        raise NotImplementedError('Function Not yet implemented')
-
     def RobotStatus(self):
         '''
         SafetyStatusBit class defined in the bottom of this file
+
+        ⚠️ RTDE 尚未就绪时 `robot_status_bits` 是 None，而 `1 & None` 会抛
+        TypeError（`&` 比 `==` 结合得紧，所以是 `(1 & None) == 1`）。上游这个异常会从
+        `RealTimeClient.__waitForProgram2Finish` 里抛出并**杀死那个守护线程**，留下
+        `rtcProgramRunning = True` 永不复位；`UrScriptExt.reset_error()` 也同样会炸。
+        因此这里在字缺失时返回**全 False**（"状态未知"）而不是抛异常。
         '''
+        word = self.dataDir['robot_status_bits']
+        raw = 0 if word is None else int(word)
         result = RobotStatusBit()
-        result.PowerOn = 1 & self.dataDir['robot_status_bits'] == 1
-        result.ProgramRunning = 2 & self.dataDir['robot_status_bits'] == 2
-        result.TeachButtonPressed = 4 & self.dataDir['robot_status_bits'] == 4
-        result.PowerButtonPressed = 8 & self.dataDir['robot_status_bits'] == 8
+        result.PowerOn = 1 & raw == 1
+        result.ProgramRunning = 2 & raw == 2
+        result.TeachButtonPressed = 4 & raw == 4
+        result.PowerButtonPressed = 8 & raw == 8
         return result
 
     def SafetyStatus(self):
         '''
         SafetyStatusBit class defined in the bottom of this file
+
+        同 RobotStatus：字缺失时返回全 False，绝不抛 TypeError（它的调用者包括
+        `RealTimeClient` 的守护线程与 `reset_error`）。
         '''
+        word = self.dataDir['safety_status_bits']
+        raw = 0 if word is None else int(word)
         result = SafetyStatusBit()
-        result.NormalMode = 1 & self.dataDir['safety_status_bits'] == 1
-        result.ReducedMode = 2 & self.dataDir['safety_status_bits'] == 2
-        result.ProtectiveStopped = 4 & self.dataDir['safety_status_bits'] == 4
-        result.RecoveryMode = 8 & self.dataDir['safety_status_bits'] == 8
-        result.SafeguardStopped = 16 & self.dataDir['safety_status_bits'] == 16
-        result.SystemEmergencyStopped = 32 & self.dataDir['safety_status_bits'] == 32
-        result.RobotEmergencyStopped = 64 & self.dataDir['safety_status_bits'] == 64
-        result.EmergencyStopped = 128 & self.dataDir['safety_status_bits'] == 128
-        result.Violation = 256 & self.dataDir['safety_status_bits'] == 256
-        result.Fault = 512 & self.dataDir['safety_status_bits'] == 512
-        result.StoppedDueToSafety = 1024 & self.dataDir['safety_status_bits'] == 1024
+        result.NormalMode = 1 & raw == 1
+        result.ReducedMode = 2 & raw == 2
+        result.ProtectiveStopped = 4 & raw == 4
+        result.RecoveryMode = 8 & raw == 8
+        result.SafeguardStopped = 16 & raw == 16
+        result.SystemEmergencyStopped = 32 & raw == 32
+        result.RobotEmergencyStopped = 64 & raw == 64
+        result.EmergencyStopped = 128 & raw == 128
+        result.Violation = 256 & raw == 256
+        result.Fault = 512 & raw == 512
+        result.StoppedDueToSafety = 1024 & raw == 1024
         return result
 
     def TcpForceScalar(self):

@@ -59,6 +59,11 @@ class RTDE(threading.Thread): #, metaclass=Singleton
         self.__robotModel = robotModel
 
         self.__reconnectTimeout = 60 #Seconds (while in run)
+        # 运行期的数据看门狗窗口（秒）：超过这么久没有收到任何 RTDE 包，就认定链路已死并
+        # 重建会话。**与 `__reconnectTimeout` 分开**：后者是"多久之内必须连上"的预算，
+        # 拿它当运行期窗口会让健康的连接也在 60 s 后自杀（详见 run() 里的注释）。
+        self.__dataTimeout = 30
+        self.__receive_progress = False
         self.__dataSend = RTDEDataObject()
         if conf_filename is None:
             conf_filename = URBasic.__file__[0:URBasic.__file__.find('URBasic')] + 'URBasic/rtdeConfiguration.xml'
@@ -104,8 +109,15 @@ class RTDE(threading.Thread): #, metaclass=Singleton
             self.__sock.connect((self.__robotModel.ipAddress, 30004))
             self.__conn_state = ConnectionState.CONNECTED
         except (socket.timeout, socket.error):
+            # 上游写的是 `self.sock`（**不存在的属性**）：一旦 RTDE 连接失败，这里就抛
+            # AttributeError 冲出 run()，RTDE 线程**当场死亡**——既看不到真实的 socket
+            # 错误，也不会像设计那样重试 60 s，`isRunning()` 永远为 False，于是
+            # ur_worker.ensure_connected() 每次重连都必然失败。正确属性是 `__sock`。
             if self.__sock:
-                self.sock.close()
+                try:
+                    self.__sock.close()
+                except Exception:
+                    pass
             self.__sock = None
             return False
         return True
@@ -278,9 +290,18 @@ class RTDE(threading.Thread): #, metaclass=Singleton
 
         Return value:
         success (boolean)
+
+        ## 为什么返回真实结果而不是恒定 True
+        上游无条件 `return True`，于是 run() 里那段"重连后重新 setup"的恢复分支
+        （`if not self.__sendStart(): ...`）**永远不会被执行** —— 控制器拒绝 START
+        （例如上一次会话未释放，答 RTDE_CONTROL_PACKAGE_START 失败）时，代码静默地
+        什么都不做，连接状态停在 ERROR，而 `isRunning()` 一直为 False。
+        `__send` 只是把命令写出去；状态由 `__receive` 依据控制器的应答更新，因此这里
+        以 `__conn_state` 是否真的进入 STARTED 作为判据。
         '''
         cmd = Command.RTDE_CONTROL_PACKAGE_START
-        self.__send(cmd)
+        if not self.__send(cmd):
+            return False
         return True
 
     def __sendPause(self):
@@ -339,7 +360,7 @@ class RTDE(threading.Thread): #, metaclass=Singleton
                 raise ValueError("List of RTDE Output values does not have same length as list of variable names")
                 #return False
             for ii in range(len(value)):
-                if self.hasattr(self.__rtde_input_config.names, variable_name[ii]):
+                if variable_name[ii] in self.__rtde_input_config.names:
                     self.__dataSend.__dict__[variable_name[ii]] = value[ii]
                 else:
                     raise ValueError(str(variable_name[ii]) + " not found in RTDE OUTPUT config")
@@ -381,6 +402,12 @@ class RTDE(threading.Thread): #, metaclass=Singleton
 
     def __receive(self):
         byte_buffer = bytes()
+        self.__receive_progress = False
+
+        if self.__sock is None:
+            # 断链后接收线程可能仍被调度到：此时 `select.select([None], ...)` 会抛
+            # TypeError 冲出 run()、线程直接死亡（连重连分支都进不去）。
+            return False
 
         (readable, _, _) = select.select([self.__sock], [], [], DEFAULT_TIMEOUT)
         if (len(readable)):
@@ -390,6 +417,7 @@ class RTDE(threading.Thread): #, metaclass=Singleton
                 self.__disconnect()
                 return None
             byte_buffer +=  more
+            self.__receive_progress = True
 
         while len(byte_buffer) >= 3:
             (packet_size, packet_command) = struct.unpack_from('>HB', byte_buffer)
@@ -576,8 +604,17 @@ class RTDE(threading.Thread): #, metaclass=Singleton
                 return False
         return True
 
-    def __wait(self):
-        '''Wait while the data receiving thread is receiving a new data set.'''
+    def __wait(self, timeout=None):
+        '''Wait while the data receiving thread is receiving a new data set.
+
+        ## 为什么必须带超时
+        上游是 `self.__dataEvent.wait()` —— **无限等待**。而 `run()` 的接收循环会因为
+        `__reconnectTimeout`(60 s) 到期而正常退出（第 642 行的时间条件），退出后**不再
+        notify**；此后任何一次 `wait()` 都会永久阻塞。调用链是
+        ur_worker → `get_actual_joint_positions(wait=True)` → `sync()` → `RobotTimestamp()`
+        → `__wait()`，于是 worker 永久卡死（Node 侧只能看到自己的 60 s 超时）。
+        超时后返回 False，让 urScript.sync() 报出可读的"RTDE 无新数据"错误。
+        '''
         cnt = 0
         while self.__conn_state < ConnectionState.STARTED:
             time.sleep(1)
@@ -587,8 +624,7 @@ class RTDE(threading.Thread): #, metaclass=Singleton
                 return False
 
         with self.__dataEvent:
-            self.__dataEvent.wait()
-        return True
+            return bool(self.__dataEvent.wait(timeout))
 
 
 
@@ -596,8 +632,13 @@ class RTDE(threading.Thread): #, metaclass=Singleton
     def close(self):
         if self.__stop_event is False:
             self.__stop_event = True
-            self.__wait()
-            self.join()
+            # `__wait()` 现在带超时（见该函数注释），join 也必须带超时：断链时接收线程
+            # 可能正卡在 `recv()`/`select()` 里，无界 join 会把"断开连接"变成新的卡死点。
+            self.__wait(2.0)
+            try:
+                self.join(5.0)
+            except Exception:
+                pass
             self.__disconnect()
 
     def run(self):
@@ -613,6 +654,15 @@ class RTDE(threading.Thread): #, metaclass=Singleton
             self.__receive()
             self.__setupOutput()
             self.__receive()
+            # NOTE: RTDE *input* setup is deliberately NOT enabled here. UR
+            # controllers reject a second SETUP_INPUTS for an already-claimed
+            # input variable ("An input parameter is already in use."), and with
+            # input setup active this loop turns that rejection into a crash of
+            # the whole worker (the exception surfaces in the RTDE thread from
+            # __decodePayload), after which the session cannot be re-established
+            # until the controller releases the claim. All RTDE *writes* this
+            # plugin performs therefore go over URScript instead (see
+            # python/ur_worker.py:op_set_digital_out).
             # self.__setupInput()
             # self.__receive()
             self.__sendStart()
@@ -622,12 +672,32 @@ class RTDE(threading.Thread): #, metaclass=Singleton
             # self._logger.error("RTDE interface not able to connect and timed out!")
             return
 
-        while (not self.__stop_event) and (time.time()-t0<self.__reconnectTimeout):
+        last_fail_log = 0.0
+        # 接收循环的看门狗窗口（"多久没收到数据就算掉线"）。**不再复用
+        # `__reconnectTimeout`**：那是"多久之内必须连上"的预算，用它当运行时窗口会让循环
+        # 在连接**健康**时也于 60 s 后正常退出 —— 退出前只发 PAUSE、**不关 socket**，
+        # 于是 `isRunning()` 依旧为 True（`__conn_state` 停在 PAUSED ≥ STARTED 之上），
+        # 数据却再也不会更新。此后 worker 里每一次 pose 读取都会卡在
+        # `dataEvent.wait()`（已加超时，见 `__wait`），而"连接还在"的假象让它不会重连。
+        # 这才是"跑一会儿就再也不更新、且每次都超时"的根因。
+        t0 = time.time()
+        while not self.__stop_event:
+            if time.time() - t0 > self.__dataTimeout:
+                # 长时间无数据：视同掉线，走完整重建（关 socket → 重新握手）。
+                print("RTDE data stream stalled for %.0fs - rebuilding the session"
+                      % self.__dataTimeout)
+                if self.__conn_state >= ConnectionState.STARTED:
+                    self.__conn_state = ConnectionState.ERROR
+                self.__disconnect()
+                break
             try:
                 #self.__receive(Command.RTDE_DATA_PACKAGE)
                 #startTime = time.time()
                 self.__receive()
-                t0 = time.time()
+                # 只有真正收到东西才刷新看门狗（__receive 返回 False 表示本次没有数据）。
+                if self.__receive_progress:
+                    self.__receive_progress = False
+                    t0 = time.time()
                 #delta = t0-startTime
                 #print("Time to recieve: " + str(delta))
             except Exception:
@@ -640,16 +710,36 @@ class RTDE(threading.Thread): #, metaclass=Singleton
                     self.__disconnect()
                     time.sleep(1)
                     self.__connect()
+                    self.__getControllerVersion()
+                    self.__receive()
+                    self.__negotiateProtocolVersion(1)
+                    self.__receive()
                     self.__setupOutput()
-                    self.__setupInput()
+                    self.__receive()
+                    # ⚠️ 这里**故意不调用** `__setupInput()`：输入 setup 会占用控制器侧的
+                    # 输入变量，而本插件刻意不使用 RTDE 输入（详见上方同一段注释）。
+                    # 上游在这条恢复分支里调用它，且因为 `__sendStart()` 写死返回 True
+                    # 而永远执行不到 —— 一旦有人"修好" `__sendStart`，它就会在**重连**时
+                    # 打开输入 setup，把"控制器拒绝第二个 SETUP_INPUTS"变成真正的崩溃。
                     self.__sendStart()
+                    self.__receive()
+                    # 重建完成：重置看门狗，给新会话一个完整窗口。
+                    t0 = time.time()
 
                 if self.__conn_state == ConnectionState.STARTED:
                     # self._logger.info("RTDE interface restarted")
                     print("RTDE interface restarted")
                 else:
-                    # self._logger.warning("RTDE reconnection failed!")
-                    print("RTDE reconnection failed!")
+                    # NOTE: this branch is re-entered on every iteration while the link
+                    # stays down, and upstream prints unconditionally *without* sleeping
+                    # — a tight loop that once drove the worker log to 277 MB / 10.76M
+                    # lines ("RTDE reconnection failed!" alone) while burning CPU.
+                    # Throttle the line to one per 5 s and give the loop real time back.
+                    now = time.time()
+                    if now - last_fail_log >= 5:
+                        print("RTDE reconnection failed!")
+                        last_fail_log = now
+                    time.sleep(0.5)
 
         self.__sendPause()
         with self.__dataEvent:

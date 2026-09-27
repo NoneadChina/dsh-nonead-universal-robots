@@ -1,0 +1,109 @@
+<?xml version="1.0"?>
+<!--
+    Plugin-owned RTDE recipe. URBasic/rtde.py resolves its configuration file in this
+    order (rtde.py `__init__`):
+
+        1. URBasic/rtdeConfiguration.xml        <- this file
+        2. URBasic/rtdeConfigurationDefault.xml <- vendored upstream fallback
+
+    So this file takes precedence and the vendored default stays pristine.
+
+    It deliberately declares ONLY the `receive` (output) recipe — `__setupOutput` reads
+    it, and it mirrors the fields the vendored default has enabled plus
+    `output_bit_registers32_to_63`: `ur_get_bit_register` accepts indexes 0..63, and
+    RobotModel.OutputBitRegister() only fills 32..63 when that field is present, so
+    without it indexes 32..63 read back null.
+
+    There is intentionally NO `send` (input) recipe. This plugin performs every RTDE
+    write over URScript instead (`RealTimeClient.Send("set_standard_digital_out(...)")`
+    etc., see python/ur_worker.py's op_set_digital_out / op_set_payload and
+    python/URBasic/rtde.py's note in `run()`), so it never needs to claim an input
+    variable. Claiming one is actively harmful: UR controllers reject a second
+    SETUP_INPUTS for an already-claimed variable ("An input parameter is already in
+    use."), and that rejection surfaces from __decodePayload inside the RTDE thread and
+    crashes the whole worker — and the upstream reconnect branch in rtde.py calls
+    `__setupInput()` on every reconnect attempt, so a non-empty recipe here would fire
+    that rejection in a loop. With no `<send>` section, `__setupInput()` resolves to an
+    empty payload and claims nothing.
+
+    Universal Robots do not support more than 96 values in a receive or send config
+    at one time.
+-->
+<rtde_config>
+    <receive key="out">
+        <field name="actual_q" type="VECTOR6D"/>
+        <field name="actual_qd" type="VECTOR6D"/>
+        <field name="actual_current" type="VECTOR6D"/>
+        <field name="actual_TCP_pose" type="VECTOR6D"/>
+        <field name="actual_TCP_speed" type="VECTOR6D"/>
+        <field name="actual_TCP_force" type="VECTOR6D"/>
+        <field name="actual_digital_input_bits" type="UINT64"/>
+        <field name="joint_temperatures" type="VECTOR6D"/>
+        <field name="robot_mode" type="INT32"/>
+        <field name="actual_tool_accelerometer" type="VECTOR3D"/>
+        <field name="speed_scaling" type="DOUBLE"/>
+        <field name="actual_momentum" type="DOUBLE"/>
+        <field name="actual_robot_voltage" type="DOUBLE"/>
+        <field name="actual_robot_current" type="DOUBLE"/>
+        <field name="actual_joint_voltage" type="VECTOR6D"/>
+        <field name="actual_digital_output_bits" type="UINT64"/>
+        <field name="runtime_state" type="UINT32"/>
+        <field name="robot_status_bits" type="UINT32"/>
+        <field name="safety_status_bits" type="UINT32"/>
+        <field name="analog_io_types" type="UINT32"/>
+        <field name="standard_analog_input0" type="DOUBLE"/>
+        <field name="standard_analog_input1" type="DOUBLE"/>
+        <field name="standard_analog_output0" type="DOUBLE"/>
+        <field name="standard_analog_output1" type="DOUBLE"/>
+        <field name="output_bit_registers0_to_31" type="UINT32"/>
+        <field name="output_bit_registers32_to_63" type="UINT32"/>
+        <field name="output_int_register_0" type="INT32"/>
+        <field name="output_int_register_1" type="INT32"/>
+        <field name="output_int_register_2" type="INT32"/>
+        <field name="output_int_register_3" type="INT32"/>
+        <field name="output_int_register_4" type="INT32"/>
+        <field name="output_int_register_5" type="INT32"/>
+        <field name="output_int_register_6" type="INT32"/>
+        <field name="output_int_register_7" type="INT32"/>
+        <field name="output_int_register_8" type="INT32"/>
+        <field name="output_int_register_9" type="INT32"/>
+        <field name="output_int_register_10" type="INT32"/>
+        <field name="output_int_register_11" type="INT32"/>
+        <field name="output_int_register_12" type="INT32"/>
+        <field name="output_int_register_13" type="INT32"/>
+        <field name="output_int_register_14" type="INT32"/>
+        <field name="output_int_register_15" type="INT32"/>
+        <field name="output_int_register_16" type="INT32"/>
+        <field name="output_int_register_17" type="INT32"/>
+        <field name="output_int_register_18" type="INT32"/>
+        <field name="output_int_register_19" type="INT32"/>
+        <field name="output_int_register_20" type="INT32"/>
+        <field name="output_int_register_21" type="INT32"/>
+        <field name="output_int_register_22" type="INT32"/>
+        <field name="output_int_register_23" type="INT32"/>
+        <field name="output_double_register_0" type="DOUBLE"/>
+        <field name="output_double_register_1" type="DOUBLE"/>
+        <field name="output_double_register_2" type="DOUBLE"/>
+        <field name="output_double_register_3" type="DOUBLE"/>
+        <field name="output_double_register_4" type="DOUBLE"/>
+        <field name="output_double_register_5" type="DOUBLE"/>
+        <field name="output_double_register_6" type="DOUBLE"/>
+        <field name="output_double_register_7" type="DOUBLE"/>
+        <field name="output_double_register_8" type="DOUBLE"/>
+        <field name="output_double_register_9" type="DOUBLE"/>
+        <field name="output_double_register_10" type="DOUBLE"/>
+        <field name="output_double_register_11" type="DOUBLE"/>
+        <field name="output_double_register_12" type="DOUBLE"/>
+        <field name="output_double_register_13" type="DOUBLE"/>
+        <field name="output_double_register_14" type="DOUBLE"/>
+        <field name="output_double_register_15" type="DOUBLE"/>
+        <field name="output_double_register_16" type="DOUBLE"/>
+        <field name="output_double_register_17" type="DOUBLE"/>
+        <field name="output_double_register_18" type="DOUBLE"/>
+        <field name="output_double_register_19" type="DOUBLE"/>
+        <field name="output_double_register_20" type="DOUBLE"/>
+        <field name="output_double_register_21" type="DOUBLE"/>
+        <field name="output_double_register_22" type="DOUBLE"/>
+        <field name="output_double_register_23" type="DOUBLE"/>
+    </receive>
+</rtde_config>
