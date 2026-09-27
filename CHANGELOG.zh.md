@@ -2,6 +2,245 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.1] - 2026-09
+
+> 对整个项目做了一次审核（四路并行审计 + 我本人动手复核，报告在 `docs/audit/`），发现了一批
+> **测试看不见**的缺陷：运动审批门禁可被**完全绕过**、一个随包发布的文件**没有被 git 跟踪**、
+> `test:node` 不可能通过、两个运动工具的行为与文档不符。本版全部修掉，并把审计用的检查
+> 变成真正会失败的门禁。
+
+### 安全 — 审批门禁可被完全绕过（host-audit H-1）
+
+- **`lib/worker.js` 拼线上载荷时是 `{ id, op, _timeout_ms, ...params }`（`params` 展开在最后），
+  而门禁判定用的是闭包里的 `op`。** DSH 的值 schema 不拒绝未声明的参数，于是模型只要在任意
+  **未受门禁**的工具上多传一个 `{"op":"power_off"}`，worker 就会执行 `op_power_off` 而
+  **完全不弹确认**。全部 38 个受门禁的指令（`movej`、`send_script`、`run_program`、
+  `brake_release`、`force_mode`、`shutdown`…）都能这样触达；多传 `id` 还能让调用挂满超时后被 kill。
+- 修法：参数在到达 worker 之前，按**该工具自己声明的参数表**白名单过滤；`op` 永远取门禁判定
+  所用的那个闭包值，不可能被参数影响。`test/approval-gate.test.mjs` 驱动真实工具注册表，
+  断言注入的 `op` / `id` / `_timeout_ms` 一律到不了 worker。
+
+### 安全 — 门禁依赖 schema 应用默认值（host-audit M-6）
+
+- `requireApprovalForMotion` 是 `Config` 四个字段里**唯一**在 `apply()` 中没有 `??` 兜底的，
+  因此任何用"未经 schema 解析的裸 config"调用 `apply()` 的路径都会拿到 `undefined`，
+  于是**静默关掉整道门禁**（fail-open）。现在默认值落在代码里
+  （`config.requireApprovalForMotion ?? true`），并有测试钉住它。
+
+### 修复 — 受门禁清单不完整（host-audit H-2）
+
+- `set_payload` 没受门禁，而和它同类的 `set_payload_inertia` 受了 —— 两者都发
+  `set_payload_mass` + `set_payload_cog`，都会**把力/力矩测量归零**（与受门禁的
+  `zero_ftsensor` 同效）。`set_gravity` 同样没受门禁，而设错就是"松手后下坠或上飘"。
+  两者现已受门禁，并加了成对断言，防止将来只门禁其中一个。
+
+### 修复 — 两个工具的行为与文档不符（worker-audit HIGH-1 / HIGH-2）
+
+- **`draw_square` / `draw_rectangle` 把距离写进了旋转分量。** `coordinate="z"` 时竖直边写的是
+  `wp[1][3] -= border`，而索引 3 是 **rx（弧度）** —— 于是 `draw_square(border=0.2)` 让工具转了
+  ≈11.5° 而不是画方。现在两处都用索引 2（z，米），并用测试断言整条路点序列与"姿态分量全程不变"。
+- **`conveyor_tracking` 每个实参都在手册的错误槽位。** 它发的是 `conveyor_pulse_decode(a, b, 0)`
+  （第一槽是**解码方式**，而 `0` 的含义是"脉冲解码关闭"）、
+  `set_conveyor_tick_count(0, ticks_per_meter)`（第二槽是 0-4 位宽枚举）、以及
+  `track_conveyor_linear(p[0,…], speed)` / `track_conveyor_circular(p[0,…], radius, speed)`
+  （手册要的是方向/圆心位姿、每米/每转脉冲数、布尔量）。已按手册重写为
+  `setup_pulse` / `setup_absolute` / `linear` / `circular` / `stop` 五个动作，量纲正确，
+  并按固件区分编码器引脚范围（CB3 0-3、e-Series 8-11）。返回值里
+  `hardware_verified: false` 如实标注：签名已对过手册，但跟踪行为需要真带编码器的传送带才能确认。
+
+### 修复 — worker 错误处理里的崩溃路径（worker-audit MEDIUM）
+
+- `ur_worker.py` 的未预期异常分支要记 `req.get("op")`，而 `req` 是在 `try` **内部**绑定的 ——
+  于是一行坏 JSON 会在**异常处理里再抛** `UnboundLocalError`：既不回应本次请求，还让 worker
+  直接退出。现在 `req` 在 `try` 之前初始化；用 `scripts/probe-malformed-request.py` 复现并复核。
+
+### 修复 — 死掉的子进程会污染它的继任者（host-audit H-3）
+
+- `lib/worker.js` 的 `exit` 处理无条件清掉 `this.proc` / `_spawnPromise` 并失败**所有**在飞请求。
+  被 kill 的子进程，其 `exit` 事件完全可能在新子进程已经起来并开始服务之后才到达（500 ms 重启
+  退避窗口，而孪生面板每秒发约 20 次调用）——于是健康的调用会收到"UR worker exited"，而它的
+  子进程其实活着；`stats().running` 说谎；`dispose()` 可能留下一个仍占着控制器独占 RTDE 会话的
+  孤儿 Python 进程。现在只清理属于自己的状态、只失败**路由到该子进程**的请求，并为每个子进程
+  单独保留 stderr。
+- `proc.stdin` 上补了 `error` 监听：子进程死后写入触发的 EPIPE 是**未处理的 'error' 事件**，
+  它会掀掉整个 DSH 宿主进程，而不是让这一次调用失败。
+
+### 修复 — 审计仓库本身发现的发布阻断
+
+- **`python/URBasic/rtdeConfiguration.xml` 没有被 git 跟踪**，而 `package.json` 声明要发布它、
+  `test/rtde-config.test.mjs` 要求它存在、`rtde.py` 优先解析它（vendored Default 没有
+  `target_*` 字段、没有位寄存器 32-63、还带一个 `<send>` 段）。新克隆会静默丢掉这份配方。
+  现已纳入跟踪。
+- **`npm run test:node` 不可能通过**：`test/selftest.test.mjs` 会 spawn Python，却不在
+  `PYTHON_DEPENDENT` 里。名单现在由 `test/test-manifest.json` 描述，并由
+  `scripts/check-test-manifest.mjs` 从源码重新推导"哪些测试文件真的会调用 Python"并与名单对账
+  —— 漏登记会变成一次失败的自检，而不是一句莫名其妙的 `exit 1`。
+- 解释器探针现在验证 **worker 真正需要的依赖**（`import numpy`），而不是"Python 能启动"：
+  以前一个没有 numpy 的解释器会让那十个依赖 Python 的文件**被执行并失败**，于是环境问题被
+  误报成插件缺陷。
+- **`ur_set_analog_out` 从没声明 `full_scale`**，而 worker 会读它、两份 README 与 CHANGELOG 都
+  宣传它 —— 结果是 0-20 mA 端口根本用不了（`value=16` 会被"必须在 [0, 10.0] 内"拒掉）。
+  现已声明并写清域（电压 10 / 电流 20）的语义。
+- **`numberArray()` 把 `required` 写死成 `true`**，让"文档说可选"的数组在 schema 里变成必填
+  （`force_mode.task_frame` / `wrench` / `limits`、`set_payload_inertia.inertia`），
+  也使 `set_payload_inertia` 文档里写的 CB3 兜底路径完全不可达。现在 `required` 必须显式给。
+- 英文 README：审批门禁清单漏掉全部 0.6.0 新工具；安装片段仍写 `^0.4.0`（会装到 0.5.0 之前的版本）。
+
+### 新增 — 审计用的检查变成 `npm test` 里真正会失败的门禁
+
+- **`test/approval-gate.test.mjs`**（新增，9 个用例）：驱动真实工具注册表，逐条证明受门禁的
+  op 在获批前绝不下发；四条 fail-closed 路径（无审批服务 / 无 agent / 审批抛异常 / 任何非
+  `allowed-once` 应答）全部拒绝；只读 op 不打扰人；`requireApprovalForMotion: false` 才真正放行；
+  参数注入无法改派调用。
+- 六个审计脚本原来都是**只打印、永远 exit 0** —— 正是本项目自己反复警告的"绿灯说明不了什么"。
+  `check-worker-ops.py`、`check-approval-gate.py`、`check-rtde-recipe.py`、`check-tool-params.py`
+  现在会在真有问题时**非零退出**，并且全部（连同 `check-test-manifest`、`check-package-metadata`、
+  `check-doc-tools`，以及新增的 `check-client-bundle.mjs`）都接进了 `npm test` 与 `npm run check`。
+- `check-client-bundle.mjs` 取代了原来的"字面量抽样"启发式（要么只看 6/113 条、要么大量假警报），
+  改成**确定性的重建比对**：把 `src/client/**` 重建到临时文件再与提交产物比对，于是"产物落后于
+  源码"会让构建失败。它绝不覆盖提交产物 —— `build-client.mjs` 为此新增 `BUILD_CLIENT_OUT`。
+- `scripts/probe-malformed-request.py` 与 `scripts/probe-sendprogram-blocking.py` 保留两个无需硬件的
+  探针：前者复现"坏 JSON 杀死 worker"的路径，后者是"进入永不结束的模式（力控/自由驱动）不会卡住
+  后续发送"的可执行证据（实测 0.25 s —— 记下来，免得将来又有人只读源码重新怀疑一遍）。
+
+### 文档
+
+- `docs/audit/` — 四份带 `file:LINE` 引用与代码原文的审计报告（`worker-audit.md`、`host-audit.md`、
+  `client-vendored-audit.md`、`verification-audit.md`），外加 `round2-verification.md`：记录我动手
+  复核的结论、**修正了子代理报告中三条评级过高的 HIGH**，并列出"已检查确认无问题"的清单
+  （门禁清单完整性、RTDE 配方余量、包元数据、bundle 新鲜度、`SendProgram` 阻塞行为）。
+
+
+
+> 本版把插件**逐条对照仓库内三本官方 URScript 手册**（`ScriptManual/scriptManual_3.15.4.pdf`
+> 对应 URSoftware 3.x / CB3、`script_directory_Poly5.pdf` 对应 PolyScope 5 / e-Series、
+> `script_directory_PolyscopeX.pdf` 对应 PolyScope X / 10.x）重新校对了一遍：补齐了手册里有、
+> 插件里没有的能力，改正了三处**默认值与语义与手册不符**的地方，并把交叉核对结果沉淀成
+> [`docs/urscript-manual-analysis.md`](./docs/urscript-manual-analysis.md)。
+> 工具数 67 → **83**。
+
+### 新增 — 力控（`ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings`）
+
+- 这是插件此前**完全没有**的一大块能力：力控让机器人沿/绕选定轴变"柔性"并持续施加指定力/力矩
+  （打磨、装配、贴合、拖动示教之外的下压类工艺都要用它）。参数与手册逐条对齐：
+  `task_frame` / `selection_vector`（1=柔性）/ `wrench` / `type`（1-3）/ `limits`
+  （柔性轴=最大 TCP 速度，刚性轴=最大允许偏差）/ `damping`（0-1）/ `gain_scaling`（0-2）。
+- 实现方式与手册语义一致：力控是一个**持续状态**——脚本用
+  `while True: force_mode(...); sync() end` 让它在控制器侧一直生效（与 URBasic 的做法相同），
+  因此 `ur_force_mode` 只负责"进入"，退出用 `ur_end_force_mode`（发新脚本抢占该程序并调用
+  `end_force_mode()`）或在示教器停止程序。
+- 按手册建议在进入力控前插入 `sleep(0.02)`（手册 15.12 的 Note 明确要求，用于避免沿柔性轴的
+  运动与高减速），并**在本地就校验** `selection_vector` 只能是 0/1、`type` ∈ 1/2/3、
+  `damping` ∈ [0,1]、`gain_scaling` ∈ [0,2]——这些越界在控制器上会直接报错或让力控不稳定。
+- ⚠️ **如实标注**：`damping` / `gain_scaling` **控制器侧没有回读通道**（手册只定义了
+  `force_mode_set_*`），所以 `ur_force_mode_settings` 只回报"本次设置值"并显式给出
+  `readback_supported: false`，不假装读到了当前值。
+
+### 新增 — 速度控制与静止判定（`ur_speedj` / `ur_speedl` / `ur_stopj` / `ur_stopl` / `ur_wait_steady`）
+
+- `speedj(qd, a, t)` / `speedl(xd, a, t, aRot)` / `stopj(a)` / `stopl(a, aRot)` 按手册签名实现。
+  `aRot` 省略时按手册语义走 `aRot='a'`（与 `a` 同值）。
+- ⚠️ 速度指令是**开放式**的：手册说明 `t` 省略时"达到目标速度后函数返回"——**返回不等于停下**。
+  因此工具返回值里明确写出"机械臂仍在运动，需要 stop*/wait_steady 收尾"，`t=0`（默认）时不会
+  假装动作已经结束。
+- `ur_wait_steady` 实现"等机器人静止"：**没有**用 URScript 的 `is_steady()`（手册 Poly5 16.39
+  明确写着它在力控/示教模式下恒为 false，且它是表达式、需要额外一段程序+寄存器回读），
+  改为轮询**已在 500 Hz RTDE 数据流里**的 `actual_TCP_speed` 与 `actual_qd`——零额外往返、
+  在力控模式下同样给出真实判断。超时不报错，而是回报 `steady: false` 与当时的实测速度。
+
+### 新增 — 目标值（`ur_get_target_values`）与 RTDE 配方扩展
+
+- 新增读取"**控制器打算去哪**"：目标关节角/角速度/角加速度、目标 TCP 位姿/速度（并附带实际值
+  便于对比）。这是判断"指令已下发但未执行 / 正在交融 / 被安全限速拉住 / 程序被取消"的直接依据。
+- 实现方式是给 `URBasic/rtdeConfiguration.xml` 的接收配方补上
+  `target_q` / `target_qd` / `target_qdd` / `target_TCP_pose` / `target_TCP_speed` 五个字段
+  （74 → 79 个字段；UR 的上限是 96 个数据值，两个 `output_bit_registers*` 只算一个），
+  并把 `RobotModel` 里对应的四个 `NotImplementedError` 桩（`TargetQ`/`TargetQD`/`TargetQDD`/
+  `TargetTCPPose`/`TargetTCPSpeed`）改成真正读 RTDE 字段。
+- 这比发 URScript 表达式再回读寄存器更可靠：零往返、不打断正在运行的程序、也不会因为
+  表达式在旧固件上不存在而失败。
+
+### 新增 — 工具端配置与遥测（4 个）
+
+- `ur_set_tool_communication`：工具法兰串口（TCI / RS-485）开关，参数按手册
+  `set_tool_communication(enabled, baud_rate, parity, stop_bits, rx_idle_chars, tx_idle_chars)`
+  校验（波特率只允许手册列出的 8 档，parity 0-2，stop_bits 1-2，idle chars 按手册范围）。
+  ⚠️ 工具描述里写明手册的警告：**启用 TCI 会禁用工具端模拟输入**。
+- `ur_set_tool_output_mode`：工具输出模式 0 普通 / 1 power（双针供电）。
+- `ur_set_payload_inertia`：一次性设置**质量 + 重心 + 惯性矩阵**（PolyScope 5.10 起的
+  `set_target_payload`），按手册校验 Ixx/Iyy/Izz 非负、每个元素 |I| ≤ 133 kg·m²，
+  并支持 `transition_time`。**只有在给出 `inertia` 时才使用 `set_target_payload`**；
+  没给惯量时退回 `set_payload_mass` + `set_payload_cog`（CB3 3.x 上没有 `set_target_payload`，
+  这样两条路径都能用）。工具描述里写明手册的提示：设置负载会**自动把力/力矩测量归零**，
+  而 `set_payload(m, cog)` 会**重置**惯性矩阵（手册已将其标为 deprecated）。
+- `ur_get_tool_telemetry`：工具输出电流/电压、I/O 电流（RTDE 字段，读取零代价）。
+  手册里还有 `get_tool_temp()`，但当前配方没有对应 RTDE 字段，因此**不提供**该值，并在
+  工具描述里说明原因，而不是编一个数出来。
+
+### 修复 — 默认值与手册不符（`ur_movej` / `ur_movel`）
+
+- **`ur_movel` 的默认速度是手册值的 4 倍**：旧代码 `movel` 默认 `a=1, v=1`，而手册
+  （Poly5 15.30 / PolyScope X 15.29）是 `a=1.2, v=0.25`（250 mm/s）。对协作臂来说
+  "没写速度"和"按 1 m/s 跑"是两件完全不同的事，现在改回手册默认值。
+- **`ur_movej` 默认值同样不是手册值**（旧 `a=1, v=1`；手册是 `a=1.4, v=1.05`），一并改回。
+- 工具描述里同时写明手册的另一条语义：**给了 `t` 就忽略 `a`/`v`**（手册原文 "Time setting has
+  priority over speed and acceleration settings."），这是模型最容易搞错的一点。
+
+### 修复 — `ur_movec` 缺少手册的 `mode` 参数
+
+- 手册的 `movec(pose_via, pose_to, a, v, r, mode)`（Poly5 15.28）用 `mode` 选择姿态插补方式：
+  `0` 从当前姿态插补到目标姿态，`1` 姿态相对圆弧**切线**保持不变（固定姿态圆弧）。
+  旧实现根本不发这个参数，想做固定姿态圆弧只能绕开这个工具。现在补上并默认 0（与手册一致）。
+
+### 新增 — OptiMove、Motion Version 与 freedrive 奇异点状态（`ur_move_optimized` / `ur_motion_version` / `ur_get_freedrive_status`）
+
+- `ur_move_optimized` 暴露 `optimovej(goal, a=0.3, v=0.3, r=0)` / `optimovel(...)`
+  （Poly5 15.32/15.33、PolyScope X 15.31/15.32）：目标与 `movej`/`movel` 相同，但用 **jerk 受限**
+  的速度剖面，运动更平顺、振动更小。⚠️ 手册明确 `a`/`v` 是"**机器人能力的比例**"
+  （`a, v ∈ (0, 1]`，1 = 该构型下能达到的最快），**不是 rad/s 或 m/s** —— 传 `a=1.4`
+  （对 `movej` 完全合法的值）在这里就是越界，所以工具在本地校验范围并在描述里写明。
+  手册支持的 `struct{pose, frame}` 与"世界模型对象名"两种 goal 形态**被明确拒绝**：
+  它们需要 PolyScope 侧的坐标系/世界模型对象，脚本写错只会换来控制器一句运行期报错，
+  不如在这里说清；`goal_type` 选择 `joints`（等价 optimovej）或 `pose`（等价 optimovel）。
+- `ur_motion_version` 设置 **Motion Version**（手册第 14 章）与/或 **jerk 增益**
+  （`jerk_gain_scaling_set`，0.01-1.0）：版本 2 在规划时把速度/加速度**钳到硬件上限**、
+  交融半径重叠时**动态收缩**；版本 1 则会跳过整段运动并给 "Overlapping Blends" 警告。
+  jerk 增益只作用于 **jerk 受限**的剖面 —— 版本 2 的 `movej`/`movel` 与 `optimovej`/`optimovel`，
+  正是 `ur_move_optimized` 走的那条路。⚠️ 手册写明新机型与 PolyScope X **只支持版本 2**，
+  CB3 没有这个设置。这两个设置**都没有回读通道**，工具只报告本次设置值（`readback_supported:
+  false`），不假装读到了当前值。
+- `ur_get_freedrive_status` 读取 `get_freedrive_status()`（PolyScope X 15.20）：当前姿态在
+  freedrive 下离**奇异点**有多远 —— `0` 正常 / `1` 接近 / `2` 太接近（拖动阻力明显）。
+  它**不是** freedrive 的开关状态位；手册的用意正在于"受限 freedrive 在奇异点附近可用性下降"，
+  所以这个值用来建议操作员换一条路径。实现上经一个输出寄存器回读（默认 21 号 int 寄存器，
+  旧值会被覆盖）；固件低于引入该函数的版本时，如实回报"没读到值"而不是编一个数。
+
+### 修复 — `servoj` 的取值范围是 3.x 的旧值
+
+- `t` 的默认值从 3.15.4 的 `0.008` 变成了 Poly5 15.44 / PolyScope X 15.43 的 `0.002`
+  （手册推荐的"每个控制周期给一个新设定点"），`lookahead_time` 的下限也从 `0.03` 放宽到 `0.01`。
+  工具保留 `0.008` 作为默认值（兼容 CB3），但现在**接受 `t ≥ 0.002`、`lookahead_time ≥ 0.01`**
+  —— 照新手册传值的调用方不会再被一个过期的范围拦下。
+
+### 修复 — `run-tests.mjs` 只认 `PYTHON` 不认 `UR_PYTHON`
+
+- README 与 `test/selftest.test.mjs` 一直约定 `UR_PYTHON || PYTHON || 'python'`，而
+  `scripts/run-tests.mjs` 的探针只读 `PYTHON` ⇒ `UR_PYTHON=... npm test` 会出现
+  "探针说没有 Python、于是跳过全部 Python 用例，但被跳过的用例自己其实能跑"的矛盾结果。
+  现在探针按 README 的约定取值。
+
+### 工具链 / 文档
+
+- 新增 `scripts/pdf-extract2.py`：**零依赖**（只用标准库）从三本手册 PDF 抽取文本。
+  两个 PolyScope 手册的嵌入字体是**子集化的 CID Type0 字体**（`/Encoding /Identity-H`），
+  PDF 里的字符码是 **glyph id**，必须走各自的 `ToUnicode` CMap 才能解出文字；3.15.4 则是普通的
+  WinAnsi Type1 字体，字节即字符码。脚本两条路都走，并按基线/字距重建词间空格、剔除整页旋转的
+  版权水印。抽取结果落在 `ScriptManual/txt/*.txt`（含页码分隔），是本版所有签名与默认值核对的依据。
+- `docs/urscript-manual-analysis.md`：三本手册的函数签名、参数范围、版本差异（3.15.4 → Poly5 →
+  PolyScope X 的新增 / 删除 / 改名 / 废弃）与安全限值事实，逐条带手册行号引用。
+- 工具数门禁同步：`test/tool-schema-dsl.test.mjs` 与 `scripts/check-host-compat.mjs` 的
+  `EXPECTED_TOOLS` 由 67 改为 83；README（中英）工具表、审批门禁清单、`67/67`→`83/83` 一并更新。
+
 ## [0.5.0] - 2026-09
 
 > 本版是一次**以"还能不能信它"为主题的审计与加固**：一次代码审计发现并修掉了若干会让插件
@@ -261,22 +500,6 @@
 - **`ur_set_digital_out` 的 `which="config"` 在 8–15 端口抛 `struct.error`**：URBasic 内部按 0–7 给 8 路 configurable 输出编号（掩码算的是 `2 ** n`），而工具沿用 UR 的全局 I/O 编号 8–15，`n = 8` 会算出 256（`'B' format requires 0 <= number <= 255`）。现在换算成 URBasic 的编号再调用。
 - **`ur_list_programs` 拿不到结果**：局部变量 `err` 遮蔽了模块级 `err()` 辅助函数，出错分支等于把一个字符串当函数调用。
 - **客户端半此前完全无法激活**：`resolveRobotIp()` 曾读取 `ctx.config` / `ctx.options`，而 cordis 的上下文代理对未通过 `inject` 声明的属性读取会抛 `cannot get property "config" without inject`。该读取发生在 `apply()` 的 `try` 之外，导致该 entry 的 fiber 落为 FAILED、渲染侧只报「1 plugin(s) 未激活」且不给原因。配置现取自 `apply(ctx, config)` 的第二实参。
-
-### 新增
-- **`ur_get_safety_status`（安全/机器人状态位）**：运动撞到安全限值时，控制器只会停下来，不会告诉你"撞的是哪一条限值"。本工具读出 `safety_status_bits`（protective_stop / safeguard_stop / violation / fault / stopped_due_to_safety …）与 `robot_status_bits` 的**置位名字 + 原始数值**，外加安全模式 / 运行模式 / 程序状态，据此去 PolyScope 的「设置 → 安全 → 安全限值」页对照具体阈值。**如实标注**：限值的**数值**不经 RTDE/dashboard 暴露，插件读不到（协议限制，不是工具缺陷）——返回值里 `limits_source` 把这一点写明。工具数 52 → **53**。
-- **`test/safety-status.test.mjs`**：把"状态字逐位解码"钉成契约（多位组合的机器人/安全状态位、32–63 段的位寄存器、数字量位读），并驱动真实的 `ur_get_safety_status`。**如实标注**：这里**没有**负向验证——我一度以为 `1 & word == 1` 是运算符优先级缺陷（按 C 的语义 `==` 比 `&` 紧），但 Python 里 `&` 高于 `==`，vendored 表达式本来就是对的；实测 HEAD 版与"补括号"后结果逐字一致，因此那批纯改动**已回退**，不在 vendored 代码里留无谓 churn。
-- **`ur_move_tool_x` / `ur_move_tool_y` / `ur_move_tool_z`（沿工具坐标系移动）**：`ur_move_x/y/z` 走的是**基座**方向，工具斜着的时候"沿工具方向走"与"沿基座轴走"完全不同。新工具在 worker 侧读当前 TCP 姿态，用姿态的旋转矩阵把工具系位移换算成基座系位移，再发基座系 `movel`——**刻意不用 URScript 的 `pose_trans`**（它在各软件版本上可用性/行为有差异，CB3 3.15 上运行期中止过）。返回里同时给出工具系位移与换算后的基座系位移，便于人工核对方向；三个工具都挂进人工审批门禁。工具数 49 → **52**（AGENTS.md、README 工具表与注册计数门禁同步）。
-- **`test/send-script-verify.test.mjs`**：用假 robot+model 模拟控制器的三种行为（真执行 / 只跑到起始哨兵 / 完全不执行），断言三种结论、注入形状（起始哨兵 + 原脚本 + 结束哨兵，原脚本不得被改写）、`verify=false` 与自定义哨兵寄存器，并守住"不得退回只报已发送的实现"。
-- **`test/tool-frame-moves.test.mjs`**：用**闭式解**核对工具系→基座系的换算（零姿态 / Rz+90° / Ry+90° / Rx+90° 四种姿态 × 各轴），断言目标位姿 = 当前位置 + 基座系位移且姿态保持不变，并守住"不用 pose_trans"与"三个新工具必须挂进人工审批门禁"。
-- **`test/remote-control.test.mjs`** 增补：用假 dashboard 驱动真实 `op_connect`，覆盖 明确 true / 明确 false(CB3) / 明确 false(e-Series) / 不可解析 / 空回答 / 探测抛异常 六种情形，断言三态文案（未知时不得断言"未处于远程控制模式"）。
-- **`test/worker.test.mjs`**：覆盖 Node 侧进程管理层（`lib/worker.js`）——协议往返、子进程退出即在飞请求失败（错误里带退出码）、**退避后重新拉起干净进程**、单次调用超时、`dispose()` 失败在飞请求、默认 500 ms 退避。此前这层只有读码确认，而「连接卡死自杀」这条修法完全依赖它。
-- **`test/worker-log.test.mjs`**：钉住日志限幅（写满滚动、只保留一代、字节统计精确）与「重连失败分支必须限速并 sleep」。
-- **`test/scene-alignment.test.mjs`**：断言网格法线为 +Z、平面过原点、两条线方向落在世界 X/Y 上（即「网格平面 = 基座平面、网格 X/Y = 基座 X/Y」），并守住 `camera.up = +Z` 与「GridHelper 只经 `createBaseGrid()` 创建」。
-- **`test/remote-control.test.mjs`**：钉住 CB3 的 3.1–3.20 区间判定（含边界、e-Series 的 5.x、读不到版本一律按「需开启」处理），以及 `ur_connect` 的分档提示文案。
-- **`test/connect-timeout.test.mjs`**：用猴补丁把 `UrScriptExt` 的构造换成永不返回，断言 worker 真的在预算内 `os._exit(1)`、并把「连接超时」这条可读错误写回协议 stdout；另有两条契约断言（硬预算必须小于 Node 侧默认命令超时、`ensure_connected` 必须走 `_connect_or_exit`）。
-- **关节位置契约测试**：`test/model-contract.test.mjs` 新增一例，用**真实装配路径**（`loadRobotModel` + `applyFK` 得到的 `groups[k].matrixWorld`）变换 GLB 的网格 AABB，断言 14 个型号 × 3 个姿态下相邻连杆始终相接。原先那例自己算 `frames = [单位阵, ...links]`，**绕过了 `assemble()`**，所以装配语义写错时它照样全绿 —— 这正是「120 个测试全绿却仍然错位」的复现路径。
-- **`--selfcheck` 补上盲点**：它此前只检查回退文件 `rtdeConfigurationDefault.xml`（该文件在故障全程都存在，所以自检照样通过）；现在检查 `rtde.py` **优先**解析的 `rtdeConfiguration.xml`，缺失即 `exit 1`，并另外报告回退文件是否存在。
-- **`test/rtde-config.test.mjs`**：把配方的三层契约钉住——① 配方文件存在且优先被 `rtde.py` 选中；② 接收侧启用 `output_bit_registers32_to_63` 与 int/double 寄存器 0..23；③ **输入侧必须零字段**（认领输入变量会让后续 SETUP_INPUTS 被控制器拒绝并打崩 worker），且初次连接序列里不得调用 `__setupInput()`、写操作必须走 `RealTimeClient.Send` 的 URScript 而非 URBasic 里那些经 `setData` 的 helper；另断言 `package.json` 的 `files` 会发出该文件。
 
 ## [0.4.0] - 2026-09
 

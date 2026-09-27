@@ -6,33 +6,45 @@ This plugin shares the same ancestry as the company's `Nonead-Universal-Robots-M
 
 > ⚠️ **Safety notice**: this plugin drives a real robotic arm directly. Always keep the robot in sight, keep the emergency stop within reach, and keep the workspace clear of people/obstacles. Treat it with the same care as granting the `bash` tool. You (or the model) bear full responsibility for any motion command.
 
-> 🛡️ **Motion approval gate**: commands that physically move the arm, run a program, **take the arm out of program control, or remove its rigidity** — `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_x|y|z` / `ur_move_tool_x|y|z` / `ur_draw_*` / `ur_load_program` / `ur_run_program` / `ur_send_script` / `ur_reset_error`, plus (0.5.0) `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` / `ur_zero_ftsensor` / `ur_set_conveyor_tracking` — **pause and wait for human confirmation** before being sent to the robot. In an interactive deployment (approval policy `ask`) a confirmation dialog is shown in the UI; a call made without an approval service or without an agent **fails closed** (the command is rejected) and never moves without approval. Set `requireApprovalForMotion: false` to disable this gate.
+> 🛡️ **Motion approval gate**: commands that physically move the arm, run a program, **take the arm out of program control, or remove its rigidity** — `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_optimized` / `ur_move_x|y|z` / `ur_move_tool_x|y|z` / `ur_draw_*` / `ur_load_program` / `ur_run_program` / `ur_send_script` / `ur_reset_error`; (0.5.0) `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` / `ur_zero_ftsensor` / `ur_set_conveyor_tracking`; (0.6.0) `ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings` / `ur_speedj` / `ur_speedl` / `ur_stopj` / `ur_stopl` / `ur_set_payload_inertia`, plus `ur_motion_version`, `ur_set_payload` and `ur_set_gravity` — **pause and wait for human confirmation** before being sent to the robot. In an interactive deployment (approval policy `ask`) a confirmation dialog is shown in the UI; a call made without an approval service, without an agent, or answered with anything other than `allowed-once` **fails closed** (the command is rejected) and never moves without approval. The default lives in code (`config.requireApprovalForMotion ?? true`), so it cannot be turned off by a caller that skips schema parsing. Set `requireApprovalForMotion: false` to disable this gate deliberately. `test/approval-gate.test.mjs` drives the real tool registry and proves all of the above, including that an extra `op` argument cannot re-route a call.
 
 ---
 
 ## Feature overview
 
-**67** tools (`ur_*`) in total.
+**83** tools (`ur_*`) in total.
 
 | Category | Tool(s) (`ur_*`) | Description |
 |---|---|---|
 | Connection | `ur_connect` / `ur_disconnect` | Connect / disconnect a UR robot by IP |
 | Status | `ur_get_status` | One-shot read of TCP, joints, model, serial, version, safety mode, run/program state, voltage, current, temperatures, uptime, joint currents/voltages/speeds, TCP speed and wrench, speed scaling |
 | Pose | `ur_get_tcp_pose` / `ur_get_joint_pose` | Read current TCP pose / joint angles |
+| Targets | `ur_get_target_values` | Read **where the controller is *taking* the arm**: target joint positions/velocities/accelerations and target TCP pose/speed, plus the matching actual values for comparison. Comes from the RTDE `target_*` fields (added to the receive recipe in 0.6.0), so it is free — and it is the only direct evidence for "command sent but not executed yet / being blended / held back by the safety limit" |
 | Device info | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_safety_status` / `ur_get_robot_mode` | Model (with `remote_control` field) / serial / uptime / software version / safety mode / **safety and robot status bits** (which safety function fired, incl. violation / fault; numeric limits must be read from PolyScope's Safety page) / run state |
 | Programs | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` | Program state, load, run, stop, pause, SSH listing (`list_programs` works with the real robot's `/programs` and URSim `~/URSim_Linux-*/programs.*`; `load/run` accept full/URSim paths and `programs_dir`). **Run/stop/pause now check the controller's reply and report the run state**, instead of treating "could not understand" as success |
 | Registers | `ur_get_int_register` / `ur_get_double_register` / `ur_get_bit_register` | Read Int / Double / Bool registers |
 | Health | `ur_ping` | Check worker/Python/URBasic readiness without a robot |
 | I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` / `ur_get_tool_analog_in` | Digital in/out (incl. **bit-mask reads**, plus `which="tool"` for the tool-flange digital I/O), standard analog in/out (**in engineering units**: URScript's `set_analog_out` takes a relative level [0,1], and the old code sent 5 as full scale; `full_scale` may be 20 for a current-domain port), tool analog in (function name confirmed against the bundled official manuals; argument semantics not verified on hardware) |
-| Tool config | `ur_set_tool_voltage` / `ur_set_tcp` / `ur_set_payload` / `ur_set_gravity` / `ur_zero_ftsensor` | Tool voltage (**0/12/24 — the old implementation called a `NotImplementedError` stub and had never once succeeded**), TCP, payload mass/centre of gravity, gravity direction (for non-horizontal mounting), force/torque sensor zeroing |
+| Tool config | `ur_set_tool_voltage` / `ur_set_tcp` / `ur_set_payload` / `ur_set_payload_inertia` / `ur_set_gravity` / `ur_zero_ftsensor` / `ur_set_tool_output_mode` / `ur_set_tool_communication` | Tool voltage (**0/12/24 — the old implementation called a `NotImplementedError` stub and had never once succeeded**), TCP, payload mass/centre of gravity, **mass + CoG + inertia matrix in one call** (`set_target_payload`, 5.10+; avoids the `set_payload` behaviour that resets the inertia matrix and leaves the three parameters inconsistent), gravity direction (for non-horizontal mounting), force/torque sensor zeroing, **tool output mode** (normal / power dual-pin), **tool serial (TCI/RS-485 — ⚠️ enabling it disables the tool analog inputs)** |
 | Control mode / power / safety | `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` | Freedrive / teach mode (move the arm by hand), power on / off / **brake release** (⚠️ the arm may fall under gravity), **protective-stop unlock only** (no power-on, no brake release — that is what distinguishes it from `ur_reset_error`), controller shutdown |
-| Live telemetry | `ur_get_runtime_telemetry` / `ur_get_speed_scaling` / `ur_get_tcp_force` | Joint currents/voltages/speeds, TCP speed and wrench, tool accelerometer, speed scaling, robot voltage/current, joint temperatures. **These fields are already in the 500 Hz RTDE stream**, so reading them is free and needs no reconfiguration |
+| Force control | `ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings` | **Force Mode**: the arm becomes compliant along/about the selected axes and keeps applying the requested force/torque. Arguments match the manual one by one — `task_frame` / `selection_vector` (1 = compliant) / `wrench` / `type` (1-3) / `limits` (compliant axes = max TCP speed, stiff axes = max deviation) / `damping` / `gain_scaling`. The script inserts the manual's recommended `sleep(0.02)` before entering force mode; exit with `ur_end_force_mode`. ⚠️ `damping`/`gain_scaling` **cannot be read back from the controller**, so the tool reports what it set rather than pretending to read the current value |
+| Velocity control | `ur_speedj` / `ur_speedl` / `ur_stopj` / `ur_stopl` / `ur_wait_steady` | Joint/TCP **velocity commands** (`speedj`/`speedl`) and the matching decelerations (`stopj`/`stopl`). ⚠️ Velocity commands are **open-ended**: with `t=0` (the default) the function returns once the target speed is reached while the arm **keeps moving** — always finish with a stop* or `ur_wait_steady`. `ur_wait_steady` polls the RTDE speed fields instead of using URScript's `is_steady()` (which is documented to return false in force/teach mode) |
+| Live telemetry | `ur_get_runtime_telemetry` / `ur_get_robot_voltage` / `ur_get_robot_current` / `ur_get_joint_temperatures` / `ur_get_speed_scaling` / `ur_get_tcp_force` / `ur_get_tool_telemetry` | Joint currents/voltages/speeds, TCP speed and wrench, tool accelerometer, speed scaling, robot voltage/current, joint temperatures, tool current/voltage, I/O current. **These fields are already in the 500 Hz RTDE stream**, so reading them is free and needs no reconfiguration. Single-value reads and the one-shot `ur_get_runtime_telemetry` summary coexist: poll a single value when that is all you need, use the summary for diagnosis |
 | Conveyor | `ur_get_conveyor` / `ur_set_conveyor_tick` / `ur_set_conveyor_tracking` | Conveyor tick read / set, and **starting/stopping linear or circular tracking** |
-| Motion | `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_x` / `ur_move_y` / `ur_move_z` / `ur_move_tool_x` / `ur_move_tool_y` / `ur_move_tool_z` | Joint-space / linear / path / **genuine circular motion** (the old implementation hardcoded `movetype='p'` internally, so it actually sent `movep` and discarded the via point) / continuous servo / axis-aligned motion — the `_move_*` tools move along **base** axes, the `_move_tool_*` ones along the **current tool** axes (converted in the worker with a rotation matrix, so it does not depend on URScript `pose_trans`) |
+| Motion | `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_optimized` / `ur_move_x` / `ur_move_y` / `ur_move_z` / `ur_move_tool_x` / `ur_move_tool_y` / `ur_move_tool_z` | Joint-space / linear / path / **genuine circular motion** (the old implementation hardcoded `movetype='p'` internally, so it actually sent `movep` and discarded the via point; 0.6.0 adds the manual's `mode` argument: 0 = interpolate orientation, 1 = fixed orientation) / continuous servo / **OptiMove** (`optimovej`/`optimovel`: jerk-limited, smoother, less vibration — ⚠️ its `a`/`v` are **fractions of capability** in (0,1], not rad/s or m/s) / axis-aligned motion — the `_move_*` tools move along **base** axes, the `_move_tool_*` ones along the **current tool** axes (converted in the worker with a rotation matrix, so it does not depend on URScript `pose_trans`). **The default a/v are the manual's again** (`movej` 1.4 / 1.05, `movel` 1.2 / 0.25; the old code defaulted `movel` to v=1 m/s, four times the manual value) |
+| Motion planning | `ur_motion_version` / `ur_get_freedrive_status` | Set the **Motion Version** (manual chapter 14) and the **jerk gain** (0.01-1.0, which only affects jerk-limited profiles: version-2 `movej`/`movel` and `optimovej`/`optimovel`). Version 2 clamps velocities/accelerations to the hardware limits while planning and **shrinks blend radii dynamically** instead of skipping the whole move with an "Overlapping Blends" warning as version 1 does. ⚠️ Newer robot models and PolyScope X support **only version 2**; CB3 has no such setting. ⚠️ Neither setting has a read-back channel, so the tool reports what it set. `ur_get_freedrive_status` returns how close the current pose is to a **singularity** during freedrive (0 normal / 1 near / 2 too close — **not** an on/off flag), which is what tells an operator to pick another path |
 | Drawing | `ur_draw_circle` / `ur_draw_square` / `ur_draw_rectangle` / `ur_draw_star` | Draw a circle / square / rectangle / pentagram. **"Completed" is only reported after the script was actually observed running** — the old code probed immediately after sending, inevitably saw "not running", and reported success whether or not the script ever executed |
 | Script / emergency | `ur_send_script` / `ur_reset_error` | Send URScript (**execution-verified**: sentinels are injected *inside the function body* / between top-level statements and read back, so "sent" never masquerades as "ran"; with several functions and no visible call site it refuses to verify and returns `verified: null`) / reset errors |
 
 Every tool except `connect` takes an `ip` argument and requires that IP to be **connected first**.
+
+> 📚 **0.6.0 manual alignment**: this release checked signatures, defaults, ranges and deprecated
+> functions against the three official manuals bundled in `ScriptManual/` (URSoftware 3.15.4 /
+> PolyScope 5 / PolyScope X); the analysis is in
+> [`docs/urscript-manual-analysis.md`](./docs/urscript-manual-analysis.md). Three findings changed
+> behaviour: ① `movel`/`movej` defaults are the manual's again; ② `ur_force_mode` states plainly
+> that `damping`/`gain_scaling` cannot be read back; ③ `set_target_payload` is only used when an
+> inertia matrix is supplied (older firmware falls back to `set_payload_mass` + `set_payload_cog`).
 
 ### Read-only 3D digital twin
 
@@ -60,7 +72,7 @@ Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_c
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.4.0"
+       "dsh-nonead-universal-robots": "^0.6.1"
      },
      "dsh": {
        "profile": {
@@ -113,7 +125,7 @@ pip install -r requirements.txt
 > dies. The correct setup is to **install the dependencies for the interpreter `pythonBin` points at**
 > (or point it at a venv). `ur_ping` / `npm run test:python` is the self-check for that chain, and
 > `npm run verify:host` validates tool registration through the host's real schema DSL (it should
-> report 67/67).
+> report 83/83).
 
 ---
 
@@ -123,11 +135,33 @@ Verify the plugin and Python runtime without touching a real robot:
 
 ```sh
 npm run test:python   # python ur_worker.py --selfcheck: verify Python/numpy/paramiko/URBasic/RTDE config
-npm test              # run all 21 test files (e2e protocol self-check, twin routes, client state machine, vendored-library regressions)
-npm run test:node     # Node-side tests only (skips the ones that need Python)
+npm test              # run all 22 test files AND every check gate (see below), then summarise
+npm run test:node     # Node-side only: skips the test files *and* the gates that need Python
+npm run check         # all static + cross-language gates without running the test files
 npm run verify:host   # validate every tool schema through the host's real value-schema DSL, plus peer ranges
 npm run verify:models # validate the structural contract of the 14 GLBs
 ```
+
+`npm test` runs two kinds of thing, and both must pass:
+
+- **22 test files** under `test/` (e2e protocol self-check, approval gate, twin routes, client
+  state machine, FK, vendored-library regressions) — enumerated from `test/test-manifest.json`,
+  which `check:manifest` keeps honest so a Python-using file can never be silently unlisted.
+- **10 check gates**: `check-test-manifest` / `check-package-metadata` / `check-client-bundle` /
+  `check-doc-tools` (Node) and `check-worker-ops` / `check-tool-params` / `check-rtde-recipe` /
+  `check-approval-gate` / `check-new-ops` (Python). When the interpreter has no `numpy`, the
+  Python-dependent items are reported as **SKIP with the reason**, never as a pass.
+
+> New in 0.6.0: `scripts/pdf-extract2.py` extracts text from `ScriptManual/*.pdf` into
+> `ScriptManual/txt/*.txt` using **only the standard library** (the PolyScope manuals encode
+> glyph ids, so the text only comes out through each font's `ToUnicode` CMap). It is the
+> reproducible source behind every signature, default and range quoted in this release — when in
+> doubt, re-extract and read the manual.
+
+> `check-client-bundle.mjs` rebuilds `src/client/**` into a scratch file and compares the result
+> with the committed `lib/client.js` byte for byte, so a stale bundle (source changed UI, shipped
+> artifact did not) fails the build instead of silently shipping. It never overwrites the
+> committed artifact; `scripts/build-client.mjs` honours `BUILD_CLIENT_OUT` for that reason.
 
 `npm test` prints a per-file summary and exits non-zero if anything failed. If `python` is not on PATH, set it via the environment:
 
@@ -137,7 +171,7 @@ UR_PYTHON=C:\\Python312\\python.exe npm test
 
 > Before 0.5.0 `npm test` ran **one worker ping** and none of the other 20-plus `*.test.mjs` files —
 > so a green `npm test` said nothing about the plugin. `scripts/run-tests.mjs` now enumerates and runs
-> them all and summarises the result.
+> them all, plus every check gate, and summarises the result.
 
 Run the **host compatibility check** before a release and whenever the DSH runtime is upgraded — it validates the plugin against an installed host instead of a copy of its keyword list:
 
@@ -146,7 +180,7 @@ npm run verify:host                                # auto-discovers a real DSH i
 node scripts/check-host-compat.mjs <node_modules>  # or an explicit host
 ```
 
-It checks the peer ranges against the installed versions, compiles **every** tool parameter schema with the host's real value-schema DSL (a rejected schema silently drops that tool), drives the host route registration, and validates the `dsh.client` declaration plus the client bundle's `__ModuleLoader__` id. Exit code `0` means this plugin works with that host. Against DSH 0.1.7-rc.2 it reports **67/67 tools registered**.
+It checks the peer ranges against the installed versions, compiles **every** tool parameter schema with the host's real value-schema DSL (a rejected schema silently drops that tool), drives the host route registration, and validates the `dsh.client` declaration plus the client bundle's `__ModuleLoader__` id. Exit code `0` means this plugin works with that host. Against DSH 0.1.7-rc.2 it reports **83/83 tools registered**.
 
 > The first `ur_connect` to a robot has an ~20s RTDE readiness wait; on timeout it returns a clear error rather than hanging.
 

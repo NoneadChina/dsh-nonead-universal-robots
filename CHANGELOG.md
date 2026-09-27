@@ -2,6 +2,289 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-09
+
+> A full-project audit (four delegated audits + hands-on verification; reports in `docs/audit/`)
+> found defects that the suite could not see: a **complete bypass of the motion approval gate**,
+> a **shipped file that was not tracked by git**, `test:node` that could never pass, and two
+> motion ops that did not do what they documented. This release fixes all of them and turns the
+> audit's own checks into real gates.
+
+### Security — the approval gate could be bypassed entirely (host-audit H-1)
+
+- **`lib/worker.js` builds the wire payload as `{ id, op, _timeout_ms, ...params }` — `params`
+  spread last — while the gate tests the closure's `op`.** Because the DSH value-schema does not
+  reject undeclared arguments, a model could call any *ungated* tool with an extra
+  `{"op":"power_off"}` and the worker would run `op_power_off` with **no approval prompt at all**.
+  Every one of the 38 gated ops (`movej`, `send_script`, `run_program`, `brake_release`,
+  `force_mode`, `shutdown`, …) was reachable this way; an extra `id` additionally let a call hang
+  for its full timeout and then kill the worker.
+- Fix: tool arguments are now filtered against **the tool's own declared parameter list** before
+  they reach the worker, and `op` is always the closure value the gate decided on — it can never
+  be influenced by an argument. Verified by `test/approval-gate.test.mjs`, which drives the real
+  tool registry and asserts that an injected `op` / `id` / `_timeout_ms` never reaches the worker.
+
+### Security — the gate depended on the schema applying its default (host-audit M-6)
+
+- `requireApprovalForMotion` was the only one of the four `Config` fields with no `??` fallback in
+  `apply()`, so any caller passing a config object that had not been through schema parsing got
+  `undefined` — silently **disabling the gate** (fail-open). The default now lives in code
+  (`config.requireApprovalForMotion ?? true`) and a test pins it.
+
+### Fixed — the approval set was incomplete (host-audit H-2)
+
+- `set_payload` was ungated while its twin `set_payload_inertia` was gated, although both send
+  `set_payload_mass` + `set_payload_cog` and both **re-zero the force/torque sensor** — i.e. the
+  same physical effect as the gated `zero_ftsensor`. `set_gravity` was ungated too, although
+  mis-setting it makes the arm drop or float. Both are gated now, and the pairing is asserted so
+  one of a pair cannot drift out of the gate again.
+
+### Fixed — two ops did not do what they documented (worker-audit HIGH-1 / HIGH-2)
+
+- **`draw_square` / `draw_rectangle` wrote a distance into the rotation component.** For
+  `coordinate="z"` the vertical edge did `wp[1][3] -= border` — index 3 is **rx in radians**, so
+  `draw_square(border=0.2)` rotated the tool ≈11.5° instead of drawing a square. Both now use
+  index 2 (z, metres); a test asserts the whole waypoint sequence and that the orientation
+  components never change.
+- **`conveyor_tracking` sent every conveyor argument in the wrong slot.** It emitted
+  `conveyor_pulse_decode(a, b, 0)` (first slot is the *decoder type*, and `0` means "pulse decoding
+  disabled"), `set_conveyor_tick_count(0, ticks_per_meter)` (second slot is a 0–4 bit-width enum),
+  and `track_conveyor_linear(p[0,…], speed)` / `track_conveyor_circular(p[0,…], radius, speed)`
+  (the manuals want a direction/centre pose, ticks per metre/revolution, and a boolean). Rewritten
+  against the manual with distinct `setup_pulse` / `setup_absolute` / `linear` / `circular` /
+  `stop` actions, correct units, and encoder pin ranges per firmware (CB3 0–3, e-Series 8–11). It
+  reports `hardware_verified: false` and says so, because the signatures are manual-verified but
+  the tracking behaviour needs a real conveyor.
+
+### Fixed — a crash path in the worker's error handler (worker-audit MEDIUM)
+
+- `ur_worker.py`'s unexpected-exception handler logs `req.get("op")`, but `req` is bound *inside*
+  the `try` — so a malformed first line raised `UnboundLocalError` **inside the handler**, never
+  answered the request, and killed the worker. Now `req` is initialised before the `try`;
+  reproduced and re-verified with `scripts/probe-malformed-request.py`.
+
+### Fixed — a dying worker could clobber its replacement (host-audit H-3)
+
+- `lib/worker.js`'s `exit` handler unconditionally cleared `this.proc` / `_spawnPromise` and failed
+  **every** in-flight request. A killed child's `exit` can arrive after a new child has already
+  spawned and started serving (the 500 ms restart backoff is the window, and the twin panel issues
+  ~20 calls/s), so a healthy call could be rejected with "UR worker exited" while its child was
+  alive, `stats().running` lied, and `dispose()` could leave an orphaned Python process holding the
+  controller's exclusive RTDE session. The handler now only clears state it owns, fails only the
+  requests routed to *that* child, and keeps per-child stderr.
+- `proc.stdin` now has an `error` listener: an EPIPE after the child dies was an unhandled
+  `'error'` event, which would take down the whole DSH host rather than failing one call.
+
+### Fixed — release blockers found by auditing the repository itself
+
+- **`python/URBasic/rtdeConfiguration.xml` was not tracked by git** although `package.json`
+  publishes it, `test/rtde-config.test.mjs` requires it, and `rtde.py` prefers it over the
+  vendored default (which has no `target_*` fields, no bit registers 32–63, and a `<send>`
+  section). A fresh clone therefore silently lost the recipe. Now tracked.
+- **`npm run test:node` could never pass**: `test/selftest.test.mjs` spawns Python but was missing
+  from `PYTHON_DEPENDENT`. The list now lives in `test/test-manifest.json` and
+  `scripts/check-test-manifest.mjs` re-derives "which test files actually call Python" from the
+  sources, so a missing entry fails a check instead of turning into a mysterious `exit 1`.
+- The interpreter probe now verifies **the dependencies the worker needs** (`import numpy`) rather
+  than that Python can start: previously a Python without numpy made the ten Python-dependent
+  files *run and fail* instead of being skipped, so an environment problem looked like a plugin
+  defect.
+- **`ur_set_analog_out` never declared `full_scale`** although the worker reads it and both READMEs
+  and the CHANGELOG advertised it — so a 0–20 mA port was unreachable (`value=16` was rejected
+  with "must be between 0 and 10.0"). Declared, with the domain behaviour documented.
+- **`numberArray()` hard-coded `required: true`**, which made documented-optional arrays mandatory
+  in the schema (`force_mode.task_frame` / `wrench` / `limits`, `set_payload_inertia.inertia`) and
+  made `set_payload_inertia`'s documented CB3 fallback unreachable. `required` is now explicit.
+- English README: the approval-gate list was missing every 0.6.0 op, and the install snippet still
+  pinned `^0.4.0` (which installs a pre-0.5.0 release).
+
+### Added — the audit's checks are now gates that run in `npm test`
+
+- **`test/approval-gate.test.mjs`** (new, 9 cases): drives the real tool registry and proves that a
+  gated op never reaches the worker before approval, that all four fail-closed paths reject
+  (no approval service / no agent / the service throws / any non-`allowed-once` answer), that
+  read-only ops are not bothered, that `requireApprovalForMotion: false` really disables it, and
+  that argument injection cannot re-route a call.
+- Six audit scripts were print-only and always exited 0 — the exact "a green check proves nothing"
+  failure the project warns about. `check-worker-ops.py`, `check-approval-gate.py`,
+  `check-rtde-recipe.py` and `check-tool-params.py` now **exit non-zero** on a real problem, and
+  all of them (plus `check-test-manifest`, `check-package-metadata`, `check-doc-tools`, and a new
+  `check-client-bundle.mjs`) are wired into `npm test` and `npm run check`.
+- `check-client-bundle.mjs` replaces the literal-sampling heuristic (which either looked at 6 of
+  ~113 literals or produced false alarms) with a **deterministic rebuild-and-compare**: it rebuilds
+  `src/client/**` into a scratch file and compares the result with the committed bundle, so a stale
+  artifact fails the build. It never overwrites the committed bundle — `build-client.mjs` gained
+  `BUILD_CLIENT_OUT` for that.
+- `scripts/probe-malformed-request.py` and `scripts/probe-sendprogram-blocking.py` keep two
+  hardware-free probes: the first reproduces the malformed-line crash path, the second is the
+  executable evidence that entering a never-ending mode (force/freedrive) does **not** stall later
+  sends (measured 0.25 s — recorded so it is not re-investigated from source alone).
+
+### Documentation
+
+- `docs/audit/` — four audit reports with `file:LINE` citations and quoted code
+  (`worker-audit.md`, `host-audit.md`, `client-vendored-audit.md`, `verification-audit.md`), plus
+  `round2-verification.md`, which records the hands-on verification, **corrects three over-rated
+  HIGH findings** in the delegated reports, and lists what was checked and found clean (approval-set
+  completeness, RTDE recipe headroom, package metadata, bundle freshness, `SendProgram` blocking).
+
+
+
+> This release re-checked the plugin, line by line, against the three official URScript manuals
+> bundled in `ScriptManual/` (`scriptManual_3.15.4.pdf` = URSoftware 3.x / CB3,
+> `script_directory_Poly5.pdf` = PolyScope 5 / e-Series, `script_directory_PolyscopeX.pdf` =
+> PolyScope X / 10.x). It adds the capabilities the manuals document but the plugin lacked, fixes
+> three places where the **defaults or semantics disagreed with the manual**, and records the
+> cross-check in [`docs/urscript-manual-analysis.md`](./docs/urscript-manual-analysis.md).
+> Tool count 67 → **83**.
+
+### Added — force control (`ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings`)
+
+- A whole capability the plugin did not have at all: force mode makes the arm compliant along/about
+  selected axes while it keeps applying a requested force/torque (sanding, assembly, surface
+  following, any pressing process). Arguments match the manual one by one — `task_frame` /
+  `selection_vector` (1 = compliant) / `wrench` / `type` (1-3) / `limits` (compliant axes = max TCP
+  speed, stiff axes = max allowed deviation) / `damping` (0-1) / `gain_scaling` (0-2).
+- The implementation follows the manual's semantics of force mode as a **continuing state**: the
+  script runs `while True: force_mode(...); sync() end` so it stays in force mode on the controller
+  (the same shape URBasic uses), so `ur_force_mode` only *enters* it — leave with
+  `ur_end_force_mode` (which preempts that program and calls `end_force_mode()`) or by stopping the
+  program on the pendant.
+- The manual's recommended `sleep(0.02)` before entering force mode is inserted (Poly5 15.12 requires
+  it to avoid motion along compliant axes and high deceleration), and the arguments are validated
+  locally: `selection_vector` may only contain 0/1, `type` ∈ 1/2/3, `damping` ∈ [0,1],
+  `gain_scaling` ∈ [0,2] — out-of-range values either make the controller refuse the script or make
+  force mode unstable.
+- ⚠️ Stated plainly: `damping` / `gain_scaling` **cannot be read back from the controller** (the
+  manuals only define `force_mode_set_*`), so `ur_force_mode_settings` reports what it set and
+  returns `readback_supported: false` instead of pretending to read the current value.
+
+### Added — velocity control and standstill (`ur_speedj` / `ur_speedl` / `ur_stopj` / `ur_stopl` / `ur_wait_steady`)
+
+- `speedj(qd, a, t)` / `speedl(xd, a, t, aRot)` / `stopj(a)` / `stopl(a, aRot)` with the manuals'
+  signatures. Omitting `aRot` follows the manual's `aRot='a'` semantics (same value as `a`).
+- ⚠️ Velocity commands are **open-ended**: the manuals state that with `t` omitted the function
+  returns once the target speed is reached — **returning is not stopping**. The tool's answer says
+  so explicitly ("the arm is still moving; finish with stop*/wait_steady") and never pretends the
+  motion is over when `t=0` (the default).
+- `ur_wait_steady` implements "wait until the robot is at rest" **without** URScript's `is_steady()`
+  (Poly5 16.39 documents that it always returns false in force/teach mode, and it is an expression
+  that needs an extra program plus register read-back). It polls the `actual_TCP_speed` and
+  `actual_qd` fields that are **already in the 500 Hz RTDE stream** — no extra round trip, and it
+  still gives a true answer while force mode is active. On timeout it does not fail: it reports
+  `steady: false` together with the measured speeds.
+
+### Added — target values (`ur_get_target_values`) and a wider RTDE recipe
+
+- Reads **where the controller is taking the arm**: target joint positions/velocities/accelerations
+  and target TCP pose/speed (with the actual values alongside for comparison). This is the direct
+  evidence for "command sent but not executed yet / being blended / held back by the safety limit /
+  program cancelled".
+- Implemented by adding `target_q` / `target_qd` / `target_qdd` / `target_TCP_pose` /
+  `target_TCP_speed` to the receive recipe in `URBasic/rtdeConfiguration.xml` (74 → 79 fields; UR
+  allows 96 data values, and the two `output_bit_registers*` entries count as one), and by turning
+  the five matching `NotImplementedError` stubs in `RobotModel` into real RTDE reads.
+- This is more reliable than sending a URScript expression and reading a register back: zero round
+  trips, it does not interrupt a running program, and it cannot fail because the expression is
+  missing on older firmware.
+
+### Added — tool-side configuration and telemetry (4 tools)
+
+- `ur_set_tool_communication`: the tool-flange serial interface (TCI / RS-485), validated against
+  the manual's `set_tool_communication(enabled, baud_rate, parity, stop_bits, rx_idle_chars,
+  tx_idle_chars)` (only the eight documented baud rates, parity 0-2, stop bits 1-2, idle chars
+  within the documented ranges). ⚠️ The description repeats the manual's warning that **enabling
+  TCI disables the tool analog inputs**.
+- `ur_set_tool_output_mode`: tool output mode 0 = normal, 1 = power (dual-pin supply).
+- `ur_set_payload_inertia`: mass + centre of gravity + inertia matrix in one call
+  (`set_target_payload`, PolyScope 5.10+), validating the manual's rules (Ixx/Iyy/Izz non-negative,
+  every element |I| ≤ 133 kg·m²) and supporting `transition_time`. `set_target_payload` is used
+  **only when an inertia matrix is supplied**; without one the tool falls back to
+  `set_payload_mass` + `set_payload_cog` (CB3 3.x has no `set_target_payload`, so both paths work).
+  The description also carries the manual's two notes: setting a payload **automatically re-zeros
+  the force/torque measurement**, and `set_payload(m, cog)` **resets** the inertia matrix (the
+  manual marks it deprecated).
+- `ur_get_tool_telemetry`: tool output current/voltage and I/O current (RTDE fields, free to read).
+  The manuals also document `get_tool_temp()`, but the current recipe has no matching RTDE field, so
+  that value is **not** provided — the description says why rather than inventing a number.
+
+### Fixed — defaults that disagreed with the manual (`ur_movej` / `ur_movel`)
+
+- **`ur_movel`'s default speed was four times the manual value**: the old code used `a=1, v=1`
+  while the manual (Poly5 15.30 / PolyScope X 15.29) says `a=1.2, v=0.25` (250 mm/s). On a cobot
+  "no speed given" and "run at 1 m/s" are very different things; the defaults are the manual's now.
+- **`ur_movej` had the same problem** (old `a=1, v=1`; the manual says `a=1.4, v=1.05`).
+- The tool descriptions now also state the manual's other rule: **supplying `t` overrides `a`/`v`**
+  ("Time setting has priority over speed and acceleration settings.") — the thing models get wrong.
+
+### Fixed — `ur_movec` was missing the manual's `mode` argument
+
+- The manual's `movec(pose_via, pose_to, a, v, r, mode)` (Poly5 15.28) uses `mode` to pick the
+  orientation interpolation: `0` interpolates from the current pose to the target, `1` keeps the
+  orientation constant relative to the **tangent** of the arc (fixed-orientation circular motion).
+  The old code never sent the argument at all, so a fixed-orientation arc meant bypassing the tool.
+  It is sent now, defaulting to 0 exactly as the manual does.
+
+### Added — OptiMove, Motion Version and freedrive singularity (`ur_move_optimized` / `ur_motion_version` / `ur_get_freedrive_status`)
+
+- `ur_move_optimized` exposes `optimovej(goal, a=0.3, v=0.3, r=0)` / `optimovel(...)` (Poly5
+  15.32/15.33, PolyScope X 15.31/15.32): the same targets as `movej`/`movel` but with jerk-limited
+  speed profiles, so the motion is smoother and vibrates less. ⚠️ The manual is explicit that `a`
+  and `v` are **fractions of what the robot is able to do** — `a, v ∈ (0, 1]`, where 1 is the fastest
+  the robot can manage in that configuration — *not* rad/s or m/s. The tool validates that range and
+  says so in its description, because passing `a=1.4` (a perfectly good `movej` argument) would be
+  out of range here. The manual's `struct{pose, frame}` and world-model-object-name goal forms are
+  **refused explicitly** (they need PolyScope-side objects; a wrong script would only produce a
+  runtime error on the controller), and `goal_type` selects `joints` (optimovej) or `pose`
+  (optimovel).
+- `ur_motion_version` sets the Motion Version (manual chapter 14) and/or the **jerk gain**
+  (`jerk_gain_scaling_set`, 0.01-1.0). Version 2 clamps velocity/acceleration to the hardware limits
+  during planning and shrinks overlapping blend radii dynamically, where version 1 skips the move and
+  emits an "Overlapping Blends" warning; the jerk gain only affects jerk-limited profiles — version-2
+  `movej`/`movel` and `optimovej`/`optimovel`, which is exactly what `ur_move_optimized` uses. ⚠️ The
+  manual states that newer models and PolyScope X support **only version 2**, and CB3 has no such
+  setting at all. Neither setting has a read-back channel, so the tool reports what it set
+  (`readback_supported: false`) instead of pretending to read the current value.
+- `ur_get_freedrive_status` reads `get_freedrive_status()` (PolyScope X 15.20): how close the current
+  pose is to a **singularity** during freedrive — `0` normal, `1` near, `2` too close (noticeable
+  resistance). It is **not** an on/off flag for freedrive, and the manual's point is precisely that
+  constrained freedrive degrades near singularities, so this is what tells an operator to follow a
+  different path. The read goes through an output register (default int register 21, whose previous
+  value is overwritten); on firmware predating the function it reports honestly that nothing came
+  back rather than inventing a value.
+
+### Fixed — `servoj` ranges were the 3.x ones
+
+- The `t` default moved from `0.008` in 3.15.4 to `0.002` in Poly5 15.44 / PolyScope X 15.43 (the
+  manual's preferred "new setpoint every timestep"), and the `lookahead_time` lower bound moved from
+  `0.03` to `0.01`. The tool keeps `0.008` as its default (CB3 compatibility) but now **accepts
+  `t ≥ 0.002` and `lookahead_time ≥ 0.01`**, so a caller following the newer manual is no longer
+  rejected by a stale range.
+
+### Fixed — `run-tests.mjs` honoured `PYTHON` but not `UR_PYTHON`
+
+- The README and `test/selftest.test.mjs` have always used `UR_PYTHON || PYTHON || 'python'`, while
+  the runner's probe only read `PYTHON` — so `UR_PYTHON=... npm test` would report "no Python
+  found", skip every Python case, and contradict the skipped tests that could actually run. The
+  probe now follows the documented convention.
+
+### Tooling / documentation
+
+- New `scripts/pdf-extract2.py`: a **dependency-free** (standard library only) text extractor for the
+  three manual PDFs. Both PolyScope manuals embed subset CID Type0 fonts (`/Encoding /Identity-H`),
+  so the character codes in their content streams are **glyph ids** and the text can only be
+  recovered through each font's `ToUnicode` CMap; 3.15.4 uses plain WinAnsi Type1 fonts where the
+  byte *is* the character code. The script handles both, rebuilds word spacing from baseline and
+  kerning, and drops the rotated copyright watermark stamped on every page. Output lands in
+  `ScriptManual/txt/*.txt` (page-separated) and is the evidence behind every signature/default
+  checked in this release.
+- `docs/urscript-manual-analysis.md`: function signatures, parameter ranges, version differences
+  (3.15.4 → PolyScope 5 → PolyScope X additions / removals / renames / deprecations) and the safety
+  limits the manuals state — each with a manual line citation.
+- Tool-count gates updated: `EXPECTED_TOOLS` in `test/tool-schema-dsl.test.mjs` and
+  `scripts/check-host-compat.mjs` went 67 → 83, along with both READMEs' tool tables, the approval
+  list, and `67/67` → `83/83`.
+
 ## [0.5.0] - 2026-09
 
 > An audit-and-hardening release whose theme is **"can you still believe it?"**. A code audit found
@@ -118,22 +401,6 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **`ur_set_digital_out` with `which="config"` raised `struct.error` for ports 8–15**: URBasic numbers the eight configurable outputs 0–7 internally (it builds the mask as `2 ** n`), while the tool uses UR's global I/O numbering 8–15, so `n = 8` produced 256 (`'B' format requires 0 <= number <= 255`). The call now converts to URBasic's index.
 - **`ur_list_programs` never returned a result**: its local `err` shadowed the module-level `err()` helper, so the error branch called a string.
 - **The client half could never activate**: `resolveRobotIp()` read `ctx.config` / `ctx.options`, but the cordis context proxy throws `cannot get property "config" without inject` for properties the plugin does not declare through `inject`. That read sat outside `apply()`'s `try`, so the entry's fiber ended FAILED and the renderer reported only "1 plugin(s) did not activate", with no cause. Configuration now comes from the second `apply(ctx, config)` argument.
-
-### Added
-- **`ur_get_safety_status` (safety and robot status bits)**: when a motion trips a safety limit the controller just stops — it never says *which* limit was hit. This tool reads `safety_status_bits` (protective_stop / safeguard_stop / violation / fault / stopped_due_to_safety …) and `robot_status_bits` as **set-bit names plus raw values**, along with safety mode, robot mode and program state, so the offending threshold can be located on PolyScope's Settings → Safety → Safety limits page. **Honest note**: the numeric limits are not exposed by RTDE/dashboard and the plugin cannot read them (a protocol limitation, not a tool defect) — the returned `limits_source` says exactly that. Tool count 52 → **53**.
-- **`test/safety-status.test.mjs`**: pins per-bit decoding as a contract (multi-bit robot/safety status words, the 32–63 bit-register bank, the digital-bit readers) and drives the real `ur_get_safety_status`. **Honest note**: there is **no** negative check here — I briefly believed `1 & word == 1` was an operator-precedence defect (true under C's precedence) but in Python `&` binds tighter than `==`, so the vendored expressions were always correct; HEAD and the parenthesised form decode byte-for-byte identically, so that cosmetic batch was **reverted** rather than left as churn in vendored code.
-- **`ur_move_tool_x` / `ur_move_tool_y` / `ur_move_tool_z` (moves along the tool frame)**: `ur_move_x/y/z` move along **base** axes, which is a different direction entirely once the tool is tilted. The new tools read the current TCP pose in the worker, rotate the tool-frame displacement into the base frame with the pose's rotation matrix, and send a base-frame `movel` — deliberately **not** using URScript's `pose_trans` (its availability and behaviour vary across software versions; it aborted at runtime on CB3 3.15). The result reports both the requested tool-frame delta and the converted base-frame delta so a human can check the direction, and all three are wired into the motion approval gate. Tool count 49 → **52** (AGENTS.md, the README tool table and the registration-count gate were updated with it).
-- **`test/send-script-verify.test.mjs`**: fakes the controller's three behaviours (executes / only reaches the start sentinel / ignores everything), asserting the three verdicts, the injection shape (start sentinel + untouched user script + end sentinel), `verify=false` and a custom sentinel register — plus a guard against ever regressing to "sent and nothing else".
-- **`test/tool-frame-moves.test.mjs`**: checks the tool→base conversion against **closed-form** results (identity / Rz+90° / Ry+90° / Rx+90° across the axes), asserts the target pose equals current position plus the base delta with the orientation unchanged, and guards both "no `pose_trans`" and "the three new tools must be in the approval gate".
-- **`test/remote-control.test.mjs`** grew a case that drives the real `op_connect` with a fake dashboard across explicit true / explicit false (CB3) / explicit false (e-Series) / unparsable / empty / probe-raises, asserting the tri-state wording (never claim "not in remote control mode" on unknown).
-- **`test/worker.test.mjs`**: covers the Node-side process manager (`lib/worker.js`) — protocol round-trip, in-flight requests failing when the child exits (error carries the exit code), **respawn of a clean process after the backoff**, per-call timeout, `dispose()` failing in-flight requests, and the 500 ms default backoff. That layer previously had only a code reading, yet the "kill a stuck worker" fix depends entirely on it.
-- **`test/worker-log.test.mjs`**: pins the log cap (roll on overflow, one generation only, exact byte accounting) and the "reconnect-failure branch must throttle and sleep" contract.
-- **`test/scene-alignment.test.mjs`**: asserts the grid's plane normal is +Z, that the plane passes through the origin, and that both line directions lie on world X/Y (i.e. "grid plane = base plane, grid X/Y = base X/Y"), and guards `camera.up = +Z` plus "GridHelper is only created through `createBaseGrid()`".
-- **`test/remote-control.test.mjs`**: pins the CB3 3.1–3.20 range decision (boundaries included, e-Series 5.x excluded, unreadable version treated as "must enable") and `ur_connect`'s branched message.
-- **`test/connect-timeout.test.mjs`**: monkey-patches `UrScriptExt`'s constructor into a call that never returns, then asserts the worker really does `os._exit(1)` within the budget and writes the "connection timed out" error back to the protocol stdout. Two contract assertions accompany it: the hard budget must stay below the Node side's default command timeout, and `ensure_connected` must go through `_connect_or_exit`.
-- **Joint-position contract test**: a new case in `test/model-contract.test.mjs` transforms each GLB's mesh AABB through the **real assembly path** (`loadRobotModel` + `applyFK`'s `groups[k].matrixWorld`) and asserts that adjacent links stay in contact across 14 models × 3 poses. The pre-existing case computed `frames = [identity, ...links]` by hand and therefore **bypassed `assemble()`** — which is exactly how the assembly defect stayed green through every test while the twin rendered wrong on a real robot.
-- **`--selfcheck` lost its blind spot**: it checked only the fallback `rtdeConfigurationDefault.xml`, which existed throughout the outage, so it kept reporting healthy while every RTDE write was broken. It now checks the `rtdeConfiguration.xml` that `rtde.py` resolves first (missing ⇒ `exit 1`) and reports the fallback separately.
-- **`test/rtde-config.test.mjs`** pins the recipe's three contracts: (1) the config file exists and wins `rtde.py`'s lookup; (2) the receive side enables `output_bit_registers32_to_63` alongside int/double registers 0..23; (3) the **input side must declare zero fields** (claiming input variables makes the next `SETUP_INPUTS` rejected by the controller and crashes the worker), the connect sequence must not call `__setupInput()`, and writes must go through `RealTimeClient.Send` URScript rather than URBasic's `setData`-based helpers. It also asserts `package.json`'s `files` ships the config.
 
 ## [0.4.0] - 2026-09
 

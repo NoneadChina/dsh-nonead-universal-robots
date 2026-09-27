@@ -23,21 +23,22 @@ Thumbs.db
 # pnpm project-local content-addressable store (created by `pnpm add`)
 .pnpm-store/
 
-# pnpm must never run inside this workspace member: the outer repo is a Yarn
-# workspace, and the topology gate (`verify-layout`) rejects a pnpm lock/workspace
-# file on disk. Ignoring them here keeps an accidental `pnpm install` from being
-# committed; the gate still fails loudly until they are removed.
-pnpm-lock.yaml
-pnpm-workspace.yaml
-
 # DSH local project memory store (agent indexing scratch)
 .dsh-project-memory/
 
-# UR 官方手册 PDF（约 3.8 MB）仅供本机离线查阅，不作为仓库内容分发。
-# 需要时按型号/版本从 UR 支持站点下载：https://www.universal-robots.com/download/
-ScriptManual/
+# 一次性探针/临时报告（检查脚本自清理，这三个模式是兜底）
+scripts/.tmp-*
+lib/.client.rebuild-check*
 
-# 本机专属的解释器 shim（含本机用户名路径，且刻意不在 package.json 的 files 里）。
-# 它只解决「这台机器的 python 找不到 numpy/paramiko」，见文件头部说明；
-# 提交它会泄露本机路径，也会让别人的机器套用错误的 site-packages。
+# 本机解释器垫片：把某台机器的 site-packages 硬编码进 sys.path。它**故意**不在 package.json
+# 的 files 里；这里再挡住 git，免得某次 `git add -A` 把它带上天（README 记录了它是怎么害人的：
+# 有它则"本机全绿"，没有它则换台机器 import numpy 直接失败）。正确做法是给 pythonBin 指向的
+# 解释器装好 requirements.txt，或指向一个 venv。
 python/sitecustomize.py
+
+# Universal Robots 的官方手册 PDF 是**第三方版权材料**，不适合随本仓库再分发。
+# 仓库只保留用 scripts/pdf-extract2.py 抽出的文本（ScriptManual/txt/），
+# 需要原文时用自己合法取得的手册重新抽取即可（README / docs 里写了这条路径）。
+ScriptManual/*.pdf
+ScriptManual/_fonts/
+
