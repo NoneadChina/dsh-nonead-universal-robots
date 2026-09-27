@@ -8,7 +8,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
 
-const OUT = 'lib/client.js'
+// 输出路径可用 `BUILD_CLIENT_OUT` 覆盖：校验脚本要"重新构建到别处再比对哈希"来证明
+// 提交的 bundle 与源码一致，这比任何字面量/时间戳启发式都确定，而且**不必碰**提交产物。
+const OUT = process.env.BUILD_CLIENT_OUT ?? 'lib/client.js'
 const ROOT = dirname(fileURLToPath(import.meta.url)) + '/..'
 
 // DSH 以包名作为插件 id（`/plugins/<id>/client.js` 与 `window.__DSH_BOOT__` 的登记键）。
