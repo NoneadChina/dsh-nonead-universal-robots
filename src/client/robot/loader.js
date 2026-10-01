@@ -47,9 +47,17 @@ export const ARM_LINKS = [0.15, 0.12, 0.24, 0.21, 0.085, 0.092, 0.092]
 /** 已装配句柄的进程内缓存：key = 小写型号 id。 */
 const cache = new Map()
 
-/** 缺省加载器：走 host 资产路由取 GLB（[Ruling 7] 插件静态路径只服务 client.js，GLB 必须走路由）。 */
+/**
+ * 缺省加载器：走 host 资产路由取 GLB（[Ruling 7] 插件静态路径只服务 client.js，GLB 必须走路由）。
+ *
+ * 复用**同一个** `GLTFLoader` 实例：它内部持有解析器注册表与纹理缓存，每次新建都等于把
+ * 那些状态丢掉重来。命中模型缓存时根本不会走到这里，所以这条只影响"换型号"的路径。
+ */
+let sharedGltfLoader = null
+
 async function defaultLoadGltf(url) {
-  return await new GLTFLoader().loadAsync(url)
+  sharedGltfLoader ??= new GLTFLoader()
+  return await sharedGltfLoader.loadAsync(url)
 }
 
 /**
@@ -87,20 +95,74 @@ function assemble(root) {
 }
 
 /**
+ * 把任意输入规整成 7 个**正的有限**长度；不合法的位置回退 `ARM_LINKS` 的同位值。
+ *
+ * 回退臂是最后一道防线：它绝不能因为型号数据里的一个 `null` 就长出 NaN 几何体 ——
+ * NaN 顶点会让整棵子树从场景里消失，那比"尺寸不太准"严重得多。
+ *
+ * @param {unknown} armLinks 候选长度数组
+ * @returns {number[]} 恰好 7 个长度（米）
+ */
+export function normalizeArmLinks(armLinks) {
+  const out = []
+  for (let i = 0; i < 7; i++) {
+    const value = Array.isArray(armLinks) ? armLinks[i] : undefined
+    out.push(Number.isFinite(value) && value > 0 ? value : ARM_LINKS[i])
+  }
+  return out
+}
+
+/**
+ * 从 `kinematics.json` 的 `links`（7 个 4×4 齐次变换）算出 7 段连杆长度（米）。
+ *
+ * 每个矩阵按行主序展开，平移分量在索引 3/7/11；相邻两个原点的欧氏距离就是该段长度。
+ * 第 7 段（末端）没有下一个原点可比，用最后一段近似。
+ *
+ * @param {number[][]} links 型号的关节变换表
+ * @returns {number[]|null} 7 个长度；数据不足或形状不对时 `null`（调用方据此保持缺省）
+ */
+export function linkLengthsFromKinematics(links) {
+  if (!Array.isArray(links) || links.length < 7) return null
+  const points = []
+  for (let i = 0; i < 7; i++) {
+    const m = links[i]
+    if (!Array.isArray(m) || m.length < 12) return null
+    const x = m[3]
+    const y = m[7]
+    const z = m[11]
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
+    points.push([x, y, z])
+  }
+  const lengths = []
+  for (let i = 0; i < 6; i++) {
+    const [ax, ay, az] = points[i]
+    const [bx, by, bz] = points[i + 1]
+    lengths.push(Math.hypot(bx - ax, by - ay, bz - az))
+  }
+  lengths.push(lengths[5])
+  return lengths
+}
+
+/**
  * 未知型号的近似臂：7 段胶囊，名字与 LINK_MESH_NODES 一致。
  * 返回的是**未装配**的 root（7 段都在 root 下）；`loadRobotModel` 会用同一张表装配它，
  * 所以不要直接把返回值丢进场景。
+ *
+ * @param {number[]} [armLinks=ARM_LINKS] 7 段连杆长度（米）。
+ *        内置型号的真实长度可由 `linkLengthsFromKinematics(kin.links)` 算出并传进来，
+ *        这样回退臂的尺寸才与该型号相符；缺省仍是 UR3 量级的 `ARM_LINKS`。
  */
-export function buildFallbackArm() {
+export function buildFallbackArm(armLinks = ARM_LINKS) {
+  const links = normalizeArmLinks(armLinks)
   const root = new Group()
   root.name = 'fallback_arm'
   const mat = new MeshStandardMaterial({ color: 0x8899aa, roughness: 0.6, metalness: 0.1 })
   for (let i = 0; i < 7; i++) {
     // 胶囊半径随连杆粗细、长度随连杆长度缩放；沿自身局部 +z 平移半段，让关节落在连杆一端。
-    const len = Math.max(0.04, ARM_LINKS[i] * 0.8)
-    const m = new Mesh(new CapsuleGeometry(Math.max(0.03, ARM_LINKS[i] * 0.18), len), mat)
+    const len = Math.max(0.04, links[i] * 0.8)
+    const m = new Mesh(new CapsuleGeometry(Math.max(0.03, links[i] * 0.18), len), mat)
     m.name = LINK_MESH_NODES[i]
-    m.position.z = ARM_LINKS[i] * 0.5
+    m.position.z = links[i] * 0.5
     root.add(m)
   }
   return root
@@ -110,8 +172,10 @@ export function buildFallbackArm() {
  * 按型号按需加载并装配模型。加载失败（未内置 / 404 / 结果非法）时回退近似几何体，**不抛错**。
  *
  * @param {string} modelId 型号 id（内部小写化）
- * @param {{ loadGltf?: (url: string) => Promise<{scene: import('three').Object3D}> }} [deps]
- *        可选注入点，仅测试使用；缺省走真实 `GLTFLoader`。
+ * @param {{ loadGltf?: (url: string) => Promise<{scene: import('three').Object3D}>,
+ *           armLinks?: number[] }} [deps]
+ *        可选注入点，仅测试与调用方传型号数据时使用；缺省走真实 `GLTFLoader` 与 UR3 量级的
+ *        回退臂长度。`armLinks` 由 `linkLengthsFromKinematics(kin.links)` 得到。
  * @returns {Promise<{root: import('three').Object3D, groups: import('three').Group[],
  *                    usedFallback: boolean, applyFK: (result: {links?: number[][]}) => void,
  *                    dispose: () => void}>}
@@ -133,7 +197,8 @@ export async function loadRobotModel(modelId, deps = {}) {
     if (!scene || typeof scene.traverse !== 'function') throw new Error('GLB 结果缺少 scene')
     root = scene
   } catch {
-    root = buildFallbackArm() // 未内置/加载失败 → 回退，不抛错
+    // 未内置/加载失败 → 回退，不抛错。带上该型号的真实连杆长度，让回退臂的尺寸相符。
+    root = buildFallbackArm(deps.armLinks)
     usedFallback = true
   }
 
@@ -152,19 +217,7 @@ export async function loadRobotModel(modelId, deps = {}) {
      * `links` 缺失/非法时静默保持上一姿态。
      */
     applyFK(result) {
-      const links = result?.links
-      if (!Array.isArray(links)) return
-      if (groups[0]) {
-        groups[0].matrix.identity()
-        groups[0].matrixWorldNeedsUpdate = true
-      }
-      for (let k = 1; k < 7; k++) {
-        const m = links[k - 1]
-        if (groups[k] && Array.isArray(m)) {
-          groups[k].matrix.fromArray(m)
-          groups[k].matrixWorldNeedsUpdate = true
-        }
-      }
+      applyLinksToGroups(groups, result)
     },
   }
 
@@ -183,6 +236,34 @@ export async function loadRobotModel(modelId, deps = {}) {
  *
  * 只有引用归零才真正释放 GPU 资源并清缓存。
  */
+/**
+ * 用 `fkChain(kin, q)` 的结果摆正一套装配组的姿态。
+ *
+ * 语义（真臂与幽灵臂**必须完全一致**，所以抽成一份）：
+ * - `groups[0]` 恒为单位矩阵（基座固定）；
+ * - `groups[k]`（k≥1）取 `links[k-1]`，是**绝对**变换 —— 所以 `groups[k].matrixWorld` 直接
+ *   等于它。**不要**把这些组串成父子链：绝对变换经父链相乘会被重复施加。
+ * - `links` 缺失/非法时静默保持上一姿态，绝不抛错（一帧坏数据不该让画面卡死）。
+ *
+ * @param {Array<import('three').Object3D|null>} groups 7 个装配组
+ * @param {{links?: number[][]}} result `fkChain` 的返回值
+ */
+export function applyLinksToGroups(groups, result) {
+  const links = result?.links
+  if (!Array.isArray(links) || !Array.isArray(groups)) return
+  if (groups[0]) {
+    groups[0].matrix.identity()
+    groups[0].matrixWorldNeedsUpdate = true
+  }
+  for (let k = 1; k < 7; k++) {
+    const m = links[k - 1]
+    if (groups[k] && Array.isArray(m)) {
+      groups[k].matrix.fromArray(m)
+      groups[k].matrixWorldNeedsUpdate = true
+    }
+  }
+}
+
 function makeHandle(entry) {
   let released = false
   return {

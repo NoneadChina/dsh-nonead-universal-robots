@@ -45,6 +45,7 @@
  */
 
 import { subscribeMutations } from './mutation-hub.js'
+import { activeStrings } from './strings.js'
 
 /* ------------------------------------------------------------------ *
  * 真实锚点与标记常量
@@ -75,13 +76,16 @@ export const RIGHT_CLOSE_ATTRIBUTE = 'data-dsh-ur-twin-right-close'
 export const RIGHT_PANEL_HOST_ATTRIBUTE = 'data-dsh-ur-twin-right-panel'
 
 /** 入口卡片文案（与左栏入口保持一致）。 */
-export const RIGHT_ENTRY_LABEL = 'UR 数字孪生'
+const S = activeStrings()
+
+/** 入口标题（跟随当前语言）。 */
+export const RIGHT_ENTRY_LABEL = S.dockLabel
 
 /** 入口卡片描述（对齐原生卡片的「浏览网页」「在会话工作区运行命令」语气）。 */
-export const RIGHT_ENTRY_DESCRIPTION = '机器人实时孪生视图'
+export const RIGHT_ENTRY_DESCRIPTION = S.dockDescription
 
 /** 覆盖层标题。 */
-export const RIGHT_PANEL_TITLE = 'UR 数字孪生'
+export const RIGHT_PANEL_TITLE = S.dockLabel
 
 /* ------------------------------------------------------------------ *
  * 卡片图标（26px，对齐原生卡片的图标槽尺寸；用固定强调色融入三张卡片）
@@ -429,8 +433,8 @@ export function mountRightDockEntry({
     const close = doc.createElement('button')
     close.setAttribute('type', 'button')
     close.setAttribute(RIGHT_CLOSE_ATTRIBUTE, '')
-    close.setAttribute('aria-label', '收起')
-    close.setAttribute('title', '收起')
+    close.setAttribute('aria-label', S.dockCollapse)
+    close.setAttribute('title', S.dockCollapse)
     close.textContent = '✕'
     setStyle(close, CLOSE_STYLE)
     close.addEventListener('click', onCloseClick)
