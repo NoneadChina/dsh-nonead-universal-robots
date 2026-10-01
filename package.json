@@ -1,6 +1,6 @@
 {
   "name": "dsh-nonead-universal-robots",
-  "version": "0.6.1",
+  "version": "0.6.5",
   "description": "一个让 DSH 用自然语言直接控制 Universal Robots（UR）机械臂的插件，由拓德科技（Nonead）基于自研的 nUR MCP Server 同源逻辑开发。",
   "type": "module",
   "main": "lib/index.js",
@@ -83,8 +83,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh": "^0.1.2-rc.1 || ^0.1.7-rc.2",
-    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1 || ^0.1.7-rc.2",
+    "@deepseek-ai/dsh": "^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.2"
   },
   "engines": {

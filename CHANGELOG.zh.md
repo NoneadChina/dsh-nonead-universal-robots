@@ -2,6 +2,254 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.5] - 2026-10
+
+> 本版把数字孪生从"只读预览"做成现场工具，并把 10 Hz 轮询换成推送通道。同时收尾了一批
+> **读取回执的诚实性修复**：好几个工具在报告它们其实读不到的值 —— 工具遥测永远返回 `null`、
+> 自由驱动检查把陈旧的 `0` 读成"正常"、`power_off` 把"控制器因为刚断电而不应答"当成失败。
+> 以下内容都已在树里，只是从未被写下来；0.6.3 与 0.6.4 没有作为独立条目发布过。
+
+### 新增 — 宿主的第 4 条只读路由：SSE 实时流
+
+- **`/dsh-nonead-ur/twin/stream`**（`lib/twin-routes.js`）：用 Server-Sent Events 取代"轮询碰运气"。
+  每 `100 ms` 一帧、15 s 一次 `: ping` 心跳（空闲连接正是代理会在 30–60 s 后切掉的东西）、
+  `pumping` 标志做背压（上一帧没写完就不发下一帧）、订阅即推首帧、`x-accel-buffering: no`，
+  非 `GET` 一律 `405`。**单帧失败只发一个 `error` 事件，绝不拆掉整条流** —— 客户端保留上一帧好数据。
+- **流里的 `detail` 走自己的慢节拍**（`TWIN_STREAM_DETAIL_MS` = 2000 ms）：不能每帧带（每帧一次
+  dashboard 往返，10 Hz 会把机器人打满），也不能一帧都不带（安全模式、温度与母线电压会永远是空的）。
+- **客户端订阅器**（`src/client/robot/twin-stream.js`）：`EventSource`，断线 1 s 重连，连续 8 次失败
+  即放弃**并通知订阅者**；环境没有 `EventSource` 时明确说明，而不是静默什么都不做。
+- **流与轮询严格互斥**（`src/client/state.js`）：`stream: true` 时一次 `fetch` 都不发 —— 两者并存会让
+  同一帧推两次、机械臂画面抖动。切换机器人会整条重建流，且客户端半现在**默认 `stream: true`**。
+- 宿主兼容门禁现在期望 **4** 条 `kind:'exact'` 孪生路由（`state` / `asset` / `models` / `stream`），
+  不再是 3 条。这条断言的意义是"注册形状变了要让**人知道**"，不是把条数冻死。
+
+### 新增 — 在多台机器人之间选择，并看清自己在看哪一台
+
+- **`setIp()` 会清掉上一台的读数**（`src/client/state.js`）：切换目标立即丢弃 `connected`、`q`、`tcp`、
+  `ts` 与 `detail`。把 A 的位姿当成 B 的显示，比什么都不显示更危险。同一个 IP 是 no-op（连快照对象都
+  不重建）；空白或非字符串表示"交回宿主解析"。
+- **机器人选择按钮与身份行**（`src/client/twin-panel.js`）：选择器只在签名（`${resolvedIp}|${candidates}`）
+  变化时重建 —— 每帧重建会在手指还没抬起时把按钮换掉。数值面板最上面一行现在显示 `型号 · IP`；
+  IP 以前只躺在 `data-ur-twin-ip` 属性里，界面上一个字都看不到。
+- 未连接的帧**必须保留 `ips` 候选**，否则选择器恰恰在最需要它的时候点不到（连了多台 ⇒ 目标有歧义）；
+  `setIp` 会 abort 在飞的请求并立刻重取一次，而不是干等下一个 tick。
+
+### 新增 — 先看后动：待审批运动预览
+
+- **`lib/pending-motion.js`** 把审批弹窗变成一次预览，并且**绝不假装自己知道得更多**：`joints`（可以画
+  整条幽灵臂）/ `pose`（本插件没有 IK，只在目标位置放标记）/ `relative`（只给文字 —— 绝对目标要先结合
+  当前 TCP）/ `opaque`（画圆方星、跑程序、力控与速度指令没有单一目标）。它**永不抛错**：畸形参数退化成
+  `opaque`，摘要截断在 200 字符。
+- **`createPendingMotionStore()`** 为每次审批发放专属 **token**，于是两次审批重叠时，先结束的那次
+  抹不掉后一次的预览。`read()` 把超过 `PENDING_MOTION_TTL_MS`（10 分钟）的预览视为已结束 ——
+  一次被打断的审批就是这样停止在屏幕上留下一层假目标的。
+- `lib/index.js` 在弹窗**之前** `begin`、在 `finally` 里 `end`，所以批准、拒绝、以及"审批服务抛异常"
+  三种情况都会撤掉预览。
+- 状态路由**只在有待审批时**才带 `pending_motion` 字段（没有时字段缺席，而不是 `null`），客户端才能
+  区分"当前没有审批"与"有审批但解析不出目标"。与 `detail` 不同，客户端**刻意不**沿用上一帧的
+  `pending_motion`。
+
+### 新增 — 孪生面板上的现场工具
+
+- **幽灵臂**（`src/client/robot/ghost-arm.js`）：克隆真臂叠加在实际位姿上，跟随误差、滞后与交融一眼可见。
+  geometry 与贴图与真臂**共享**（多一层几乎不额外占显存）—— 也正因为如此，克隆树的 geometry
+  **绝不 dispose**：那正是真臂在渲染的同一批对象。待审批目标显示为橙色，控制器当前目标为青色。
+- **TCP 坐标轴**（`src/client/robot/tcp-axes.js`）：固定 8 cm 的 `AxesHelper` 在 UR3 上偏大、在 UR30 上
+  偏小，而且没有标签。尺寸改为臂半径的 `0.12 ×`，钳在 `[0.03, 0.3]`，并配 X/Y/Z 字母标签（用 canvas
+  画，不依赖外部字体，无 canvas 环境优雅退化）。缩放必须写在内层节点：外层节点每帧接收 `tool0` 矩阵，
+  而 `scale` 在 `matrix.fromArray` 里是留不住的。
+- **工程辅助图层**（`src/client/robot/overlays.js`），默认全关：可达包络、负载重心、TCP 受力箭头
+  （死区 1 N、上限 0.6 m）。可达半径取前 6 段连杆长度之和，并明确注明它是**上界**，不是厂商 spec 的
+  reach 值。重心标记已实现但**刻意不暴露** —— 插件没有能读回载荷的 op，按钮点下去不会有任何反应。
+- **截图导出**（`src/client/robot/screenshot.js`）：PNG 水印带型号、IP、安全模式、速度倍率、关节角、
+  TCP 与本地时间。水印画在画布的**副本**上，而副本必须在**渲染之后同步**取 —— 上下文是
+  `preserveDrawingBuffer: false`，先让出控制权再取图可能拿到一张全黑图。
+- **轨迹控件**：清空 / 暂停-继续 / 导出 CSV。CSV 除位置外**还带关节角**，否则导出的数据无法复现姿态。
+  颜色现在随样本新旧从暗蓝渐变到亮青，同时表达方向与相对速度；时间戳全不可用时退化为按序号渐变，
+  而不是产出 `NaN`。
+- **可访问性**：canvas 是 `role="img"` + `aria-label` + `tabindex="0"`，方向键与 `Home` 驱动既有的视角
+  预设 —— 这是纯键盘用户目前唯一能操作 3D 视图的途径。数值面板是 `role="status"` + `aria-live="polite"`
+  （只播报变化，不每次重读整块），开关按钮带 `aria-pressed`，被截断的读数补 `title`。
+
+### 新增 — 客户端文案变成一张真正的表
+
+- `src/client/strings.js` 不去赌 `@deepseek-ai/dsh-client-locale`（本机并未安装）：`zh` 与 `en` 的键集合
+  **完全对称**（有测试双向断言这一点），带插值的键写成函数，`resolveLocale` 只认主语言子标签，并且
+  认不出时**回退中文而不是英文**。右栏入口卡片与覆盖层的文案也取自同一张表。
+
+### 修复 — 读取回执：工具报告了它们读不到的值
+
+- **`ur_get_tool_telemetry` 除了 `null` 什么都返回不了。** 工具侧字段既不在 RTDE 配方里，vendored
+  访问器又是 `NotImplementedError` 桩。配方现在声明了它们（`tool_*`、`io_current`、
+  `target_speed_fraction`；按 RTDE 文档 `tool_output_voltage` 是 `INT32`，24 V 读作 24000），工具也改为
+  直读 `dataDir`。
+- **`ur_get_tool_analog_in` 改为优先直读 RTDE**，只在不得不时才回退到"发脚本 + 回读寄存器"那条路 ——
+  那条路会打断正在运行的程序。回读寄存器默认 22，以避开 `send_script` 用的 23。
+- **`ur_get_speed_scaling` 不再把静止读成"被压到 0"。** `speed_scaling` 是**实际**倍率，
+  `target_speed_fraction` 是**请求**倍率；现在两个都给，并在应答里写清语义。
+- **`ur_get_freedrive_status` 用哨兵 token** 区分"该固件不支持"与"值真的是 0"。旧实现读到的是一个
+  陈旧寄存器，却把它当成正常。
+- **`ur_power_off` 以 `robot_status_bits` 的 `PowerOn` 位为准**，于是"控制器正因为刚断电而不应答"
+  不再被报告成失败。
+- **`ur_draw_circle` 写入起始哨兵**，把一次盲目的 60 s 超时变成即时的 `NOT_EXECUTED`（控制器根本没跑脚本时）。
+- **`ur_move_tool_x/y/z` 的工具系→基座系换算放在 worker 侧**（`_tool_axis_move`）：读当前 TCP 位姿，
+  用该位姿的旋转矩阵把位移转过去，再发基座系 `movel`。这里**刻意不用** `pose_trans` —— 它在 CB3 /
+  URSoftware 3.15 上出现过运行期中止。
+
+### 修复 — 两处肉眼可见的缺陷
+
+- **回退臂永远是 UR3 量级。** `buildFallbackArm()` 无条件使用 `ARM_LINKS`，于是加载失败的未知型号会退回到
+  与眼前这台机器人不符的几何。连杆长度现在由 `linkLengthsFromKinematics(kin.links)` 推出，逐值回退，
+  且永不产出 `NaN`/`0`/负数 —— 一个 `NaN` 顶点会让整棵子树消失。
+- **右栏 3D 视图原先是一个绝对定位的覆盖层。** 它的包含块不是右栏内容体，实测比右栏宽、压到对话区上方。
+  现在改为正常流的 flex 子项，并以内联方式隐藏引导列（记录原值，收起时还原）。入口卡片优先**深度克隆
+  原生卡片**（主题、圆角与图标槽全都挂在哈希类名上，手工复刻必然漂移），原生卡片缺失时退回自建卡片，
+  引导列稍后渲染出来时再升级为克隆卡片；点了别的卡片或引导列消失即自动收起。
+
+### 变更 — worker 背压
+
+- `lib/worker.js` 的 `DEFAULT_MAX_IN_FLIGHT = 8`：超过上限的调用**直接拒绝，不排队**。worker 是单线程的，
+  排在卡住的那个请求后面的调用只会各自烧完自己的超时；错误文案现在会点名可能的原因（"机器人可能已无响应"）。
+
+### 新增 / 变更 — 门禁与自检
+
+- **`scripts/check-new-ops.py`** —— 0.6.0 新增的每个 worker op 的行为门禁：对着假控制器断言**实际下发的
+  URScript**（力控、`speedj`、`optimove`、`movec`、传送带跟踪、绘图路点序列），外加 14 条必须 fail-closed
+  的 `ValueError` 用例。
+- **`scripts/check-test-manifest.mjs`** 把 `test/test-manifest.json` 与 `test/**` 里真实的 Python 调用
+  **双向**对账：需要 Python 却没登记的用例失败，登记了却根本不碰 Python 的用例同样失败。
+- **`scripts/check-package-metadata.mjs`**：`main` / `exports` / `dsh.bundle.patch` 必须可解析、客户端
+  bundle 必须以包名注册、`files` 必须覆盖运行时且**不得**含本机的 `python/sitecustomize.py`、任何源文件
+  不得硬编码作者机器的路径。**`scripts/check-doc-tools.mjs`** 把 README 工具表与真实注册表对账（只解析
+  表格行 —— 旧版扫全文，删掉一整行表格它照样通过），**`scripts/check-tool-params.py`** 双向强制跨语言
+  参数契约。有两个坑值得记下来：`check-host-compat.mjs` 把已安装的桌面 `node_modules` 排在向上查找**之前**，
+  因为本仓库自带的 `@deepseek-ai/dsh-tools` dev 副本更旧，用它校验会得出误导性的"0/83 注册成功"；
+  `check-tool-params.py` 的中文诊断只写文件、stdout 保持 ASCII，否则中文 Windows 控制台会让检查自己
+  以 `UnicodeEncodeError` 死掉。
+- `npm test` 现跑 **9 条门禁**（4 Node + 5 Python）与 **35 个测试文件**（11 Python、24 Node）；
+  `check-host-compat.mjs`（对宿主真实 DSL 的 83/83 个工具、4 条路由）仍走 `npm run verify:host`。
+  本机实测 **44 项全部通过**（Python 那一半需要 `numpy`/`paramiko` 可导入 —— 见 `python/sitecustomize.py`）。
+
+- **`tool_mode` 不是工具输出模式，它的含义未确认。** 在 UR30 / PolyScope 5.21 上实测为 253，且
+  调用 `ur_set_tool_output_mode(0)` / `(1)` 时**不发生变化**。读它本身没问题 —— 它是从 RTDE
+  原样透传的 —— 但 `test/readback-fixes.test.mjs` 的夹具编造了一个看起来很像模式枚举的 `2`，
+  让这个字段显得有意义。夹具现改用实测值 253，并写明其含义待定。
+- **程序加载/运行/暂停/停止在"控制器没有可运行的程序"时表现得如实。** `ur_run_program` 逐字回报
+  控制器的拒绝（`Failed to execute: play`），而不是谎报成功；`ur_load_program` 会拒绝含尖括号的
+  名字 —— 这是对的（`<未命名>` 是 PolyScope **显示**未保存程序的方式，不是文件名），但也意味着
+  `loaded_program` 那串不能直接喂回 `ur_load_program`。
+
+- **`ur_get_conveyor` 现在会自证那段 URScript 真的执行过，而不是回读一个没人写过的寄存器。**
+  传送带 tick 只能靠控制器执行一段 URScript 取回，而**在加载期被拒收**的程序一行都不会执行，
+  也不会置"程序执行错误"标志 —— 旧实现于是照样回读 `output_double_register_0`，把那里碰巧残留的
+  值报出去。上面那个"函数名写错"的缺陷能潜伏这么久，根因就在这里。现在工具先探测通道，
+  再执行一段由首尾哨兵夹住的载荷：哨兵写 **int** 寄存器、tick 写 **double** 寄存器 ——
+  刻意分成两个寄存器家族，这样"载荷那条路坏了"不会把哨兵一起带走、把所有结局都塌缩成
+  "什么都没发生"。三种结局分开报：**跑到末尾**（`verified: true`，tick 可信）、
+  **开始了但没跑到末尾**（`UNSUPPORTED`，不给 tick 值）、**压根没执行**
+  （`NOT_EXECUTED`，不给 tick 值并点名最可能的原因）。已在 UR30 / PolyScope 5.21 上验证：
+  工具报 `verified: true`，而独立回读 `output_int_register_20` 得到的就是它声称的那个结束哨兵。
+  两个可选参数（`register`、`payload_register`）用来挑寄存器，两者的旧值都会被覆盖。
+- **`ur_get_double_register` 与 int 寄存器走同一条读取路径。** 它此前直接调
+  `OutputDoubleRegister`，访问器缺失或抛异常就变成异常而不是取值；现在改用新增的
+  `_read_double_register` helper，读不到时回落原始 RTDE 字段 —— 这正是 `_read_int_register`
+  一直以来的做法。
+
+### 修复 — 一次对 URSim（UR30 / PolyScope 5.21.3）的实机测试查出来的
+
+- **`ur_get_conveyor` 只可能返回 0 —— 因为更早的一次"修复"让控制器把整段脚本拒收了。**
+  URScript 里写双精度寄存器的函数叫 **`write_output_float_register`**；`output_double_register_0`
+  是**同一条数据的 RTDE 字段名**。更早的版本把这两个名字当成了同一个，把调用"改正"为
+  `write_output_double_register` —— 一个并不存在的函数。控制器于是在**加载阶段就拒收整段程序**，
+  一行都不会执行；`waitRobotIdleOrStopFlag()` 因此永远看不到执行错误，而
+  `get_conveyor_tick_count()` 接着去回读寄存器 0 —— 一个从未被写过的值。**一次看得见的报错，
+  就这样变成了静默的错值。** 在 PolyScope 5.21 / UR30 上实测：`write_output_float_register(0, 42.5)`
+  被接受且 `output_double_register_0` 读回 42.5；而 `write_output_double_register(0, 99.5)` 被直接
+  拒收（`ur_send_script` 的哨兵根本不落地）。现已改回，`urScript.py` 里就地写明证据，并由
+  `test/readback-fixes.test.mjs` 在错误名字再次出现时失败 —— 当初那次改动**完全没有测试覆盖**，
+  它就是这样溜过去的。
+
+- **控制器发来的每一个非 ASCII 字符串都是乱码。** `dashboard.py` 的接收路径用
+  `''.join(map(chr, out))` 拼字符串 —— 一个字节取一个码点，等价于按 Latin-1 解码，于是
+  PolyScope 5 的 `STOPPED <未命名>` 到手变成 `<æªå½å>`、`(三月 14 2025)` 变成 `(ä¸æ 14 2025)`：
+  中文程序名在任何一处读数里都读不出来。现在按 UTF-8 解码，解不开再退回 Latin-1
+  （老固件若真发单字节文本仍能工作）。
+- **`program_state` / `runtime_state` 把程序名一起带出来了。** 与 `safetymode` / `robotmode`
+  只带 `标签:` **前缀**不同，`programState` 回的是「状态词 **加上** 程序名」—— 实测空闲时
+  `STOPPED <未命名>`、运行中 `PLAYING <程序名>`。`_enum_token` 只剥前缀，于是客户端按裸枚举词
+  查中文表落空，HUD 显示的是「程序 STOPPED <未命名>」而不是「程序 已停止」。新增的
+  `_program_state` 在协议边界剥掉尾部的 `<程序名>`，同时**不动** `"<查询失败>"` 哨兵。这与 0.6.2
+  修的前缀缺陷是同一类 —— 而夹具又犯了同样的错（`ur_programState` 被伪造成裸值 `"STOPPED"`），
+  所以 `test/safety-status.test.mjs` 现在喂真实的 `STOPPED <未命名>`，并把"剥掉程序名"双向钉住。
+- **`ur_get_digital_in(which="tool")` 抛出的错误没有信息量，还可能报出陈旧值。** 工具数字输入
+  不经 RTDE，只能发一段 URScript 程序 —— 而在**没有接工具**的 UR30/URSim 上，控制器会**让这段
+  程序以运行期错误结束**。上游随即抛出 `RuntimeError: Robot program execution error!!!`
+  （完全没有信息量），而 `urScript.get_tool_digital_in` 接着去**回读输出寄存器 0** —— 把那里残留的
+  值当成输入电平报出去。现在这条失败路径返回可操作的错误（点名常见原因：未连接工具、工具 I/O
+  未启用、工具端被 TCI 串口占用），并且**不读任何寄存器**。同时也对着控制器证实了：寄存器这条路
+  从来没问题 —— `write_output_integer_register(7, 12345)` 读回来就是 12345，被控制器拒绝的是
+  `get_tool_digital_in` 本身。
+
+### 文档
+
+- **补回丢失的 `## [0.6.0]` 标题。** 手册交叉核对的说明（"工具数 67 → 83"）自写下起就一直挂在 0.6.1
+  条目内部，没有自己的版本标题；其余每个版本都有。
+
+## [0.6.2] - 2026-09
+
+> 针对 DSH `0.2.0-rc.2` 做了一次兼容核对（并与 `0.1.7-rc.2` 交叉对照），发现有三个工具从未
+> 到达模型。它们的参数 schema 写了显式的 `required: false`，而值 schema DSL 直接拒绝这种写法——
+> 被拒的参数会让**整个工具**注册失败，只在日志留一行 warning。表里写着 83 个工具，实际能调的只有 80 个。
+
+### 新增 — 面板终于用上了宿主一直在发的遥测
+
+- **`detail=1` 原本没有任何消费者。** 路由一直能返回 dashboard 侧状态（`safety_mode`、
+  `robot_mode`、`program_state`、`running`、`speed_scaling`、`joint_temperatures`、
+  `joint_currents`、`robot_voltage/current`），但客户端从不请求它。现在它在**既有那条轮询链上
+  按慢节拍**取（`detailMs`，默认 2 s）——不新增第二条链，所以"同一时刻只有一次请求在飞行中"
+  依然成立，位姿通道也保持 10 Hz。某一轮没带 detail 时沿用上一次的值，数值行不会闪烁。
+- 数值面板多了两行（安全/模式/程序/速度，以及关节温度与母线电压电流），并且**安全模式异常时
+  会接管状态行**，不再埋在「已连接 · ur5e」后面。不认识的模式串**原样显示并视为异常** ——
+  固件新增一个模式，绝不能因此让一次保护性停止看起来像正常。
+
+### 新增 — 视角工具栏、按包围盒取景、按需渲染
+
+- **相机与基座网格不再按 ~0.8 m 的臂写死**，两者都由模型包围盒推导，于是从 UR3（reach ≈0.94 m）
+  到 UR20/UR8long（≈2.4 m）开面板都是正确取景；`min/maxDistance`、`near/far` 与网格尺度跟同一个
+  半径走。换机型时网格会重建（并释放旧的那一个）。
+- **补上了一直不存在的工具栏**：重置视角 + 等轴测/前视/侧视/俯视。`scene.js` 从写下那天起就
+  提到过一个"重置视角"控件，但面板里从来没有 —— 视角弄丢之后唯一的办法是收起面板再展开。
+- **按需渲染**：只有确实有变化（新采样、尺寸变化、换模型、相机被拖动、切换预设）才真的画一帧。
+  以前每帧无条件渲染，包括未连接时和机械臂静止时。
+- **后台标签彻底停帧**（`visibilitychange`），回到前台自动继续。轮询早就对后台降频了，渲染没有。
+
+### 修复 — 三个工具被静默漏注册
+
+- 数组参数助手无条件写出 `required`，于是那些要求**可选**数组的调用点生成了 `required: false`。
+  值 schema DSL 只接受 `required: true`（`required must be true when present`）；声明"可选"的方式是
+  **省略**这个键。助手现在改为省略，而不是写 `false`。
+- 恢复的工具：`ur_set_conveyor_tracking`（`direction`、`center`）、`ur_force_mode`（`task_frame`、
+  `wrench`、`limits`）与 `ur_set_payload_inertia`（`inertia`）。`scripts/check-host-compat.mjs`
+  对 `0.1.7-rc.2` 与 `0.2.0-rc.2` **两个宿主都报 83/83**。
+- 该规则在两个宿主版本里逐字节相同，所以这从来不是版本兼容性回归：插件自带的
+  `test/tool-schema-dsl.test.mjs` 看不见它，因为它把 `@deepseek-ai/dsh-tools` 换成了桩，只校验
+  作者关键字白名单、从不校验 `required` 的取值。
+
+### 修复 — dashboard 应答带着标签前缀，`NORMAL` 被读成安全异常
+
+- **安全模式从来没有以裸枚举词到达客户端。** UR 对 `safetymode` / `robotmode` 这类查询回的是
+  带标签的整行（`"Safetymode: NORMAL"`、`"Robotmode: RUNNING"`），而 worker 把整行**逐字**塞进了
+  `safety_mode`、`robot_mode` 与 `program_state`。客户端按裸枚举词查表，于是查不到 —— 而
+  `isSafetyHazard` 又刻意把"不认识的模式"算作异常，`NORMAL` 就这样被判成了异常。孪生面板底部
+  随即**恒挂**「机器人可能已停止，请检查示教器」，**机械臂动与不动都一样**；带前缀的字符串还
+  一并渗进了数值行、截图水印与 `ur_get_status`。
+- 修法：`_enum_token` 在**协议边界**（唯一知道 dashboard 原始线格式的地方）剥掉 `标签:` 前缀，
+  所有枚举字段统一走它。本来就没有前缀的应答（`programState` 回的 `"PLAYING"`）与
+  `"<查询失败>"` 哨兵原样透传。
+- `test/safety-status.test.mjs` 原先编造了裸值应答（`"PROTECTIVE_STOP"`），这正是套件一直全绿的
+  原因。现在它喂真实带前缀格式，并把这条归一化钉成契约。
+
 ## [0.6.1] - 2026-09
 
 > 对整个项目做了一次审核（四路并行审计 + 我本人动手复核，报告在 `docs/audit/`），发现了一批
@@ -110,7 +358,7 @@
   复核的结论、**修正了子代理报告中三条评级过高的 HIGH**，并列出"已检查确认无问题"的清单
   （门禁清单完整性、RTDE 配方余量、包元数据、bundle 新鲜度、`SendProgram` 阻塞行为）。
 
-
+## [0.6.0] - 2026-09
 
 > 本版把插件**逐条对照仓库内三本官方 URScript 手册**（`ScriptManual/scriptManual_3.15.4.pdf`
 > 对应 URSoftware 3.x / CB3、`script_directory_Poly5.pdf` 对应 PolyScope 5 / e-Series、

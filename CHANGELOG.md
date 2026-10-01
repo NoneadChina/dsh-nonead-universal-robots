@@ -2,6 +2,319 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.6.5] - 2026-10
+
+> This release turns the digital twin from a read-only preview into a bench tool, and replaces the
+> 10 Hz polling loop with a push channel. It also finishes a batch of **honest readback** fixes in
+> the worker: several tools reported values they could not actually read — a tool-telemetry call that
+> was always `null`, a freedrive check that called a stale `0` normal, and a `power_off` that treated
+> "the controller stopped answering because it just powered down" as a failure. Everything below was
+> already in the tree but had never been written down; 0.6.3 and 0.6.4 were never released as
+> separate entries.
+
+### Added — the host's fourth read-only route: a live SSE stream
+
+- **`/dsh-nonead-ur/twin/stream`** (`lib/twin-routes.js`): Server-Sent Events instead of
+  poll-and-hope. One frame every `100 ms`, a `: ping` heartbeat every 15 s (an idle connection is
+  exactly what a proxy cuts after 30–60 s), a `pumping` flag for backpressure (no next frame until
+  the previous write has drained), an immediate first frame, `x-accel-buffering: no`, and `405` for
+  anything that is not a `GET`. **A failed frame emits an `error` event and never tears the stream
+  down** — the client keeps the last good frame.
+- **The stream carries `detail` on its own slow cadence** (`TWIN_STREAM_DETAIL_MS` = 2000 ms): not on
+  every frame (a dashboard round trip per frame would saturate the robot at 10 Hz), and not never
+  (safety mode, temperatures and bus voltage would stay empty forever).
+- **Client subscriber** (`src/client/robot/twin-stream.js`): `EventSource`, reconnect after 1 s, give
+  up after 8 consecutive failures *and tell the subscribers*, and say so explicitly when the
+  environment has no `EventSource` instead of silently doing nothing.
+- **Stream and polling are mutually exclusive** (`src/client/state.js`): with `stream: true` not a
+  single `fetch` is made — running both would push every frame twice and make the arm jitter.
+  Switching robot rebuilds the whole stream, and the client half now **defaults to `stream: true`**.
+- The host-compat gate now expects **4** exact twin routes (`state` / `asset` / `models` / `stream`),
+  not 3. The assertion exists so that a changed registration shape is *noticed*, not to freeze it.
+
+### Added — choosing among robots, and seeing which one you are looking at
+
+- **`setIp()` clears the previous robot's readings** (`src/client/state.js`): switching target
+  immediately drops `connected`, `q`, `tcp`, `ts` and `detail`. Showing robot A's pose as robot B's
+  is worse than showing nothing. The same IP is a no-op (the snapshot object is not even rebuilt),
+  and a blank or non-string value means "hand it back to the host's resolution".
+- **A robot picker and an identity row** (`src/client/twin-panel.js`): the picker is rebuilt only
+  when its signature (`${resolvedIp}|${candidates}`) changes — rebuilding it every frame swaps the
+  button out from under the finger. The HUD's first row now shows `model · IP`; the IP used to live
+  only in `data-ur-twin-ip` and was not visible anywhere in the UI.
+- A disconnected frame **keeps the `ips` candidates**, otherwise the picker is unreachable exactly
+  when it is needed (several robots connected ⇒ the target is ambiguous); `setIp` aborts the
+  in-flight request and refetches at once instead of waiting for the next tick.
+
+### Added — look before it moves: a pending-motion preview
+
+- **`lib/pending-motion.js`** turns an approval prompt into a preview, and **never pretends to know
+  more than it does**: `joints` (a whole ghost arm can be drawn) / `pose` (the plugin has no IK, so
+  only a marker at the target position) / `relative` (text only — the absolute target needs the
+  current TCP) / `opaque` (circles, squares, stars, program runs, force and speed commands have no
+  single target). It never throws: malformed arguments degrade to `opaque`, and the summary is
+  truncated at 200 characters.
+- **`createPendingMotionStore()`** hands out a per-approval **token**, so when two approvals overlap
+  the one that finishes first cannot wipe the other's preview. `read()` treats a preview older than
+  `PENDING_MOTION_TTL_MS` (10 minutes) as finished — which is how an approval that was interrupted
+  stops leaving a phantom target on screen.
+- `lib/index.js` calls `begin` **before** the prompt and `end` in a `finally`, so approving,
+  rejecting and "the approval service threw" all clear the preview.
+- The state route carries `pending_motion` **only while an approval is pending** (the field is
+  absent, not `null`), so the client can tell "nothing pending" from "pending but unparseable".
+  Unlike `detail`, the client deliberately does **not** carry `pending_motion` over from the
+  previous frame.
+
+### Added — bench instrumentation in the twin
+
+- **Ghost arm** (`src/client/robot/ghost-arm.js`): the real arm is cloned and overlaid on the actual
+  pose, so following error, lag and blending are visible at a glance. Geometry and textures are
+  **shared** with the real arm (one extra layer costs almost no VRAM) — and for that same reason the
+  clone's geometry is **never disposed**: those are the very objects the real arm renders. A pending
+  target is orange, the controller's current target is cyan.
+- **TCP axes** (`src/client/robot/tcp-axes.js`): a fixed 8 cm `AxesHelper` was too big on a UR3, too
+  small on a UR30, and unlabelled. The size is now `0.12 ×` the arm radius, clamped to
+  `[0.03, 0.3]`, with X/Y/Z sprite labels drawn from a canvas (no external font, and a graceful
+  degradation where there is no canvas). The scale has to be applied to an **inner** node: the outer
+  node receives the `tool0` matrix every frame, and `scale` does not survive `matrix.fromArray`.
+- **Engineering overlays** (`src/client/robot/overlays.js`), all off by default: reach envelope,
+  load centre of gravity, and a TCP force/torque arrow (1 N dead zone, 0.6 m cap). The reach radius
+  is the sum of the first six link lengths and is documented as an **upper bound**, not a vendor
+  "reach" figure. The CoG marker is implemented but **deliberately not exposed** — the plugin has no
+  op that reads the payload back, so the button would do nothing.
+- **Screenshot export** (`src/client/robot/screenshot.js`): a PNG watermarked with model, IP, safety
+  mode, speed scaling, joint angles, TCP and a local timestamp. The watermark is drawn on a **copy**
+  of the canvas, and that copy is taken **synchronously right after a render** — the context is
+  `preserveDrawingBuffer: false`, so yielding to the event loop first can hand back a fully black
+  image.
+- **Trajectory controls**: clear / pause-resume / export CSV. The CSV carries **joint angles as well
+  as position**, without which an export cannot reproduce a pose. Colours now run from dark blue to
+  bright cyan with sample age, which shows direction and relative speed at once; when no timestamps
+  are usable it degrades to index order instead of producing `NaN`.
+- **Accessibility**: the canvas is `role="img"` with an `aria-label` and `tabindex="0"`, and the
+  arrow keys / `Home` drive the existing view presets — currently the only way a keyboard-only user
+  can operate the 3D view. The HUD is `role="status"` + `aria-live="polite"` (announce changes, not
+  the whole block), toggle buttons carry `aria-pressed`, and truncated readouts get a `title`.
+
+### Added — the client strings are now a real table
+
+- `src/client/strings.js` does not gamble on `@deepseek-ai/dsh-client-locale` (which is not installed
+  on this host): the `zh` and `en` key sets are **exactly symmetric** (a test asserts this both ways),
+  interpolated entries are functions, and `resolveLocale` looks only at the primary subtag and
+  **falls back to Chinese, not English**, when it cannot tell. The right-dock card and overlay read
+  their text from the same table.
+
+### Fixed — readback: tools that reported what they could not read
+
+- **`ur_get_tool_telemetry` returned nothing but `null`.** The tool-side fields were missing from the
+  RTDE recipe *and* the vendored accessors were `NotImplementedError` stubs. The recipe now declares
+  them (`tool_*`, `io_current`, `target_speed_fraction`; `tool_output_voltage` is an `INT32` per the
+  RTDE documentation and reads 24000 for 24 V), and the tool reads `dataDir` directly.
+- **`ur_get_tool_analog_in` now prefers a direct RTDE read** and only falls back to the
+  script-plus-register route when it has to — that route interrupts whatever program is running. The
+  readback register defaults to 22 to stay clear of `send_script`'s 23.
+- **`ur_get_speed_scaling` no longer reads a standstill as "scaled to zero".** `speed_scaling` is the
+  *actual* fraction and `target_speed_fraction` is the *requested* one; both are reported now, with
+  the semantics spelled out in the reply.
+- **`ur_get_freedrive_status` uses a sentinel token** to tell "this firmware does not support it"
+  from "the value really is 0". The old implementation read a stale register and called it normal.
+- **`ur_power_off` takes the `PowerOn` bit of `robot_status_bits` as the answer**, so a controller
+  that stops answering *because it has just powered down* is no longer reported as a failure.
+- **`ur_draw_circle` writes a start sentinel**, turning a blind 60 s timeout into an immediate
+  `NOT_EXECUTED` when the controller never ran the script.
+- **`ur_move_tool_x/y/z` convert the tool-frame displacement to the base frame in the worker**
+  (`_tool_axis_move`): read the current TCP pose, rotate the delta by that pose's rotation matrix,
+  and send a base-frame `movel`. `pose_trans` is deliberately *not* used — it caused runtime aborts
+  on CB3 / URSoftware 3.15.
+
+### Fixed — two defects that were visible on screen
+
+- **The fallback arm was always UR3-sized.** `buildFallbackArm()` unconditionally used `ARM_LINKS`,
+  so a model that failed to load fell back to geometry that did not match the robot in front of you.
+  Link lengths now come from `linkLengthsFromKinematics(kin.links)`, with a per-value fallback and
+  never a `NaN`/`0`/negative output — a single `NaN` vertex makes the whole subtree disappear.
+- **The right-dock 3D view was an absolutely positioned overlay.** Its containing block was not the
+  dock's content box, so it measured wider than the dock and overlapped the conversation column. It
+  is now a normal-flow flex child, and the start-panel guide column is hidden inline (its previous
+  value is recorded and restored on collapse). The entry card prefers a **deep clone of the native
+  card** (theme, radius and icon slot all ride on hashed class names that cannot be re-created by
+  hand), falls back to a self-built card when the native one is absent, and upgrades to the clone
+  once the guide column renders. Clicking another card, or the column disappearing, collapses it.
+
+### Changed — worker backpressure
+
+- `DEFAULT_MAX_IN_FLIGHT = 8` in `lib/worker.js`: past the limit a call is **rejected, not queued**.
+  The worker is single-threaded, so a call queued behind a stuck one only burns its own timeout; the
+  error now names the likely cause ("the robot may not be responding").
+
+### Added / Changed — gates and self-checks
+
+- **`scripts/check-new-ops.py`** — the behavioural gate for every worker op added in 0.6.0: it
+  asserts the exact URScript sent to a fake controller (force mode, `speedj`, `optimove`, `movec`,
+  conveyor tracking, the drawing waypoint sequence) plus 14 `ValueError` cases that must fail closed.
+- **`scripts/check-test-manifest.mjs`** reconciles `test/test-manifest.json` against the real Python
+  invocations under `test/**` **in both directions**: a test that needs Python but is not listed
+  fails, and so does one that is listed but never touches it.
+- **`scripts/check-package-metadata.mjs`**: `main` / `exports` / `dsh.bundle.patch` must resolve, the
+  client bundle must register under the package name, `files` must cover the runtime and must not
+  include the machine-local `python/sitecustomize.py`, and no source file may hardcode the author's
+  paths. **`scripts/check-doc-tools.mjs`** reconciles the README tool tables against the real
+  registry (parsing table rows only — the previous full-text scan still passed after a row was
+  deleted), and **`scripts/check-tool-params.py`** enforces the cross-language parameter contract in
+  both directions. Two traps are worth recording: `check-host-compat.mjs` probes the installed
+  Desktop `node_modules` **before** walking up, because this repository's own dev copy of
+  `@deepseek-ai/dsh-tools` is older and would report a misleading "0/83 registered"; and
+  `check-tool-params.py` writes its diagnostics in Chinese while keeping stdout ASCII, so a Chinese
+  Windows console cannot kill the check with `UnicodeEncodeError`.
+- `npm test` runs **9 gates** (4 Node + 5 Python) alongside **35 test files** (11 Python, 24 Node);
+  `check-host-compat.mjs` (83/83 tools against the host's real DSL, 4 routes) stays behind
+  `npm run verify:host`. All **44** items pass on this host (the Python half needs `numpy`/`paramiko`
+  importable — see `python/sitecustomize.py`).
+
+- **`tool_mode` is not the tool output mode, and its meaning is unconfirmed.** It measures 253 on
+  UR30 / PolyScope 5.21 and does **not** change when `ur_set_tool_output_mode(0)` / `(1)` is called.
+  Reading it is fine — it is passed through raw from RTDE — but the fixture in
+  `test/readback-fixes.test.mjs` invented a plausible-looking `2`, which made the field read like a
+  mode enum. The fixture now uses the measured 253 and states that the field's meaning is open.
+- **Program load/run/pause/stop behave honestly against a controller that has nothing to run.**
+  `ur_run_program` reports the controller's refusal verbatim (`Failed to execute: play`) rather than
+  claiming success, and `ur_load_program` rejects a name containing angle brackets — which is correct
+  (`<未命名>` is how PolyScope *displays* an unsaved program, not a filename), but it does mean the
+  `loaded_program` string cannot be fed straight back into `ur_load_program`.
+
+- **`ur_get_conveyor` now proves its URScript actually ran, instead of reading back a register nobody
+  wrote.** The tick can only come from a URScript program, and a program the controller rejects at
+  *load* time executes zero lines and raises no "program execution error" — so the old code happily
+  read `output_double_register_0` and reported whatever happened to be there. That is exactly how the
+  wrong-function-name defect above stayed invisible for so long. The tool now probes the channel
+  first, then runs a payload bracketed by start/finish sentinels in an **int** register while the
+  tick lands in a **double** one — two different register families on purpose, so a broken payload
+  path cannot take the sentinel down with it and collapse every diagnosis into "nothing happened".
+  Three outcomes are reported separately: **ran to the end** (`verified: true`, tick is
+  trustworthy), **started but never finished** (`UNSUPPORTED`, no tick value), or **never executed**
+  (`NOT_EXECUTED`, no tick value, likely cause named). Verified on UR30 / PolyScope 5.21: the tool
+  reports `verified: true`, and reading `output_int_register_20` back independently returns exactly
+  the finish token it claims. Two optional parameters (`register`, `payload_register`) choose the
+  registers; both are overwritten.
+- **`ur_get_double_register` shares the same read path as the int registers.** It called
+  `OutputDoubleRegister` directly, so a missing or throwing accessor meant an exception instead of a
+  value; it now uses a new `_read_double_register` helper that falls back to the raw RTDE field, the
+  way `_read_int_register` always has.
+
+### Fixed — found by a live pass against URSim (UR30 / PolyScope 5.21.3)
+
+- **`ur_get_conveyor` could only ever return 0, because an earlier "fix" made the controller
+  reject the whole script.** URScript's function for writing a double register is
+  **`write_output_float_register`**; `output_double_register_0` is the **RTDE field name** for the
+  same datum. An earlier release treated the two as one name and "corrected" the call to
+  `write_output_double_register` — a function that does not exist. The controller therefore rejects
+  the entire program at load time, so not a single line runs; `waitRobotIdleOrStopFlag()` never
+  sees an execution error, and `get_conveyor_tick_count()` goes on to read back register 0 —
+  a value nothing ever wrote. The visible complaint became a **silent wrong answer**. Measured on
+  PolyScope 5.21 / UR30: `write_output_float_register(0, 42.5)` is accepted and
+  `output_double_register_0` reads back 42.5, while `write_output_double_register(0, 99.5)` is
+  rejected outright (the `ur_send_script` sentinel never lands). The call is reverted, `urScript.py`
+  now carries the evidence in a comment, and `test/readback-fixes.test.mjs` fails if the wrong name
+  ever reappears — the earlier change shipped with **no test covering it at all**, which is how it
+  got through.
+
+- **Every non-ASCII string the controller sent came back as mojibake.** `dashboard.py`'s receive
+  path built its text with `''.join(map(chr, out))` — one code point per byte, i.e. Latin-1 — so
+  PolyScope 5's `STOPPED <未命名>` arrived as `<æªå½å>` and `(三月 14 2025)` as `(ä¸æ 14 2025)`: a
+  Chinese program name was unreadable in every readout. It now decodes UTF-8, falling back to
+  Latin-1 so an older firmware that really does send single-byte text still works.
+- **`program_state` / `runtime_state` kept the program name.** Unlike `safetymode` / `robotmode`
+  (which carry a `label:` **prefix**), `programState` answers *state **plus** program name* —
+  measured `STOPPED <未命名>` while idle, `PLAYING <name>` while running. `_enum_token` only strips a
+  prefix, so the client's bare-token table missed and the HUD showed `程序 STOPPED <未命名>` instead
+  of `程序 已停止`. A dedicated `_program_state` now strips the trailing `<program name>` at the
+  protocol boundary, while leaving the `"<查询失败>"` sentinel untouched. Same class of defect as
+  the 0.6.2 prefix fix — and the fixture repeated the same mistake (`ur_programState` was mocked as
+  a bare `"STOPPED"`), so `test/safety-status.test.mjs` now feeds the real `STOPPED <未命名>` and
+  pins the strip in both directions.
+- **`ur_get_digital_in(which="tool")` raised an opaque error, and could report a stale value.**
+  Tool digital inputs are not on RTDE, so the worker runs a URScript program — and on a UR30/URSim
+  with no tool attached the controller **ends that program with a runtime error**. Upstream then
+  raised `RuntimeError: Robot program execution error!!!` (no information at all) and
+  `urScript.get_tool_digital_in` went on to **read back output register 0** — whatever was left
+  there — as if it were the input level. The failure now returns an actionable error naming the
+  likely causes (no tool connected, tool I/O not enabled, tool port taken by TCI serial), and the
+  failure path reads **no** register. Verified against the controller that the register path was
+  never the problem: `write_output_integer_register(7, 12345)` reads back as exactly 12345.
+
+### Documentation
+
+- **Restored the missing `## [0.6.0]` heading.** The manual cross-check notes ("Tool count 67 → 83")
+  had been sitting inside the 0.6.1 entry since they were written, with no version heading of their
+  own; every other release has one.
+
+## [0.6.2] - 2026-09
+
+> A compatibility pass against DSH `0.2.0-rc.2` (cross-checked against `0.1.7-rc.2`) found three
+> tools that never reached the model. Their parameter schemas used an explicit `required: false`,
+> which the value-schema DSL rejects outright — and a rejected parameter fails **the whole tool**,
+> leaving only a warning line. The table read 83 tools while 80 could actually be called.
+
+### Added — the twin panel now uses telemetry the host was already sending
+
+- **`detail=1` had no consumer.** The route has always been able to return the dashboard-side
+  state (`safety_mode`, `robot_mode`, `program_state`, `running`, `speed_scaling`,
+  `joint_temperatures`, `joint_currents`, `robot_voltage/current`), but the client never asked
+  for it. It is now polled on a **slow cadence over the existing chain** (`detailMs`, default 2 s)
+  — no second poller, so "only one request in flight" still holds and the pose channel keeps its
+  10 Hz. Without `detail` in a response the previous values are kept, so the row does not flicker.
+- The HUD gained two rows (safety/robot/program/speed, then joint temperatures and bus
+  voltage/current), and an abnormal safety mode now **takes over the status line** instead of hiding
+  behind `已连接 · ur5e`. Unknown mode strings are shown verbatim **and treated as abnormal** — a
+  firmware that adds a mode must not be able to make a protective stop look normal.
+
+### Added — view toolbar, bounding-box framing, on-demand rendering
+
+- **The camera and the base grid are no longer hard-coded for a ~0.8 m arm.** Both are derived from
+  the model's bounding box, so UR3 (≈0.94 m reach) through UR20/UR8long (≈2.4 m) all open correctly
+  framed; `min/maxDistance`, `near/far` and the grid extent follow the same radius. The grid is
+  rebuilt (and the old one disposed) whenever the model changes.
+- **A toolbar that did not exist before**: reset view plus isometric / front / side / top presets.
+  `scene.js` had referred to a "reset view" control since it was written, but the panel never had
+  one — the only way back from a bad camera was collapsing and reopening the panel.
+- **On-demand rendering**: a frame is drawn only when something actually changed (new sample,
+  resize, model swap, camera moved, preset applied). Every frame used to render unconditionally,
+  including while disconnected and while the arm was standing still.
+- **Background tabs stop the frame loop entirely** (`visibilitychange`) and resume on return.
+  Polling had already been throttled when hidden; rendering had not.
+
+### Fixed — three tools were silently unregistered
+
+- The array-parameter helper emitted `required` unconditionally, so the call sites that asked for
+  an **optional** array produced `required: false`. The value-schema DSL accepts `required` only as
+  `true` (`required must be true when present`); a property is declared optional by **omitting**
+  the key. The helper now omits it instead of writing `false`.
+- Restored: `ur_set_conveyor_tracking` (`direction`, `center`), `ur_force_mode` (`task_frame`,
+  `wrench`, `limits`) and `ur_set_payload_inertia` (`inertia`). `scripts/check-host-compat.mjs`
+  now reports **83/83** against both `0.1.7-rc.2` and `0.2.0-rc.2`.
+- The rule is byte-identical in both harness versions, so this was never a compatibility regression:
+  the plugin's own `test/tool-schema-dsl.test.mjs` could not see it because it stubs
+  `@deepseek-ai/dsh-tools` and checks only the author-keyword allowlist — never the value of
+  `required`.
+
+### Fixed — dashboard replies kept their label prefix, so `NORMAL` read as a hazard
+
+- **The safety mode never reached the client as a bare token.** UR answers the `safetymode` /
+  `robotmode` dashboard queries with a labelled line (`"Safetymode: NORMAL"`, `"Robotmode: RUNNING"`),
+  and the worker passed that line through verbatim into `safety_mode`, `robot_mode` and
+  `program_state`. The client looks those up in a bare-token table, so the lookup missed — and
+  `isSafetyHazard`, which deliberately treats an unrecognised mode as abnormal, flagged `NORMAL`
+  as one. The twin panel then pinned "the robot may have stopped; check the teach pendant" to its
+  status line **permanently, moving or not**, and the prefixed string also leaked into the HUD row,
+  the screenshot watermark and `ur_get_status`.
+- Fix: `_enum_token` strips the `label:` prefix at the protocol boundary — the one place that knows
+  the raw dashboard wire format — and every enum-valued field now goes through it. Replies that
+  carry no prefix (`programState` answers `"PLAYING"`) and the `"<查询失败>"` sentinel pass through
+  unchanged.
+- `test/safety-status.test.mjs` had invented bare replies (`"PROTECTIVE_STOP"`), which is precisely
+  why the suite stayed green. It now feeds the real labelled form and pins the normalisation as a
+  contract.
+
 ## [0.6.1] - 2026-09
 
 > A full-project audit (four delegated audits + hands-on verification; reports in `docs/audit/`)
@@ -128,7 +441,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
   HIGH findings** in the delegated reports, and lists what was checked and found clean (approval-set
   completeness, RTDE recipe headroom, package metadata, bundle freshness, `SendProgram` blocking).
 
-
+## [0.6.0] - 2026-09
 
 > This release re-checked the plugin, line by line, against the three official URScript manuals
 > bundled in `ScriptManual/` (`scriptManual_3.15.4.pdf` = URSoftware 3.x / CB3,
