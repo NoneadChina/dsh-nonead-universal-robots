@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Vector3 } from 'three'
 
-import { createBaseGrid } from '../src/client/robot/scene.js'
+import { createBaseGrid, fitDistanceFor, gridExtentFor, VIEW_PRESETS } from '../src/client/robot/scene.js'
 
 const sceneSource = readFileSync(
   fileURLToPath(new URL('../src/client/robot/scene.js', import.meta.url)), 'utf8',
@@ -69,8 +69,9 @@ test('契约：相机 up 为 +Z，且网格只经 createBaseGrid 创建', () => 
   const gridCreations = sceneSource.match(/new GridHelper\(/g) ?? []
   assert.equal(gridCreations.length, 1, 'GridHelper 只应在 createBaseGrid() 里创建一次')
   // 网格必须是 `createBaseGrid()` 的产物（保留引用是为了能在 dispose 里释放它的
-  // geometry/material —— 以前它每挂载一次就泄漏一组，见 0.5.0 的渲染资源修复）。
-  assert.match(sceneSource, /const grid = createBaseGrid\(\)/, '网格必须来自 createBaseGrid()')
+  // geometry/material —— 以前它每挂载一次就泄漏一组，见 0.5.0 的渲染资源修复；
+  // 0.6.3 起引用还要可变，因为换机型时按包围盒重建网格）。
+  assert.match(sceneSource, /grid = createBaseGrid\(/, '网格必须来自 createBaseGrid()')
   assert.match(sceneSource, /scene\.add\(grid\)/, '场景必须加入该网格')
 })
 
@@ -80,8 +81,95 @@ test('契约：dispose 必须释放 WebGL 上下文与网格资源（否则每�
   // 之后最老的上下文被回收 —— 表现是孪生面板或其它 WebGL 视图变黑。
   assert.match(sceneSource, /renderer\.forceContextLoss\?\.\(\)/,
     'dispose 必须调用 forceContextLoss()')
-  assert.match(sceneSource, /grid\.geometry\?\.dispose\?\.\(\)/, '网格 geometry 必须释放')
-  assert.match(sceneSource, /grid\.material\?\.dispose\?\.\(\)/, '网格 material 必须释放')
+  assert.match(sceneSource, /grid\?\.geometry\?\.dispose\?\.\(\)/, '网格 geometry 必须释放')
+  assert.match(sceneSource, /grid\?\.material\?\.dispose\?\.\(\)/, '网格 material 必须释放')
   assert.match(sceneSource, /renderer\.setPixelRatio\(/,
     '必须按 devicePixelRatio 设置渲染像素比，否则 HiDPI 屏上画面发虚')
+})
+
+/* ------------------------------------------------------------------ *
+ * 0.6.3：取景/网格尺度必须由包围盒推导，而不是按某台臂写死
+ * ------------------------------------------------------------------ */
+
+test('fitDistanceFor：包围球越大距离越远，且随留边系数线性放大', () => {
+  const a = fitDistanceFor(0.5, 45, 1)
+  const b = fitDistanceFor(1.0, 45, 1)
+  assert.ok(b > a, '半径翻倍，距离必须变远')
+  assert.ok(Math.abs(b / a - 2) < 1e-9, '同视场下距离与半径成正比')
+  assert.ok(Math.abs(fitDistanceFor(0.5, 45, 1, 2) / fitDistanceFor(0.5, 45, 1, 1) - 2) < 1e-9,
+    '留边系数线性放大距离')
+})
+
+test('fitDistanceFor：竖长视口要退得更远（水平方向才是瓶颈）', () => {
+  const square = fitDistanceFor(1, 45, 1)
+  const tall = fitDistanceFor(1, 45, 0.4)
+  const wide = fitDistanceFor(1, 45, 3)
+  assert.ok(tall > square, `窄高视口必须退得更远：tall=${tall} square=${square}`)
+  // 宽视口水平视场更大 ⇒ 垂直仍是瓶颈 ⇒ 距离与正方视口一致。
+  assert.ok(Math.abs(wide - square) < 1e-9, '宽视口由垂直视场决定，距离应与正方一致')
+})
+
+test('fitDistanceFor：非法输入退回安全默认值，不产生 NaN/Infinity', () => {
+  for (const bad of [0, -1, NaN, Infinity, undefined]) {
+    const d = fitDistanceFor(bad, 45, 1)
+    assert.ok(Number.isFinite(d) && d > 0, `radius=${String(bad)} 必须得到有限正距离，实际 ${d}`)
+  }
+  for (const bad of [0, -5, NaN, 180, 200]) {
+    assert.ok(Number.isFinite(fitDistanceFor(1, bad, 1)), `fov=${String(bad)} 必须回退到默认视场`)
+  }
+  assert.ok(Number.isFinite(fitDistanceFor(1, 45, 0)), 'aspect=0 不得产生 Infinity')
+})
+
+test('gridExtentFor：尺寸随半径增长、是 0.5 m 的倍数，分格数被钳在 [8,40]', () => {
+  const small = gridExtentFor(0.2)
+  const large = gridExtentFor(2.4)
+  assert.ok(large.size > small.size, '大臂需要更大的网格')
+  assert.ok(small.size >= 0.5, '再小的臂也要有可见网格')
+  for (const r of [0.05, 0.4, 1, 2.4, 10]) {
+    const { size, divisions } = gridExtentFor(r)
+    assert.ok(Math.abs(size * 2 - Math.round(size * 2)) < 1e-9, `size 必须是 0.5 的倍数：${size}`)
+    assert.ok(divisions >= 8 && divisions <= 40, `divisions 越界：${divisions}`)
+    assert.ok(Number.isInteger(divisions), 'divisions 必须是整数')
+  }
+  // 非法半径不得抛错，也不得产生 NaN。
+  const fallback = gridExtentFor(NaN)
+  assert.ok(Number.isFinite(fallback.size) && Number.isFinite(fallback.divisions))
+})
+
+test('VIEW_PRESETS：四个预设齐全，且俯视不与管理 up 的 +Z 平行（否则方位角退化）', () => {
+  for (const key of ['iso', 'front', 'side', 'top']) {
+    const preset = VIEW_PRESETS[key]
+    assert.ok(preset, `缺少预设 ${key}`)
+    assert.equal(preset.direction.length, 3, `${key} 的方向必须是三维`)
+    assert.ok(preset.direction.some((v) => v !== 0), `${key} 的方向不得是零向量`)
+  }
+  const top = new Vector3(...VIEW_PRESETS.top.direction).normalize()
+  const up = new Vector3(0, 0, 1)
+  assert.ok(Math.abs(top.dot(up)) < 1 - 1e-4,
+    '俯视方向不得与 camera.up（+Z）平行 —— 叉积退化会让 OrbitControls 抖动或翻转')
+})
+
+test('契约：createScene 暴露 fitTo/setViewPreset/onCameraChange，并按包围盒取景', () => {
+  for (const method of ['fitTo', 'setViewPreset', 'onCameraChange']) {
+    assert.match(sceneSource, new RegExp(`\\b${method}\\b`), `createScene 必须提供 ${method}()`)
+  }
+  assert.match(sceneSource, /new Box3\(\)\.setFromObject\(/, '取景必须由模型包围盒推导')
+  assert.match(sceneSource, /controls\.minDistance = radius \*/, 'minDistance 必须随机型缩放')
+  assert.match(sceneSource, /controls\.maxDistance = radius \*/, 'maxDistance 必须随机型缩放')
+  assert.match(sceneSource, /replaceGrid\(radius\)/, '网格尺度必须跟着取景半径重算')
+  // 换机型重建网格时必须释放旧网格，否则每次切型号都漏一组 geometry/material。
+  assert.match(sceneSource, /function replaceGrid\(/, '换网格必须走 replaceGrid()')
+})
+
+test('契约：必须开 tone mapping 与环境贴图（UR 的 GLB 是 PBR 金属），且 dispose 释放它们', () => {
+  // 只有平行光 + 环境光时，PBR 金属没有可反射的环境，会渲染成发灰发平的塑料。
+  assert.match(sceneSource, /renderer\.toneMapping = ACESFilmicToneMapping/, '必须开 ACES tone mapping')
+  assert.match(sceneSource, /new PMREMGenerator\(/, '必须用 PMREMGenerator 生成环境贴图')
+  assert.match(sceneSource, /RoomEnvironment/, '环境贴图必须来自程序化的 RoomEnvironment（不依赖外部 HDR 资源）')
+  assert.match(sceneSource, /scene\.environment = /, '环境贴图必须挂到 scene.environment')
+  // 两者各自持有 GPU 资源：不释放就是每次展开/收起面板漏一份。
+  assert.match(sceneSource, /environment\?\.dispose\?\.\(\)/, 'dispose 必须释放环境贴图')
+  assert.match(sceneSource, /pmrem\?\.dispose\?\.\(\)/, 'dispose 必须释放 PMREMGenerator')
+  // 缺扩展的环境必须能降级建场景，而不是抛出去让面板空白。
+  assert.match(sceneSource, /environment = null/, '取环境贴图失败时必须回退为 null 而不是中断建场景')
 })

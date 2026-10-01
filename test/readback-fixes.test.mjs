@@ -71,7 +71,11 @@ def install(fields, dashboard_reply=(False, "no answer"), on_send=None):
 out = {}
 
 # ── 1. 工具遥测 ─────────────────────────────────────────────────────────────
-install({"tool_output_voltage": 24000, "tool_output_current": 0.31, "io_current": 0.02, "tool_mode": 2})
+# tool_mode 用**实测值** 253（PolyScope 5.21 / UR30 / URSim）。
+# ⚠️ 这个字段的含义**未确认**：实测它不随 set_tool_output_mode(0/1) 变化，所以它**不是**
+# "工具输出模式"。早先这里编造了 2，看起来像个有意义的模式值，反而掩盖了这一点。
+# ⚠️ 本段是嵌在 JS 模板字符串里的 Python：**注释里绝不能出现反引号**，否则会截断模板串。
+install({"tool_output_voltage": 24000, "tool_output_current": 0.31, "io_current": 0.02, "tool_mode": 253})
 out["telemetry_present"] = ur_worker.op_get_tool_telemetry({"ip": IP})
 
 install({})
@@ -142,6 +146,52 @@ ur_worker._wait_robot_idle = lambda ip, ms: (True, "已静止（测试桩）")
 out["draw_circle_executed"] = ur_worker.op_draw_circle(
     {"ip": IP, "center": [0.3, 0.0, 0.4, 0, 0, 0], "r": 0.05})
 
+# ── 7. 传送带 tick：必须自证脚本真的执行了 -------------------------------------------
+# 历史事故：脚本里的函数名被写成不存在的 write_output_double_register ⇒ 控制器在**加载期**
+# 整段拒收、一行都不执行，而旧实现照样回读 output_double_register_0 ⇒ 永远静默返回 0。
+# 这里把三种结局都钉住：完整执行 / 只跑了一半 / 压根没执行。
+def _int_writes(text):
+    """把脚本里的 write_output_integer_register(N, V) 全部解析出来。
+
+    刻意**不用正则**：本段是嵌在 JS 模板字符串里的 Python，JS 会把"反斜杠 d"里的反斜杠
+    吃掉（Python 收到的是 d），于是正则永远匹配不上 —— 而且**不报错、只静默返回空**，
+    症状看起来像"脚本没执行"。第 6 节的 executes 桩用纯字符串解析，正是为了躲这个坑。
+    """
+    found = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("write_output_integer_register("):
+            a, b = line[len("write_output_integer_register("):].rstrip(")").split(",")
+            found.append((int(a.strip()), int(b.strip())))
+    return found
+
+
+def _conveyor_controller(mode):
+    def on_send(model, text):
+        ints = _int_writes(text)
+        if not ints:
+            return
+        reg = int(ints[0][0])
+        if "conveyor_probe" in text:              # 第一步：通道探测，永远成功
+            model.dataDir["output_int_register_%d" % reg] = int(ints[0][1])
+            return
+        if mode == "not_executed":
+            return                                # 整段被拒收 ⇒ 一个哨兵都不写
+        model.dataDir["output_int_register_%d" % reg] = int(ints[0][1])   # 起始哨兵
+        if mode == "started_only":
+            return                                # 开始了但没走到末尾
+        model.dataDir["output_double_register_0"] = 12345.5
+        model.dataDir["output_int_register_%d" % reg] = int(ints[1][1])   # 结束哨兵
+    return on_send
+
+for _mode in ("executed", "started_only", "not_executed"):
+    install({}, on_send=_conveyor_controller(_mode))
+    out["conveyor_" + _mode] = ur_worker.op_get_conveyor({"ip": IP})
+    out["conveyor_" + _mode + "_debug"] = {
+        "sent": list(ur_worker.ROBOTS[IP].sent),
+        "dataDir": dict(ur_worker.ROBOT_MODELS[IP].dataDir),
+    }
+
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + "\\n")
 ur_worker._PROTOCOL_OUT.flush()
 `
@@ -168,7 +218,7 @@ test('工具遥测：字段存在时给出数值，缺失时如实说明"该控�
   assert.equal(present.tool_output_voltage, 24000)
   assert.equal(present.tool_output_current, 0.31)
   assert.equal(present.io_current, 0.02)
-  assert.equal(present.tool_mode, 2)
+  assert.equal(present.tool_mode, 253)
   assert.doesNotMatch(out.telemetry_present.message, /读不到/)
 
   const missing = out.telemetry_missing
@@ -228,4 +278,54 @@ test('draw_circle：控制器没执行 ⇒ 立刻报 NOT_EXECUTED（不再干等
   assert.equal(good.data.ok, true)
   assert.match(good.message, /控制器已开始执行/)
   assert.match(good.data.command, /movec\(/)
+})
+
+test('传送带 tick 读回：URScript 必须用 write_output_float_register', () => {
+  // 真机证据（PolyScope 5.21 / UR30，0.6.5 实测）：
+  //   write_output_float_register(0, 42.5)  → 控制器接受，output_double_register_0 读回 42.5
+  //   write_output_double_register(0, 99.5) → 控制器**整段脚本拒收**（连第一行哨兵都不落地）
+  //
+  // RTDE 那一侧的**字段名**是 output_double_register_0，但 **URScript 的函数名不是它**。
+  // 0.6.x 正是把两者当成同一个名字，"修正"成了 write_output_double_register —— 于是
+  // get_conveyor_tick_count() 发的脚本被整段拒收，而它随后照旧回读寄存器 0 ⇒
+  // **ur_get_conveyor 永远返回 0**，把一次看得见的报错换成了静默错值。这条把它钉死。
+  const script = readFileSync(join(pythonDir, 'URBasic', 'urScript.py'), 'utf8')
+  assert.doesNotMatch(
+    script,
+    /^\s*write_output_double_register\s*\(/m,
+    // 注意用**行首锚定**：这个函数名在文件里会作为"历史事故说明"出现在注释里，
+    // 禁的是**调用**，不是"出现过这几个字"——否则门禁会把文档一起拦下来。
+    'URScript 里没有这个函数；一旦作为调用出现，整段脚本会被控制器拒收（症状是"静默读到 0"）',
+  )
+  assert.match(
+    script,
+    /write_output_float_register\(0, get_conveyor_tick_count\(\)\)/,
+    '写双精度寄存器要用 write_output_float_register',
+  )
+})
+
+test('传送带 tick：脚本没执行 / 只跑了一半，都必须报出来且**不给** tick 值', () => {
+  // 为什么这条比"函数名对不对"更重要：事故的可怕之处不是函数名写错，而是**写错了却没人知道** ——
+  // 控制器加载期拒收、一行都不执行，而旧实现照样回读寄存器 ⇒ 静默返回 0。
+  // 所以工具必须自证执行，三种结局分开报。
+  const executed = out.conveyor_executed
+  // 断言里直接带上整个返回值：走错分支时一眼能看出它到底报了哪一种失败。
+  assert.equal(executed.data?.verified, true,
+    '完整跑完才允许标 verified；实际返回：' + JSON.stringify(executed)
+      + '；调试=' + JSON.stringify(out.conveyor_executed_debug))
+  assert.equal(executed.data.tick_count, 12345.5)
+  assert.match(executed.message, /结束哨兵/)
+
+  const startedOnly = out.conveyor_started_only
+  assert.equal(startedOnly.code, 'UNSUPPORTED', '开始了但没到末尾 ⇒ 不能当作成功')
+  assert.equal(startedOnly.data?.started, true)
+  assert.equal(startedOnly.data?.tick_count, undefined, '没跑到末尾就不能给 tick 值')
+
+  const notExecuted = out.conveyor_not_executed
+  assert.equal(notExecuted.code, 'NOT_EXECUTED',
+    '整段被拒收 ⇒ 必须自曝；实际：' + JSON.stringify(notExecuted)
+      + '；调试=' + JSON.stringify(out.conveyor_not_executed_debug))
+  assert.match(notExecuted.error, /根本没有执行/)
+  assert.match(notExecuted.error, /output_double_register/, '要指出最可能的原因：把 RTDE 字段名当成了 URScript 函数名')
+  assert.equal(notExecuted.data?.tick_count, undefined, '没执行就不能回读陈旧寄存器冒充 tick')
 })

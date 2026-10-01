@@ -9,6 +9,14 @@
  * （`robot_status_bits=3` 同时表示 power on 与 program running；`safety_status_bits` 常是多位组合），
  * 所以每个位都必须独立判定，不能被"整字等于 2^k"之类的写法替代。
  *
+ * ## dashboard 应答的格式契约（同一个文件里的第二层契约）
+ * 夹具必须照**真实协议**写：控制器对 `safetymode` / `robotmode` 回的是带标签前缀的整行
+ * （`"Safetymode: NORMAL"` / `"Robotmode: RUNNING"`，见 `URBasic/dashboard.py` 的文档字符串）。
+ * 早先的夹具编造了裸值（`"PROTECTIVE_STOP"`），于是"worker 没剥前缀"这个缺陷在测试里隐形：
+ * 客户端查不到中文表 → 把 `NORMAL` 当成未知模式 → 判定为需要处置的安全异常 →
+ * 孪生面板底部恒挂「机器人可能已停止，请检查示教器」。`_enum_token` 与 `prefixed_*` 用例
+ * 就是为此立的回归门。
+ *
  * ## 如实标注：这里**没有**负向验证
  * 我一度以为 `1 & word == 1` 是运算符优先级缺陷（按 C 的语义 `==` 比 `&` 紧）。**那是错的**：
  * Python 里 `&` 高于 `==`（`1 & 3 == 1` → `(1 & 3) == 1` → True），vendored 表达式本来就是对的，
@@ -83,11 +91,39 @@ class FakeDashboard:
     def __init__(self):
         self.last_respond = ""
     def ur_safetymode(self):
-        self.last_respond = "PROTECTIVE_STOP"
+        self.last_respond = "Safetymode: PROTECTIVE_STOP"
     def ur_robotmode(self):
-        self.last_respond = "ROBOT_MODE_IDLE"
+        self.last_respond = "Robotmode: IDLE"
     def ur_programState(self):
-        self.last_respond = "STOPPED"
+        # 真实应答是「**状态词 + 程序名**」：实测 PolyScope 5.21 / UR30 空闲时回
+        # 「STOPPED <未命名>」（程序名可以是任意非 ASCII 文本，运行中回「PLAYING <程序名>」）。
+        # 早先这里编造的是裸值 "STOPPED"，于是"只剥 标签: 前缀、不剥尾部程序名"
+        # 这个缺陷在测试里隐形——与 0.6.2 修掉的 safetymode 夹具同一个错误模式。
+        # 注意：本段是嵌在 JS 模板字符串里的 Python，**不能出现反引号**，否则会截断模板串。
+        self.last_respond = "STOPPED <未命名>"
+
+# dashboard 查询回的是**带标签前缀的整行**（URBasic/dashboard.py 各方法的文档字符串），
+# 上层只认裸枚举词。这里把这条协议契约钉死：带前缀必须剥成裸词，裸词/哨兵原样透传。
+tokens = {
+    "prefixed_safety": ur_worker._enum_token("Safetymode: NORMAL"),
+    "prefixed_robot": ur_worker._enum_token("Robotmode: RUNNING"),
+    "prefixed_padded": ur_worker._enum_token("  Safetymode:   REDUCED  "),
+    "bare": ur_worker._enum_token("PLAYING"),
+    "sentinel": ur_worker._enum_token("<查询失败>"),
+    "empty": ur_worker._enum_token(""),
+    "none": ur_worker._enum_token(None),
+}
+
+# programState 比 safetymode/robotmode 多一层：它是「状态词 + 程序名」，尾部的
+# 「<程序名>」也必须剥掉，否则客户端按裸枚举词查中文表会落空。
+program_states = {
+    "with_name": ur_worker._program_state("STOPPED <未命名>"),
+    "playing": ur_worker._program_state("PLAYING <我的程序>"),
+    "bare": ur_worker._program_state("STOPPED"),
+    "prefixed": ur_worker._program_state("Program state: STOPPED <未命名>"),
+    "sentinel": ur_worker._program_state("<查询失败>"),
+    "empty_name": ur_worker._program_state("STOPPED <>"),
+}
 
 class FakeRobot:
     def __init__(self):
@@ -101,7 +137,8 @@ ur_worker.ensure_connected = lambda ip: (FakeRobot(), model)
 ur_worker.dashboard = lambda ip: fake_dashboard
 status = ur_worker.op_get_safety_status({"ip": "1.2.3.4"})
 
-out = {"cases": cases, "status": {"message": status["message"], "data": status["data"]}}
+out = {"cases": cases, "tokens": tokens, "program_states": program_states,
+       "status": {"message": status["message"], "data": status["data"]}}
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + "\\n")
 ur_worker._PROTOCOL_OUT.flush()
 `
@@ -114,7 +151,7 @@ const child = spawnSync(process.env.PYTHON ?? 'python', ['-u', '-c', HARNESS], {
 assert.equal(child.status, 0, `探针失败：${child.stderr}`)
 const line = child.stdout.split('\n').map((l) => l.trim()).find((l) => l.startsWith('{'))
 assert.ok(line, `未拿到 JSON：${JSON.stringify(child.stdout)}`)
-const { cases, status } = JSON.parse(line)
+const { cases, tokens, program_states: programStates, status } = JSON.parse(line)
 
 test('机器人状态位：多位组合必须逐位判真', () => {
   // 3 = PowerOn | ProgramRunning：两个都得是 true，其余 false
@@ -151,9 +188,34 @@ test('bool 寄存器：一个状态字里多个位同时置位也要逐位判对
   assert.equal(c.digital_in_1, true, '3 = bit0|bit1 ⇒ bit1 真')
 })
 
+test('dashboard 应答：带标签前缀的整行必须剥成裸枚举词', () => {
+  // 控制器回的是 "Safetymode: NORMAL" 这类整行；若不剥前缀，客户端会查不到中文表，
+  // 并把 NORMAL 当成"未知模式 = 需要处置的安全异常"，孪生面板底部就会恒挂处置提示。
+  assert.equal(tokens.prefixed_safety, 'NORMAL')
+  assert.equal(tokens.prefixed_robot, 'RUNNING')
+  assert.equal(tokens.prefixed_padded, 'REDUCED', '首尾空白与冒号后的多余空格都要吃掉')
+  assert.equal(tokens.bare, 'PLAYING', '本来就没有前缀的应答原样返回')
+  assert.equal(tokens.sentinel, '<查询失败>', '查询失败哨兵不含冒号，必须原样透传')
+  assert.equal(tokens.empty, '')
+  assert.equal(tokens.none, '')
+})
+
+test('dashboard 应答：programState 的「状态词 + 程序名」必须剥成裸状态词', () => {
+  // 实测 PolyScope 5.21 / UR30：`programState` 回 `STOPPED <未命名>`（运行中 `PLAYING <程序名>`）。
+  // 只剥 `标签:` 前缀是不够的——尾部程序名留着，客户端的中文表就查不到，
+  // HUD 会把「程序 STOPPED <未命名>」原样显示，而不是「程序 已停止」。
+  assert.equal(programStates.with_name, 'STOPPED', '尾部 <程序名> 必须剥掉')
+  assert.equal(programStates.playing, 'PLAYING', '程序名含中文同样要剥掉')
+  assert.equal(programStates.bare, 'STOPPED', '本来就是裸词的原样返回')
+  assert.equal(programStates.prefixed, 'STOPPED', '前缀与尾部程序名同时存在时两者都要剥')
+  assert.equal(programStates.sentinel, '<查询失败>', '查询失败哨兵不能被当成程序名剥空')
+  assert.equal(programStates.empty_name, 'STOPPED', '空程序名 <>(即无名字)不能留下尖括号')
+})
+
 test('ur_get_safety_status：给出安全模式 + 置位名字 + 原始值，并说明限值数值的来源', () => {
   assert.equal(status.data.safety_mode, 'PROTECTIVE_STOP')
-  assert.equal(status.data.robot_mode, 'ROBOT_MODE_IDLE')
+  assert.equal(status.data.robot_mode, 'IDLE', '前缀必须剥掉，上层只认裸枚举词')
+  assert.equal(status.data.runtime_state, 'STOPPED')
   assert.equal(status.data.safety_status_bits, 1028, '4|1024 = 1028')
   assert.deepEqual(status.data.safety_status_names, ['protective_stop', 'stopped_due_to_safety'])
   assert.deepEqual(status.data.robot_status_names, ['power_on', 'program_running'])

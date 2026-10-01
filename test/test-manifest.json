@@ -15,16 +15,28 @@
   ],
   "nodeOnly": [
     "approval-gate.test.mjs",
+    "fallback-arm.test.mjs",
     "fk.test.mjs",
+    "ghost-arm.test.mjs",
     "interpolate.test.mjs",
     "loader.test.mjs",
     "model-contract.test.mjs",
+    "multi-robot.test.mjs",
+    "overlays.test.mjs",
+    "pending-motion.test.mjs",
     "right-dock-entry.test.mjs",
     "rtde-config.test.mjs",
     "scene-alignment.test.mjs",
+    "scene.test.mjs",
+    "screenshot.test.mjs",
     "state.test.mjs",
+    "stream-wiring.test.mjs",
+    "strings.test.mjs",
+    "tcp-axes.test.mjs",
+    "trajectory-extras.test.mjs",
     "trajectory.test.mjs",
     "twin-panel.test.mjs",
-    "twin-routes.test.mjs"
+    "twin-routes.test.mjs",
+    "twin-stream.test.mjs"
   ]
 }
