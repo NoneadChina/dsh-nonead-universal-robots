@@ -577,8 +577,17 @@ end
             The conveyor encoder tick count
         '''
 
+        # ⚠️ URScript 里写双精度寄存器的函数叫 **`write_output_float_register`**。
+        # RTDE 那侧的同一条数据**字段名**才是 `output_double_register_0` —— 两者名字不一样，
+        # 别把它们对上。0.6.x 曾把这里"修正"成 `write_output_double_register`（理由正是
+        # "RTDE 只暴露 output_double_register_0"），结果控制器**整段脚本拒收**（未知函数，
+        # 加载期就失败，连第一行都不执行），而 `waitRobotIdleOrStopFlag()` 不会因此置错误标志，
+        # 本方法随后照旧回读寄存器 0 ⇒ **永远返回 0**，把一次看得见的报错换成了静默错值。
+        # 实测（PolyScope 5.21 / UR30）：`write_output_float_register(0, 42.5)` 被接受，
+        # 且 `output_double_register_0` 读回 42.5；换成 `write_output_double_register` 则
+        # 哨兵都不落地（脚本根本没跑）。
         prg = '''def ur_get_conveyor_tick_count():
-    write_output_double_register(0, get_conveyor_tick_count())
+    write_output_float_register(0, get_conveyor_tick_count())
 end
 '''
         programString = prg.format(**locals())

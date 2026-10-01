@@ -546,8 +546,17 @@ class DashBoard(threading.Thread):
             if len(data) == 0:
                 return None
             
-            fmt = ">" + str(len(data)) + "B"
-            out =  struct.unpack_from(fmt, data)        
-            return ''.join(map(chr,out[:-1]))
+            # 控制器用 **UTF-8** 发文本：程序名与本地化日期都可能是非 ASCII（实测
+            # PolyScope 5 的 `programState` 回 `STOPPED <未命名>`、`get software version`
+            # 回 `... (三月 14 2025)`）。上游这里是
+            # `out = struct.unpack_from(fmt, data); return ''.join(map(chr, out[:-1]))`
+            # —— 逐字节取码点，等价于**按 Latin-1 解码**，于是 `三月` 变成 `ä¸æ`、
+            # `未命名` 变成 `æªå½å`，中文程序名在所有读数里都是乱码。
+            # 先按 UTF-8 解；老固件若真发单字节文本则退回 Latin-1 —— 两条路都不会抛。
+            try:
+                text = data.decode('utf-8')
+            except UnicodeDecodeError:
+                text = data.decode('latin-1')
+            return text.rstrip('\r\n')
             
             

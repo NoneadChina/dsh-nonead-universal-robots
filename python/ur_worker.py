@@ -504,6 +504,47 @@ def _dashboard_cmd_args(ip, cmd, *args):
     return True, str(respond).strip()
 
 
+def _enum_token(respond):
+    """把一条 dashboard 查询的**整行应答**剥成裸枚举词。
+
+    UR 控制器对这些查询回的是带标签前缀的整行文本（`safetymode` → `"Safetymode: NORMAL"`、
+    `robotmode` → `"Robotmode: RUNNING"`，见 `URBasic/dashboard.py` 各方法的文档字符串）。
+    客户端按裸枚举词查中文表、并按"未知模式算异常"判定安全问题 ⇒ 带前缀的值既翻不出中文，
+    又会把 `NORMAL` 误报成需要处置的安全异常（孪生面板底部会恒挂处置提示）。所以在**协议
+    边界**统一剥掉 `标签:` 前缀，只把枚举词交给上层。
+
+    返回值里没有冒号时（如 `programState` 回的 `"PLAYING"`）原样返回；查询失败哨兵
+    `"<查询失败>"` 同样原样透传。
+    """
+    text = str(respond if respond is not None else "").strip()
+    if ":" in text:
+        return text.rsplit(":", 1)[-1].strip()
+    return text
+
+
+_PROGRAM_STATE_NAME = re.compile(r"^(?P<state>\S+)\s+<[^>]*>$")
+
+
+def _program_state(respond):
+    """把 `programState` 的应答剥成**裸程序状态词**。
+
+    与 `safetymode` / `robotmode` 只带 `标签:` **前缀**不同，`programState` 回的是
+    「状态词 + 程序名」：实测 PolyScope 5.21 / UR30 空闲时回 `STOPPED <未命名>`，
+    运行中回 `PLAYING <程序名>`。`_enum_token` 只剥前缀，这串会原样到达客户端，
+    而客户端按裸枚举词查中文表（`describeProgramState`），查不到就把
+    `STOPPED <未命名>` 原样显示成「程序 STOPPED <未命名>」而不是「程序 已停止」。
+    这里在协议边界把尾部的 `<程序名>` 去掉。
+
+    **不能误伤查询失败哨兵 `"<查询失败>"`**：它前面没有状态词，而本正则要求
+    `状态词 + 空白` 在前，故哨兵与任何裸值都原样透传。
+    """
+    text = _enum_token(respond)
+    match = _PROGRAM_STATE_NAME.match(text)
+    if match:
+        return match.group("state")
+    return text
+
+
 def _remote_control(d):
     """探测机器人是否处于远程控制模式：**三态**。Returns (state, raw)。
 
@@ -881,9 +922,9 @@ def op_status(p):
         "robot_model": dash("ur_get_robot_model"),
         "serial_number": dash("ur_serial_number"),
         "software_version": dash("ur_polyscopeVersion"),
-        "safety_mode": dash("ur_safetymode"),
-        "robot_mode": dash("ur_robotmode"),
-        "program_state": dash("ur_programState"),
+        "safety_mode": _enum_token(dash("ur_safetymode")),
+        "robot_mode": _enum_token(dash("ur_robotmode")),
+        "program_state": _program_state(dash("ur_programState")),
         "loaded_program": dash("ur_get_loaded_program"),
         "running": _program_running(ip),
         # true / false / null（null = 未能问到，见 _remote_control 的三态说明）。
@@ -969,8 +1010,9 @@ def op_get_safety_mode(p):
     ok_flag, m = _dashboard_cmd(ip, "ur_safetymode")
     if not ok_flag:
         return err("读取安全模式失败：%s" % m, "TIMEOUT")
-    return ok({"message": "安全模式：%s" % m,
-               "data": {"safety_mode": m, "ip": ip}})
+    mode = _enum_token(m)
+    return ok({"message": "安全模式：%s" % mode,
+               "data": {"safety_mode": mode, "ip": ip}})
 
 
 # UR RTDE 输出位定义。只列**有明确文档**的位：没列出的位不会出现在名字表里，但仍然会以原始
@@ -1064,7 +1106,7 @@ def op_get_safety_status(p):
     robot_raw = _read_status_word(model, "robot_status_bits")
     safety_names = _status_bit_names(safety_raw, _SAFETY_STATUS_BITS)
     robot_names = _status_bit_names(robot_raw, _ROBOT_STATUS_BITS)
-    mode = dash("ur_safetymode")
+    mode = _enum_token(dash("ur_safetymode"))
 
     def hex_or_unknown(value):
         return "未知" if value is None else "0x%X" % value
@@ -1081,8 +1123,8 @@ def op_get_safety_status(p):
         "data": {
             "ip": ip,
             "safety_mode": mode,
-            "robot_mode": dash("ur_robotmode"),
-            "runtime_state": dash("ur_programState"),
+            "robot_mode": _enum_token(dash("ur_robotmode")),
+            "runtime_state": _program_state(dash("ur_programState")),
             "safety_status_bits": safety_raw,
             "safety_status_names": safety_names,
             "robot_status_bits": robot_raw,
@@ -1098,8 +1140,9 @@ def op_get_robot_mode(p):
     ok_flag, m = _dashboard_cmd(ip, "ur_robotmode")
     if not ok_flag:
         return err("读取运行状态失败：%s" % m, "TIMEOUT")
-    return ok({"message": "运行状态：%s" % m,
-               "data": {"robot_mode": m, "ip": ip}})
+    mode = _enum_token(m)
+    return ok({"message": "运行状态：%s" % mode,
+               "data": {"robot_mode": mode, "ip": ip}})
 
 
 def op_get_program_state(p):
@@ -1108,6 +1151,7 @@ def op_get_program_state(p):
     prog_ok, prog = _dashboard_cmd(ip, "ur_get_loaded_program")
     state_ok, state = _dashboard_cmd(ip, "ur_programState")
     saved_ok, saved_raw = _dashboard_cmd(ip, "ur_isProgramSaved")
+    state = _program_state(state)
     running = _program_running(ip)
     if not (prog_ok or state_ok):
         return err("读取程序状态失败：%s" % (prog or state), "TIMEOUT")
@@ -1155,7 +1199,8 @@ def op_get_double_register(p):
     ip = str(p["ip"])
     idx = _bounded_int(p["index"], "index", 0, 23, "double 寄存器下标")
     _, model = ensure_connected(ip)
-    val = model.OutputDoubleRegister(idx)
+    # 走统一的读取路径：访问器缺失时回落原始 RTDE 字段，而不是抛异常或返回 None。
+    val = _read_double_register(model, idx)
     return ok({"message": "%s" % val, "data": {"index": idx, "value": val,
                                                "ip": ip}})
 
@@ -1238,6 +1283,12 @@ def op_list_programs(p):
 # 代价：该 int 输出寄存器的旧值会被覆盖（默认取最后一个 23，可用 register 参数改）。
 DEFAULT_SENTINEL_REGISTER = 23
 SEND_SCRIPT_VERIFY_TIMEOUT_S = 2.0
+# 传送带读回用的是 **double** 寄存器（载荷）配一个 **int** 寄存器（哨兵）。刻意分成两个
+# 寄存器家族：这样"double 那条写路径坏了"不会把哨兵一起带走 —— 否则三种结局会退化成
+# "什么都没发生"，正好把最需要看见的原因藏起来（历史事故就是这条路径静默失效）。
+# 20 号避开 send_script 默认的 23 与 freedrive 用的 21。
+CONVEYOR_SENTINEL_REGISTER = 20
+CONVEYOR_PAYLOAD_REGISTER = 0
 # 脚本类运动（draw_* 等）"到底有没有被执行"的探测窗：足够短到能立刻给出结论。
 SCRIPT_START_CHECK_TIMEOUT_S = 1.5
 
@@ -1262,10 +1313,45 @@ def _read_int_register(model, index):
         return None
 
 
-def _sentinel_token(previous):
-    """造一个与 `previous` 不同的哨兵 token（32 位内正数且带固定前缀，便于人眼核对）。"""
+def _read_double_register(model, index):
+    """回读 double 输出寄存器；读不到返回 None（与 `_read_int_register` 同构）。
+
+    为什么要有这个 helper：传送带 tick 走的是 **double** 寄存器（RTDE 字段
+    `output_double_register_<n>`），而此前只有 int 那一侧有"访问器失败就回落原始 RTDE 字段"
+    的统一读法。缺了它，调用方各自内联 `model.OutputDoubleRegister(n)`，一旦访问器缺失
+    就直接炸或静默返回 None —— 两种都不该发生。
+    """
+    value = None
+    if model is not None:
+        try:
+            value = model.OutputDoubleRegister(index)
+        except Exception:
+            value = None
+    if value is None:
+        value = _rtde_field(model, "output_double_register_%d" % index)
+    try:
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
+def _sentinel_token(previous, *avoid):
+    """造一个与 `previous` **以及 `avoid` 里任何一个**都不同的哨兵 token。
+
+    为什么必须能一次排除一整组：token 的基值是 `0x5A5A0000 | (毫秒 & 0xFFFF)`，
+    同一毫秒内反复调用会得到**同一个值**。而"只保证与紧邻的前一个不同"是不够的——
+    首尾两个 token 并不相邻，一旦撞上，"脚本被拒收"（寄存器停在起始值）就会被误判成
+    "已经跑到结束哨兵"，正好把这个哨兵存在的意义反过来用。
+    实测撞过两次（真机 UR30 与单测各一次），所以这里改成显式排除一组。
+    """
+    taken = set()
+    if previous is not None:
+        taken.add(previous)
+    for item in avoid:
+        if item is not None:
+            taken.add(item)
     token = 0x5A5A0000 | (int(time.time() * 1000) & 0xFFFF)
-    if previous is not None and token == previous:
+    while token in taken:
         token = (token + 1) & 0x7FFFFFFF
     return token
 
@@ -1394,7 +1480,9 @@ def op_send_script(p):
     index = _bounded_int(p.get("register", DEFAULT_SENTINEL_REGISTER), "register", 0, 23, "哨兵寄存器编号")
     before = _read_int_register(model, index)
     start_token = _sentinel_token(before)
-    finish_token = _sentinel_token(start_token)
+    # `finish` 必须同时避开 `before` 与 `start`：它与 `before` **不相邻**，撞上就会把
+    # "脚本没执行"直接读成"已跑到末尾"（假阳性）。
+    finish_token = _sentinel_token(start_token, before)
     start_line = "write_output_integer_register(%d, %d)\n" % (index, start_token)
     finish_line = "write_output_integer_register(%d, %d)\n" % (index, finish_token)
 
@@ -1897,7 +1985,23 @@ def op_get_digital_in(p):
         n = _bounded_int(p["n"], "n", 0, 1, "tool 端口号")
         # Tool digital inputs are not on RTDE; get_tool_digital_in runs a
         # URScript expression via the RealTime client and reads the result back.
-        val = robot.get_tool_digital_in(n)
+        #
+        # ⚠️ 实测（PolyScope 5.21 / UR30 / URSim）：**控制器可能拒绝执行这段脚本** ——
+        # 未接工具、工具 I/O 未启用或工具端被 TCI 串口占用时，`get_tool_digital_in(n)`
+        # 会让程序以**运行期错误**结束。上游的 `waitRobotIdleOrStopFlag()` 把这种情况抛成
+        # `RuntimeError: Robot program execution error!!!`，对使用者零信息量；更糟的是
+        # `urScript.get_tool_digital_in` 随后**回读输出寄存器 0** —— 脚本没跑成，它读到的是
+        # 上一次遗留的值，却当成输入电平报出去（上游注释里已记过这个坑）。
+        # 这里把运行期失败换成说明原因的错误，并且**在失败路径上不回读任何寄存器**。
+        try:
+            val = robot.get_tool_digital_in(n)
+        except RuntimeError as exc:
+            if "execution error" not in str(exc):
+                raise
+            return err(
+                "控制器拒绝执行读取工具数字输入的脚本（get_tool_digital_in(%d)）⇒ 无法给出电平。"
+                "常见原因：未连接工具、工具数字 I/O 未启用，或工具端被 TCI 串口占用"
+                "（启用工具通信会禁用工具模拟输入）。原始报错：%s" % (n, exc))
     else:
         n = _bounded_int(p["n"], "n", 0, 7, "std 端口号")
         val = robot.get_standard_digital_in(n)
@@ -2756,15 +2860,106 @@ def op_get_digital_output_bits(p):
 
 
 def op_get_conveyor(p):
+    """读取传送带编码器 tick —— **并且自证这段脚本真的被执行过**。
+
+    为什么必须自证（事故复盘）：`get_conveyor_tick_count()` 是一段 URScript，它可能因为
+    任何原因整段被控制器**在加载期拒收**（用了该固件不认识的函数名、不在远程控制模式…）。
+    拒收时**一行都不会执行**，而且不会置"程序执行错误"标志 —— `waitRobotIdleOrStopFlag()`
+    什么也看不到。旧实现于是照样回读 `output_double_register_0`，把**一个从没人写过的值**
+    当成 tick 报出去。这个事故真的发生过：脚本里的函数名被"修正"成不存在的
+    `write_output_double_register`（把 RTDE 字段名当成了 URScript 函数名），
+    于是 `ur_get_conveyor` 长期静默返回 0，且没有任何报错。
+
+    结论的三种结局必须分开报：
+      - 回读到**结束**哨兵 ⇒ 脚本跑完了，寄存器里的 tick 可信；
+      - 只回读到**起始**哨兵 ⇒ 通道通、脚本开始了，但没走到末尾 ⇒ `get_conveyor_tick_count()`
+        在该固件上很可能不可用/中途报错 ⇒ **不给** tick 值；
+      - 两个都没回读到 ⇒ 整段脚本没被执行 ⇒ **不给** tick 值，并说明最可能的原因。
+
+    哨兵用 **int** 寄存器、载荷用 **double** 寄存器：两个不同的寄存器家族，这样"载荷那条
+    写路径坏了"不会连哨兵一起带走 —— 否则三种结局会退化成"什么都没发生"，又把原因藏起来。
+    """
     ip = str(p["ip"])
-    robot, _ = ensure_connected(ip)
-    tick = robot.get_conveyor_tick_count()
-    if hasattr(tick, "tolist"):
-        tick = tick.tolist()
-    elif hasattr(tick, "item"):
-        tick = tick.item()
-    return ok({"message": "传送带 tick：%s" % tick,
-               "data": {"tick_count": tick, "ip": ip}})
+    robot, model = ensure_connected(ip)
+    index = _bounded_int(p.get("register", CONVEYOR_SENTINEL_REGISTER), "register", 0, 23,
+                         "哨兵用的 int 输出寄存器编号")
+    payload_index = _bounded_int(p.get("payload_register", CONVEYOR_PAYLOAD_REGISTER),
+                                 "payload_register", 0, 23,
+                                 "写 tick 用的 double 输出寄存器编号")
+
+    # 第一步：通道探测。仅当这一步成功，后面"脚本没执行"才能归因到脚本本身。
+    probe_token = _sentinel_token(_read_int_register(model, index))
+    probe = ("def ur_write_conveyor_probe():\n"
+             "  write_output_integer_register(%d, %d)\n"
+             "end\nur_write_conveyor_probe()\n" % (index, probe_token))
+    if not _send_program(robot, probe):
+        return err("传送带通道探测脚本未能送达控制器：%s" % _last_send_failure(robot),
+                   "SEND_FAILED", {"ip": ip})
+    deadline = time.time() + SEND_SCRIPT_VERIFY_TIMEOUT_S
+    while time.time() < deadline:
+        if _read_int_register(model, index) == probe_token:
+            break
+        time.sleep(0.1)
+    else:
+        return err("控制器没有执行探测脚本（output_int_register_%d 上一直看不到哨兵值 %d）⇒ "
+                   "它可能未处于远程控制模式，或整段 URScript 被静默丢弃。此时**无法**给出传送带 tick，"
+                   "也不会回读一个陈旧值来冒充它。" % (index, probe_token),
+                   "NOT_EXECUTED",
+                   {"register": index, "token": probe_token, "ip": ip})
+
+    # 第二步：载荷 + 首尾哨兵。`finish` 必须同时避开 probe 与 start —— 三个 token 互不相同
+    # 是这套判定成立的前提（否则"没执行"会被读成"执行完毕"）。
+    start_token = _sentinel_token(probe_token)
+    finish_token = _sentinel_token(start_token, probe_token)
+    payload = ("def ur_get_conveyor_tick_count():\n"
+               "  write_output_integer_register(%d, %d)\n"
+               "  write_output_float_register(%d, get_conveyor_tick_count())\n"
+               "  write_output_integer_register(%d, %d)\n"
+               "end\nur_get_conveyor_tick_count()\n"
+               % (index, start_token, payload_index, index, finish_token))
+    if not _send_program(robot, payload):
+        return err("get_conveyor_tick_count 脚本未能送达控制器：%s" % _last_send_failure(robot),
+                   "SEND_FAILED", {"ip": ip})
+
+    deadline = time.time() + SEND_SCRIPT_VERIFY_TIMEOUT_S
+    observed = probe_token
+    started = False
+    while time.time() < deadline:
+        observed = _read_int_register(model, index)
+        if observed == finish_token:
+            # 走到末尾**必然**开始过。轮询间隔（0.1s）可能整个错过中间态，所以这里显式置位 ——
+            # 否则会报出 "verified=true 但 started=false" 这种自相矛盾的证据组合。
+            started = True
+            break
+        if observed == start_token:
+            started = True
+        time.sleep(0.1)
+
+    sentinel = {"register": index, "payload_register": payload_index,
+                "probe_token": probe_token, "start_token": start_token,
+                "finish_token": finish_token, "observed": observed, "started": started}
+
+    if observed != finish_token:
+        if started:
+            return err("传送带读取脚本**开始执行了但没走到末尾**（起始哨兵 %d 已回读，结束哨兵 %d 没出现）⇒ "
+                       "`get_conveyor_tick_count()` 在该控制器上很可能不可用、或中途报错中止。"
+                       "因此**不给** tick 值。" % (start_token, finish_token),
+                       "UNSUPPORTED", dict(sentinel, ip=ip))
+        return err("传送带读取脚本**根本没有执行**：哨兵仍停在通道探测值 %d（起始与结束哨兵都没出现）⇒ "
+                   "整段脚本在控制器侧被拒（最常见原因：脚本里用了该固件不认识的函数，"
+                   "例如把 RTDE 字段名 `output_double_register` 当成了 URScript 函数名）。"
+                   "此时**不给** tick 值 —— 旧实现在这种情况下会把一个从没被写过的寄存器读成 tick。"
+                   % probe_token,
+                   "NOT_EXECUTED", dict(sentinel, ip=ip))
+
+    tick = _read_double_register(model, payload_index)
+    if tick is None:
+        return err("脚本已执行完毕（结束哨兵已回读），但 output_double_register_%d 读不到值"
+                   % payload_index, "READ_FAILED", dict(sentinel, ip=ip))
+    return ok({"message": "传送带 tick：%s（脚本已在控制器上执行完毕，结束哨兵 %d 已回读）"
+                          % (tick, finish_token),
+               "data": {"tick_count": tick, "register": payload_index,
+                        "sentinel": sentinel, "verified": True, "ip": ip}})
 
 
 def op_set_conveyor_tick(p):
