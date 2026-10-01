@@ -33,7 +33,14 @@ const PEER_PACKAGES = [
 ]
 /** 工具表当前规模（当前的 83 个）；注册数少于它即为「静默丢工具」。 */
 const EXPECTED_TOOLS = 83
-const TWIN_ROUTE_COUNT = 3
+/**
+ * 孪生侧注册的 `kind:'exact'` 路由条数。
+ *
+ * 0.6.3 起是 **4** 条：state / asset / models / **stream**（第 20 条的 SSE 实时流）。
+ * 加路由时必须同步改这里 —— 这条断言的意义就是"注册形状变了要有人知道"，
+ * 而不是"永远只能是 3 条"。
+ */
+const TWIN_ROUTE_COUNT = 4
 
 const failures = []
 const pass = (title, detail) => console.log(`PASS  ${title}${detail === undefined ? '' : ` — ${detail}`}`)
