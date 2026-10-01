@@ -63,7 +63,13 @@ export function resolveRobotIp(config, globalScope = globalThis) {
 export function apply(ctx, config) {
   const doc = globalThis.document
   const ip = resolveRobotIp(config)
-  const state = createTwinState({ ip })
+  /*
+   * SSE 实时流（清单第 20 条）：**默认启用**。
+   *
+   * host 侧的 `/twin/stream` 复用与轮询完全相同的读取逻辑，并自带 detail 慢节拍，
+   * 所以切过来不会丢任何字段。`state.js` 保证两套数据源互斥 —— 开了流就不轮询。
+   */
+  const state = createTwinState({ ip, stream: true })
 
   /** 调试标记：Task 1 的验收依赖 `loaded` / `at` 两个字段，不要删。 */
   const info = {
