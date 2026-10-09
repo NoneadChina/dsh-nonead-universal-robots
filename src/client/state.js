@@ -102,6 +102,18 @@ export function createTwinState({
      * 审批一结束 host 就不再返回这个字段，沿用会让画面永远挂着一个已经结束的目标。
      */
     pendingMotion: null,
+    /**
+     * 数据通道是否**停滞**（0.6.6）。
+     *
+     * 两个来源：① 流里的 `stale` / `frame-error` 事件（宿主那边"这一帧读还没回来"）；
+     * ② 宿主明确标记为陈旧的帧（`body.stale === true`，读暂时拿不到时的降级回放）。
+     *
+     * 以前宿主在读卡住时**什么都不发**：画面停在最后一帧、界面上没有任何提示，用户只能看到
+     * "孪生不动了"。现在它是一个可显示的状态，收到**不陈旧**的真帧就清掉。
+     */
+    feedStale: false,
+    /** 停滞时宿主给出的"这一帧已经等了/旧了多久"（毫秒；无信息时为 null）。 */
+    feedPendingMs: null,
   }
   const listeners = new Set()
   let timer = null
@@ -136,10 +148,29 @@ export function createTwinState({
     teardownStream()
     const factory = typeof streamFactory === 'function' ? streamFactory : createTwinStream
     streamHandle = factory({ url: streamUrlFor(TWIN_STREAM_PATH, currentIp) })
-    unsubscribeStream = streamHandle.subscribe((frame) => {
+    unsubscribeStream = streamHandle.subscribe((frame, meta) => {
+      if (stopped) return
+      // 服务端的 `stale`（这一帧读还没回来）与 `frame-error`（这一帧彻底失败）：
+      // **保留上一帧读数**，只把"数据停了"这件事标出来给面板显示。
+      // ⚠️ 这类事件**不是**断线（宿主文档：单帧失败绝不拆流），所以绝不能清 `connected`。
+      if (meta?.kind === 'stale' || meta?.kind === 'frame-error') {
+        snapshot = {
+          ...snapshot,
+          feedStale: true,
+          feedPendingMs: Number.isFinite(meta?.pendingMs) ? meta.pendingMs : snapshot.feedPendingMs,
+        }
+        emit()
+        return
+      }
+      // 流自身状态变化（open / retrying）：**不是**新读数，也不该清掉"停滞"标记 ——
+      // 只通知订阅者（面板据此显示"重连中"）。
+      if (meta?.kind === 'status') {
+        emit()
+        return
+      }
       // `null` 表示"还没有第一帧"（例如刚 start 或刚重连），此时保留上一帧不动，
       // 免得画面闪成空白。
-      if (stopped || frame === null || frame === undefined) return
+      if (frame === null || frame === undefined) return
       applyBody(frame)
       emit()
     })
@@ -182,6 +213,14 @@ export function createTwinState({
           detail: body.detail ?? snapshot.detail ?? null,
           // 刻意**不**沿用上一轮：审批结束时 host 不再返回它，这里必须跟着清掉。
           pendingMotion: body.pending_motion ?? null,
+          /**
+           * 宿主自报"这一帧是**陈旧**的"（`stale:true` + 原始 ts 不回填）：
+           * 读暂时拿不到（最常见的原因是机器人正在运动、worker 被占住）时，宿主回放最后一笔
+           * 已知读数，而不是把机器人报成未连接。客户端据此保留 3D 与读数，并在面板上显示
+           * 「数据已停止更新 Ns」—— 龄期由**未被刷新的 ts** 自然增长。
+           */
+          feedStale: body.stale === true,
+          feedPendingMs: Number.isFinite(body.stale_ms) ? body.stale_ms : null,
         }
       // 失败/未连接时保留上一次的 model/q/tcp，只置 connected=false 并写原因，
       // 这样 UI 不会闪成空白。同时保留上一帧的 ips（多机候选要能一直显示，
@@ -196,6 +235,9 @@ export function createTwinState({
           degraded: false,
           // 未连接就没有"待审批"可言。
           pendingMotion: null,
+          // 同上：宿主答了这一帧，通道是活的。
+          feedStale: false,
+          feedPendingMs: null,
         }
     return ok
   }
@@ -286,6 +328,48 @@ export function createTwinState({
     },
     /** 当前目标 IP（空串表示"交给宿主解析"）。 */
     getIp: () => currentIp,
+    /**
+     * 数据通道健康度（0.6.6）：面板据此把"正在重连 / 数据停滞"如实显示出来。
+     *
+     * 以前客户端**没有任何**"这个流现在是什么状态"的信息可看：`gaveup` 之后画面就永远停在
+     * 最后一帧，用户与界面都不知道发生了什么。
+     *
+     * @returns {{mode: 'stream'|'poll', status: string, frames: number,
+     *            frameErrors: number, stale: number, connected: boolean}}
+     */
+    getStreamHealth() {
+      const handle = streamHandle
+      return {
+        mode: stream ? 'stream' : 'poll',
+        status: stream
+          ? (typeof handle?.getStatus === 'function' ? handle.getStatus() : 'idle')
+          : 'polling',
+        frames: typeof handle?.getFrames === 'function' ? handle.getFrames() : 0,
+        frameErrors: typeof handle?.getFrameErrors === 'function' ? handle.getFrameErrors() : 0,
+        stale: typeof handle?.getStaleCount === 'function' ? handle.getStaleCount() : 0,
+        connected: snapshot.connected === true,
+      }
+    },
+    /**
+     * 立刻再取一次数据（自愈入口，0.6.6）。
+     *
+     * 面板在"窗口重新可见"与"数据停滞过久"时会调用它：浏览器的后台节流可能让退避定时器
+     * 迟迟不触发，而一条静态的 3D 画面是现场最危险的误导（操作员会以为机器人就在那儿）。
+     *
+     * @param {boolean} [force] 流仍然"连着"但已经很久没有帧时传 `true`，强制重建连接。
+     * @returns {boolean} 是否真的发起了新的取数/重连
+     */
+    retryNow(force = false) {
+      if (stopped) return false
+      if (stream) return streamHandle?.poke?.(force) === true
+      // 轮询模式：取消在飞的请求并立刻重取（与 setIp 的立即重取同构），
+      // 旧 tick 回来后会被尾部的 `gen !== generation` 检查丢弃。
+      if (timer) { clearTimeout(timer); timer = null }
+      try { inflight?.abort?.() } catch { /* 忽略 */ }
+      inflight = null
+      tick(++generation)
+      return true
+    },
     start() {
       // 重复 start 不得并行出两条轮询链（流模式同理：不得并存两条流）。
       if (!stopped) return

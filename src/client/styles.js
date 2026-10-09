@@ -126,6 +126,10 @@ export const TWIN_CSS = `
 }
 /* 身份行（机型 + IP）比读数更重要，给它正常前景色而不是注释灰。 */
 .ur-twin-hud-row[data-ur-twin-identity] { color: #c9d1d9; }
+/* 数据通道健康度（0.6.6）：停滞/重连必须一眼可见 —— 画面停住时用户要能分清
+   "机器人停了"与"数据停了"，所以这一行用警示色（黄=停滞/重连中，红=通道不可用）。 */
+.ur-twin-hud-row[data-ur-twin-feed-state='stale'] { color: #d29922; }
+.ur-twin-hud-row[data-ur-twin-feed-state='retrying'] { color: #d29922; }
 `.trim()
 
 /**

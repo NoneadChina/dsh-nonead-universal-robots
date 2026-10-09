@@ -105,6 +105,27 @@ export const TRAJECTORY_MAX_AGE_MS = 60_000
 /** 数值面板节流间隔（毫秒）≈ 10 Hz。 */
 export const HUD_INTERVAL_MS = 100
 
+/**
+ * 多久没有**新的采样**就把数据通道标成"停滞"（毫秒）。
+ *
+ * 宿主按 100 ms 一帧推流，正常时 2.5 s 意味着"少了二十多帧"。之所以必须有这条判据：
+ * 机器人运动时 Python worker（单线程 stdin 队列）被运动指令占住，孪生的读会排队 ——
+ * 以前宿主在那种情况下**一个事件都不发**，画面就静静停在最后一帧，界面上没有任何提示。
+ * 现场最危险的误导就是"看着像静止、其实数据早停了"。
+ */
+export const FEED_STALE_MS = 2500
+
+/** 停滞超过这个时长就**强制重建**数据通道（毫秒）：退避定时器可能被浏览器节流，不能干等。 */
+export const FEED_RECONNECT_MS = 10000
+
+/** 两次强制重建之间的最小间隔（毫秒），避免对一条真的连不上的通道反复拆建。 */
+export const FEED_RETRY_INTERVAL_MS = 10000
+
+/** 数据停滞/重连时那行提示的前缀（与既有状态行分开，避免与「未连接」语义混淆）。 */
+export const FEED_STALE_PREFIX = '数据已停止更新'
+/** 正在重连时的提示。 */
+export const FEED_RETRYING_TEXT = '数据通道重连中…'
+
 /** 渲染滞后的下限（毫秒）：采样间隔退化（≤0 / 非有限）时退化为"不滞后"。 */
 export const RENDER_DELAY_MIN_MS = 0
 
@@ -284,6 +305,38 @@ function translate(raw, table) {
   if (value === '') return '--'
   if (value === DETAIL_QUERY_FAILED) return S.queryFailed
   return table[value] ?? value
+}
+
+/**
+ * 数据通道健康度 → 一行提示（纯函数，可单测）。
+ *
+ * 返回空串表示"通道正常，不必占用界面"。
+ *
+ * @param {object} input
+ * @param {string} [input.status] `state.getStreamHealth().status`
+ *   （`idle` / `connecting` / `open` / `retrying` / `unsupported` / `polling`）
+ * @param {boolean} [input.connected] 最近一帧是否"确实连着机器人"
+ * @param {boolean} [input.feedStale] 宿主自报"这一帧读还没回来"
+ * @param {number} [input.ageMs] 距最近一次新采样的毫秒数
+ * @param {number} [input.frames] 已收到的帧数（诊断）
+ * @param {number} [input.frameErrors] 单帧失败次数（诊断）
+ * @returns {string} 一行提示；通道正常时为空串
+ */
+export function describeFeedHealth(input = {}) {
+  const status = typeof input.status === 'string' ? input.status : ''
+  const frames = Number.isFinite(input.frames) ? input.frames : 0
+  const errors = Number.isFinite(input.frameErrors) ? input.frameErrors : 0
+  const diag = `（已收 ${frames} 帧${errors > 0 ? `，失败 ${errors} 帧` : ''}）`
+  if (status === 'unsupported') return `当前环境没有 EventSource：${FEED_STALE_PREFIX}${diag}`
+  // "正在重连"优先展示：这时用户最需要知道的是"它在自己恢复"，而不是"画面为什么不动"。
+  if (status === 'retrying' || status === 'connecting') return `${FEED_RETRYING_TEXT}${diag}`
+  const ageMs = Number.isFinite(input.ageMs) ? Math.max(0, input.ageMs) : 0
+  if (input.feedStale === true || ageMs > FEED_STALE_MS) {
+    // 未连接时"数据停滞"已经是状态行的语义（未连接机器人），这里不重复刷屏。
+    if (input.connected !== true) return ''
+    return `${FEED_STALE_PREFIX} ${(ageMs / 1000).toFixed(1)}s · 正在重试${diag}`
+  }
+  return ''
 }
 
 /** @param {unknown} raw `detail.safety_mode` @returns {string} 中文安全模式 */
@@ -488,6 +541,17 @@ export function mountTwinPanel({
   /** detail 里的安全模式是否处于异常态（状态行据此在保护性停止时让位）。 */
   let snapHazard = false
   /**
+   * 数据通道看门狗（0.6.6）。
+   *
+   * `lastFeedAtMs` / `lastFeedTs`：最近一次**看到新采样**的面板时刻与它对应的快照 ts。
+   * `lastFeedRetryMs`：最近一次强制重建通道的时刻（节流）。
+   * `lastFeedText`：最近写进提示行的文本（避免每帧写 DOM）。
+   */
+  let lastFeedAtMs = null
+  let lastFeedTs = null
+  let lastFeedRetryMs = -Infinity
+  let lastFeedText = null
+  /**
    * 按需渲染的脏标记：只有"确实有新东西要画"时才调用 `render()`。
    *
    * 以前是**每帧无条件渲染**：机器人静止时画面完全没变也照画 60 fps；未连接时虽然 `step()`
@@ -544,6 +608,15 @@ export function mountTwinPanel({
   const hudRobots = makeEl(doc, 'div', 'ur-twin-hud-row', 'data-ur-twin-robots')
   // 待审批的运动目标（清单第 8 条）：审批弹窗说"要动了"，这里同步写出"要往哪动"。
   const hudPending = makeEl(doc, 'div', 'ur-twin-hud-row', 'data-ur-twin-pending')
+  /**
+   * 数据通道健康度（0.6.6）。
+   *
+   * 单独一行而不是塞进状态行：状态行的语义是"机器人是什么状态"，而这一行的语义是
+   * "**数据**是什么状态"（停滞 / 正在重连）。机器人运动时 worker 被占住导致读排队是
+   * 常态，此时画面停住但机器人没停 —— 这两件事必须在界面上分得开。
+   */
+  const hudFeed = makeEl(doc, 'div', 'ur-twin-hud-row', 'data-ur-twin-feed')
+  hudFeed.style.display = 'none'
   // 身份行放最上面：多机场景下"我在看哪一台"比任何读数都重要，而 `ip` 以前只被写进
   // `data-ur-twin-ip` 属性、界面上一个字都看不到。
   const hudIdentity = makeEl(doc, 'div', 'ur-twin-hud-row', 'data-ur-twin-identity')
@@ -553,6 +626,7 @@ export function mountTwinPanel({
   const hudDetail = makeEl(doc, 'div', 'ur-twin-hud-row', 'data-ur-twin-detail')
   const hudPower = makeEl(doc, 'div', 'ur-twin-hud-row', 'data-ur-twin-power')
   hud.appendChild(hudRobots)
+  hud.appendChild(hudFeed)
   hud.appendChild(hudPending)
   hud.appendChild(hudIdentity)
   // 工程辅助图层的开关（清单第 9 条）。四个图层默认全关：一次全画出来会看不清真臂。
@@ -898,12 +972,61 @@ export function mountTwinPanel({
     hidden = doc.hidden === true
     if (hidden) pauseLoop()
     else {
+      // 回到前台：后台期间退避定时器可能被浏览器节流到几乎不触发，这里推一把
+      // （`retryNow()` 只在"正在重连"时真正动手，不动健康连接）。
+      try { state?.retryNow?.(false) } catch { /* 状态源自身的问题，吞掉 */ }
       invalidate()
       wake()
     }
   }
   // 注册点必须在 `onVisibility` 初始化之后（同一作用域里提前读 const 会命中 TDZ）。
   win?.addEventListener?.('visibilitychange', onVisibility)
+
+  /* ---------------- 数据通道看门狗 ---------------- */
+
+  /**
+   * 更新"数据通道"提示行，并在停滞过久时**强制重建**通道。
+   *
+   * 为什么必须做：宿主那边的背压是"上一帧读没回来就不发下一帧"，而机器人运动时 Python
+   * worker 被运动指令占住是**常态** —— 于是流会安静很久。以前的实现里这段时间界面上
+   * 什么都不说，用户只能看到"孪生不动了"，分不清"机器人停了"和"数据停了"。
+   *
+   * @param {number} nowMs 面板时钟
+   * @param {object} snap 当前快照
+   * @param {boolean} connected 快照是否连着机器人
+   */
+  function updateFeed(nowMs, snap, connected) {
+    const ts = Number.isFinite(snap?.ts) ? snap.ts : null
+    if (ts === null || ts !== lastFeedTs) {
+      lastFeedTs = ts
+      lastFeedAtMs = nowMs
+    }
+    const health = state?.getStreamHealth?.() ?? {}
+    const ageMs = lastFeedAtMs === null ? 0 : Math.max(0, nowMs - lastFeedAtMs)
+    const text = describeFeedHealth({
+      status: health.status,
+      connected,
+      feedStale: snap?.feedStale === true,
+      ageMs,
+      frames: health.frames,
+      frameErrors: health.frameErrors,
+    })
+    if (text !== lastFeedText) {
+      lastFeedText = text
+      hudFeed.textContent = text
+      hudFeed.style.display = text === '' ? 'none' : ''
+      hudFeed.setAttribute(
+        'data-ur-twin-feed-state',
+        text === '' ? 'ok' : (text.startsWith(FEED_RETRYING_TEXT) ? 'retrying' : 'stale'),
+      )
+    }
+    // 停滞过久 ⇒ 强制重建。浏览器对后台窗口的定时器节流会让"退避重连"迟迟不触发，
+    // 面板自己再推一把，比等一个可能已被节流掉的定时器可靠。
+    if (connected && ageMs > FEED_RECONNECT_MS && nowMs - lastFeedRetryMs >= FEED_RETRY_INTERVAL_MS) {
+      lastFeedRetryMs = nowMs
+      try { state?.retryNow?.(true) } catch { /* 状态源自身的问题，吞掉 */ }
+    }
+  }
 
   /* ---------------- 连接态切换 ---------------- */
   function applyConnection(connected) {
@@ -929,6 +1052,13 @@ export function mountTwinPanel({
         hudTcp.textContent = ''
         hudDetail.textContent = ''
         hudPower.textContent = ''
+        // 数据通道看门狗：断连即重置（重连后从新的一帧重新计时）。
+        hudFeed.textContent = ''
+        hudFeed.style.display = 'none'
+        lastFeedText = null
+        lastFeedAtMs = null
+        lastFeedTs = null
+        lastFeedRetryMs = -Infinity
         root.setAttribute('data-ur-twin-hazard', 'false')
         lastHudMs = -Infinity
       }
@@ -1130,6 +1260,8 @@ export function mountTwinPanel({
     const wasDegraded = snapDegraded
     snapDegraded = snap.degraded === true
     applyConnection(connected)
+    // 数据通道健康度要**连未连接时也更新**：此时最该看到的正是"正在重连"。
+    updateFeed(nowMs, snap, connected)
     if (!connected) return
     if (wasDegraded !== snapDegraded) refreshStatus()
 
