@@ -33,10 +33,12 @@
     "stream-wiring.test.mjs",
     "strings.test.mjs",
     "tcp-axes.test.mjs",
+    "texture-resize.test.mjs",
     "trajectory-extras.test.mjs",
     "trajectory.test.mjs",
     "twin-panel.test.mjs",
     "twin-routes.test.mjs",
-    "twin-stream.test.mjs"
+    "twin-stream.test.mjs",
+    "twin-worker.test.mjs"
   ]
 }

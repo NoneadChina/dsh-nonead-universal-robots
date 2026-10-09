@@ -40,6 +40,11 @@ import {
   renderDelayMs,
   RENDER_DELAY_MIN_MS,
   RENDER_DELAY_MAX_MS,
+  describeFeedHealth,
+  FEED_STALE_MS,
+  FEED_RECONNECT_MS,
+  FEED_STALE_PREFIX,
+  FEED_RETRYING_TEXT,
 } from '../src/client/twin-panel.js'
 import { fkChain } from '../src/client/robot/fk.js'
 import { lerpJoints } from '../src/client/robot/interpolate.js'
@@ -276,6 +281,8 @@ function makeModelLoader({ usedFallback = false } = {}) {
 function makeFakeState(initial = {}) {
   let snap = { connected: false, model: '', q: [], tcp: [], ts: 0, error: null, ...initial }
   const listeners = new Set()
+  let health = { status: 'open', frames: 1, frameErrors: 0, stale: 0, mode: 'stream' }
+  const retries = []
   return {
     getSnapshot: () => snap,
     subscribe(l) {
@@ -285,6 +292,17 @@ function makeFakeState(initial = {}) {
     set(next) {
       snap = { ...snap, ...next }
     },
+    /** 数据通道健康度（0.6.6）：面板据此显示"重连中 / 停滞"。 */
+    getStreamHealth: () => ({ ...health }),
+    setHealth(next) {
+      health = { ...health, ...next }
+    },
+    /** 自愈入口：面板在停滞过久/回到前台时会调它（记录 force 参数）。 */
+    retryNow(force = false) {
+      retries.push(force === true)
+      return true
+    },
+    retries,
     listenerCount: () => listeners.size,
   }
 }
@@ -1281,5 +1299,93 @@ test('可访问性（清单第 16 条）：canvas 可被描述与聚焦，HUD �
   assert.ok(toggle, '图层开关必须存在')
   assert.equal(toggle.getAttribute('aria-pressed'), 'false')
 
+  ctx.panel.dispose()
+})
+
+/* ------------------------------------------------------------------ *
+ * 数据通道看门狗（0.6.6）
+ *
+ * 现场问题：机器人运动时 Python worker 被运动指令占住，孪生的读排队 ⇒ 宿主**一个事件都不发**
+ * ⇒ 画面停在最后一帧、界面上没有任何提示。用户只能看到"孪生不动了"，而最危险的是他无从分辨
+ * "机器人停了"与"数据停了"。所以：停滞必须**被看见**，并且面板要能自己推一把。
+ * ------------------------------------------------------------------ */
+
+test('describeFeedHealth：通道正常时不出声；停滞/重连/不支持都给出可读文案', () => {
+  // 正常：什么都不显示（不占界面）
+  assert.equal(describeFeedHealth({ status: 'open', connected: true, ageMs: 100 }), '')
+  assert.equal(describeFeedHealth({ status: 'idle', connected: false, ageMs: 0 }), '')
+
+  // 停滞：给出"停了多久"与诊断计数
+  const stalled = describeFeedHealth({
+    status: 'open', connected: true, ageMs: 4200, frames: 12, frameErrors: 3,
+  })
+  assert.ok(stalled.startsWith(FEED_STALE_PREFIX), stalled)
+  assert.match(stalled, /4\.2s/)
+  assert.match(stalled, /12 帧/)
+  assert.match(stalled, /失败 3 帧/)
+
+  // 宿主自报停滞（feedStale）时也算，哪怕树里的 ageMs 还没到阈值
+  assert.ok(
+    describeFeedHealth({ status: 'open', connected: true, feedStale: true, ageMs: 0 })
+      .startsWith(FEED_STALE_PREFIX),
+  )
+
+  // 正在重连：优先级高于"停滞"（此时用户最需要知道它在自愈）
+  assert.ok(
+    describeFeedHealth({ status: 'retrying', connected: true, ageMs: 60000 }).startsWith(FEED_RETRYING_TEXT),
+  )
+  assert.ok(describeFeedHealth({ status: 'connecting', connected: false }).startsWith(FEED_RETRYING_TEXT))
+  assert.match(describeFeedHealth({ status: 'unsupported' }), /EventSource/)
+
+  // 未连接时"数据停滞"已由状态行表达，不要重复刷屏
+  assert.equal(describeFeedHealth({ status: 'open', connected: false, feedStale: true, ageMs: 9000 }), '')
+})
+
+test('数据停滞：面板写出提示行；停滞过久后**强制重建**通道', async () => {
+  const ctx = boot({ initial: { connected: true, model: 'UR3', q: Q0, tcp: TCP0, ts: 1000 } })
+  ctx.clock.flush()
+  await tick()
+
+  const feed = () => byAttr(ctx.container, 'data-ur-twin-feed')[0]
+  assert.ok(feed(), '必须有数据通道提示行')
+  assert.equal(feed().style.display, 'none', '通道正常时这一行不占位')
+  assert.equal(feed().textContent, '')
+
+  // 采样不再推进（ts 不变）但时钟继续走 ⇒ 达到停滞阈值
+  ctx.clock.flush(FEED_STALE_MS + 500)
+  assert.equal(feed().style.display, '', '★ 停滞必须被显示出来（不能再静默冻屏）')
+  assert.ok(feed().textContent.startsWith(FEED_STALE_PREFIX), feed().textContent)
+  assert.equal(feed().getAttribute('data-ur-twin-feed-state'), 'stale')
+
+  // 停滞超过 FEED_RECONNECT_MS ⇒ 面板强制重建通道（退避定时器可能已被浏览器节流）
+  assert.deepEqual(ctx.state.retries, [], '还没到强制重建的时长，不该乱拆连接')
+  ctx.clock.flush(FEED_RECONNECT_MS)
+  assert.deepEqual(ctx.state.retries, [true], '★ 停滞过久必须强制重建（force=true）')
+  ctx.clock.flush(FEED_RECONNECT_MS)
+  assert.equal(ctx.state.retries.length, 2, '强制重建要被节流（不能每帧都拆）')
+
+  // 新采样到达 ⇒ 提示行消失、状态回到正常
+  ctx.state.set({ ts: 2000, q: Q0, tcp: TCP0 })
+  ctx.clock.flush(HUD_INTERVAL_MS + 20)
+  assert.equal(feed().textContent, '', '收到新采样后必须清掉停滞提示')
+  assert.equal(feed().style.display, 'none')
+  ctx.panel.dispose()
+})
+
+test('重连中：面板如实显示"数据通道重连中…"（而不是留着冻住的画面不说）', async () => {
+  const ctx = boot({ initial: { connected: true, model: 'UR3', q: Q0, tcp: TCP0, ts: 1000 } })
+  ctx.state.setHealth({ status: 'retrying', frames: 5, frameErrors: 2 })
+  ctx.clock.flush()
+  await tick()
+
+  const feed = byAttr(ctx.container, 'data-ur-twin-feed')[0]
+  assert.ok(feed.textContent.startsWith(FEED_RETRYING_TEXT), feed.textContent)
+  assert.equal(feed.getAttribute('data-ur-twin-feed-state'), 'retrying')
+  assert.match(feed.textContent, /5 帧/)
+
+  // 恢复后自己消失
+  ctx.state.setHealth({ status: 'open' })
+  ctx.clock.flush()
+  assert.equal(feed.textContent, '')
   ctx.panel.dispose()
 })

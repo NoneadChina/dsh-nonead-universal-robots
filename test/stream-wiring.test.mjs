@@ -19,14 +19,30 @@ function makeStreamFactory() {
       url,
       started: 0,
       stopped: 0,
+      /** `poke()` 收到过的 force 参数（自愈入口的契约）。 */
+      pokes: [],
+      frames: 0,
+      frameErrors: 0,
+      stale: 0,
+      status: 'idle',
       subscribe(listener) {
         listeners.add(listener)
         return () => listeners.delete(listener)
       },
-      start() { handle.started += 1 },
-      stop() { handle.stopped += 1 },
-      /** 测试用：推一帧。 */
-      push(frame) { for (const listener of listeners) listener(frame) },
+      start() { handle.started += 1; handle.status = 'open' },
+      stop() { handle.stopped += 1; handle.status = 'idle' },
+      poke(force = false) { handle.pokes.push(force === true); return true },
+      getStatus() { return handle.status },
+      getFrames() { return handle.frames },
+      getFrameErrors() { return handle.frameErrors },
+      getStaleCount() { return handle.stale },
+      /** 测试用：推一帧（省略 `meta` = 一帧普通状态快照）。 */
+      push(frame, meta) {
+        if (meta === undefined || meta.kind === 'state') handle.frames += 1
+        if (meta?.kind === 'stale') { handle.stale += 1; handle.status = 'open' }
+        if (meta?.kind === 'frame-error') handle.frameErrors += 1
+        for (const listener of listeners) listener(frame, meta)
+      },
       get listenerCount() { return listeners.size },
     }
     created.push(handle)
@@ -157,3 +173,95 @@ test('stream:false（缺省）—— 行为与从前完全一致：仍然轮询�
   assert.equal(fetchImpl.calls, 1, '缺省必须照旧发第一次轮询')
   state.stop()
 })
+
+// ── 0.6.6：数据通道可观测 + 自愈（画面"停住"必须能被说清、能被推一把）────────────
+//
+// 现场问题：机器人运动时 Python worker 被运动指令占住，孪生读排队 ⇒ 画面停在最后一帧
+// 且界面上**没有任何提示**，用户分不清"机器人停了"和"数据停了"。宿主那边现在会发
+// `stale` / `frame-error`，客户端必须把它变成可显示、可自愈的状态。
+
+test('stream —— 服务端 stale/frame-error：保留上一帧读数，只标记"数据停滞"', () => {
+  const streams = makeStreamFactory()
+  const state = createTwinState({ fetchImpl: countingFetch(), stream: true, streamFactory: streams.factory })
+  state.start()
+  streams.latest().push(FRAME)
+  assert.equal(state.getSnapshot().feedStale, false, '有真帧时不得标成停滞')
+
+  streams.latest().push(null, { kind: 'stale', pendingMs: 4200 })
+  const stale = state.getSnapshot()
+  assert.equal(stale.feedStale, true, '★ 停滞必须被标出来')
+  assert.equal(stale.feedPendingMs, 4200, '停滞时长要能显示')
+  assert.equal(stale.connected, true, '★ 停滞不是断连：绝不能清 connected')
+  assert.deepEqual(stale.q, FRAME.q, '★ 停滞必须保留上一帧读数（画面不清空）')
+
+  // 下一帧真数据到达 ⇒ 停滞标记清掉
+  streams.latest().push({ ...FRAME, ts: 1100 })
+  assert.equal(state.getSnapshot().feedStale, false, '收到真帧后必须清掉停滞标记')
+  assert.equal(state.getSnapshot().feedPendingMs, null)
+  state.stop()
+})
+
+test('stream —— frame-error 同样保留读数（单帧失败不等于断连）', () => {
+  const streams = makeStreamFactory()
+  const state = createTwinState({ fetchImpl: countingFetch(), stream: true, streamFactory: streams.factory })
+  state.start()
+  streams.latest().push(FRAME)
+  streams.latest().push(null, { kind: 'frame-error', reason: 'read_timeout' })
+  const snap = state.getSnapshot()
+  assert.equal(snap.connected, true, '单帧失败不得把机器人报成未连接')
+  assert.equal(snap.feedStale, true)
+  assert.deepEqual(snap.q, FRAME.q)
+  state.stop()
+})
+
+test('getStreamHealth：把"通道现在怎么样"如实说出来（以前客户端一个字都没有）', () => {
+  const streams = makeStreamFactory()
+  const state = createTwinState({ fetchImpl: countingFetch(), stream: true, streamFactory: streams.factory })
+  // 未 start 时是 idle（不是假装 open）
+  assert.equal(state.getStreamHealth().mode, 'stream')
+  assert.equal(state.getStreamHealth().status, 'idle')
+
+  state.start()
+  streams.latest().push(FRAME)
+  streams.latest().push(null, { kind: 'frame-error' })
+  streams.latest().push(null, { kind: 'stale', pendingMs: 10 })
+  const health = state.getStreamHealth()
+  assert.equal(health.status, 'open')
+  assert.equal(health.frames, 1)
+  assert.equal(health.frameErrors, 1)
+  assert.equal(health.stale, 1)
+  assert.equal(health.connected, true)
+
+  // 重连中要能被界面看到
+  streams.latest().status = 'retrying'
+  assert.equal(state.getStreamHealth().status, 'retrying')
+  state.stop()
+
+  // 轮询模式下也必须给出一个诚实的 mode
+  const polled = createTwinState({ fetchImpl: countingFetch(), streamFactory: streams.factory })
+  assert.deepEqual(
+    { mode: polled.getStreamHealth().mode, status: polled.getStreamHealth().status },
+    { mode: 'poll', status: 'polling' },
+  )
+})
+
+test('retryNow()：流模式转发给 poke（含 force），轮询模式立刻重取一次', () => {
+  const streams = makeStreamFactory()
+  const state = createTwinState({ fetchImpl: countingFetch(), stream: true, streamFactory: streams.factory })
+  state.start()
+  assert.equal(state.retryNow(), true, '正在重连时 poke 必须真的动手')
+  assert.equal(state.retryNow(true), true, 'force 也要透传')
+  assert.deepEqual(streams.latest().pokes, [false, true], '★ 必须把 force 原样交给流')
+  state.stop()
+  assert.equal(state.retryNow(), false, 'stop 之后不得再动手')
+
+  // 轮询模式：不建流，但也要能立刻重取（面板的"停滞过久"自愈走这里）
+  const fetchImpl = countingFetch()
+  const polled = createTwinState({ fetchImpl, streamFactory: streams.factory })
+  polled.start()
+  assert.equal(fetchImpl.calls, 1)
+  assert.equal(polled.retryNow(), true)
+  assert.equal(fetchImpl.calls, 2, '★ 轮询模式下 retryNow 必须立刻再取一次')
+  polled.stop()
+})
+

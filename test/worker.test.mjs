@@ -146,6 +146,51 @@ test('超时换新进程：下一次 call() 仍然可用（自动恢复，无需
   }
 })
 
+// ── 0.6.6：孪生的只读遥测**不得**因为超时就杀掉机器人会话 ────────────────────
+//
+// 机器人执行运动指令时孪生的读会排队（同一条单线程 stdin 队列），用默认预算会在超时时杀掉
+// 子进程 —— 连带整条 RTDE/Dashboard 会话，孪生此后永远拿不到位姿。只读读传
+// `killOnTimeout:false`：**这一次调用**失败，进程与会话留下。
+
+test('killOnTimeout:false —— 超时只让这一次调用失败，不杀子进程（机器人会话必须活着）', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await worker.call('echo', { v: 'warm' })
+    const procBefore = worker.proc
+    assert.ok(procBefore, '先要有一个活着的子进程');
+
+    const error = await worker.call('hang', {}, 300, undefined, { killOnTimeout: false }).then(
+      () => null,
+      (e) => e,
+    );
+    assert.ok(error, '超时必须 reject 调用方');
+    assert.match(error.message, /timed out after 300ms/);
+    assert.equal(error.code, 'WORKER_TIMEOUT', '★ 必须带机器可读的错误码（孪生据此降级成"陈旧帧"）');
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(worker.proc, procBefore, '★ 不得换/杀子进程：会话（RTDE/Dashboard）在它里面');
+    assert.equal(worker.stats().running, true, '子进程必须仍然活着');
+
+    // 会话没死 ⇒ 下一个读立刻可用（这就是"机器人运动完孪生自动跟上"的前提）。
+    assert.deepEqual(await worker.call('echo', { v: 'after-timeout' }), { echo: 'after-timeout' });
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('默认（不传选项）行为不变：超时仍然杀掉子进程以解救卡死的单线程 worker', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await assert.rejects(() => worker.call('hang', {}, 300), /timed out/)
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(worker.proc, null, '★ 命令类调用的既有语义不得被孪生的需要改掉');
+  } finally {
+    fixture.cleanup()
+  }
+})
+
 test('在飞请求上限：超过 maxInFlight 时立即拒绝，不排队等到各自超时', async () => {
   const fixture = fakeWorkerFixture()
   try {
