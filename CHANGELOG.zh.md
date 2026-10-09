@@ -2,6 +2,101 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.6] - 未发布
+
+> 下面代码注释里写的 `0.6.6` 指的就是这条未发布的改动；`package.json` **已升到 0.6.6**，
+> 但还没发布 —— profile 里装的仍是 GitHub 上的 `#086d365`（0.6.5），推送后再改引用并重装。
+
+> **数字孪生跟着机器人动两下就不动了，而且再也不恢复。** 这是三个缺陷叠加的结果：
+> 读还没回来时帧泵**彻底静默**（画面就那么冻住，界面上一个字都不说）、孪生的读会因为超时
+> **杀掉整条机器人会话**、以及一个坏帧就把客户端整条流拆掉（连来八次就永久死亡）。
+> 三个都已修复，每个都有可复现的实测。
+
+### 变更 — 14 个模型资产瘦身 40.6%（35.11 → 20.86 MB：先无损，后有损）
+
+- **第 1 步 · 无损（→ 28.27 MB）**：新增 `scripts/compress-models.mjs`，只做两件**不改变观感**的事 ——
+  ① trimesh 把**所有**顶点索引都写成 `UNSIGNED_INT`（4 字节/索引），而这 14 个型号最大索引值只有 24228，
+  `UNSIGNED_SHORT` 完全够用；② 删掉每个 primitive 上那个**没有任何材质读取**的非标准属性
+  `_color`（three.js 的 `GLTFLoader` 会把它塞进 `geometry.attributes._color`，然后没人用）。
+  顺带把因此出现的 BIN 空洞与被孤立的 `accessor` 一并回收。
+- **自证而非声明**：脚本对每个文件逐项断言"顶点位置 / UV 的字节**逐字节相同**、索引序列
+  **逐值相同**、`accessor` 的 `min`/`max` 与节点名顺序不变、每个 `bufferView` 落在 buffer 内且 4 字节对齐"，
+  任一不满足就拒绝写盘。压缩后 `python scripts/verify-models.py`（14/14）、
+  `node test/model-contract.test.mjs`（6/6，含 14 型号多姿态装配与相邻连杆间隙）全绿。
+- **第 2 步 · 有损、经明确决策（→ 20.86 MB）**：`--texture-size 1024` 把 5 个新型号里**共 8 张**
+  2048×2048 底色 PNG（ur15 1 张、ur18 2 张、ur20 1 张、ur30 2 张、ur8long 2 张；其中 ur8long 复用
+  ur15 的贴图、ur30 复用 ur20 的）用**块平均**降到 1024×1024（10.67 MB → 3.25 MB）。整数倍降采样用块平均而不是双三次：双三次是插值，降采样会漏掉被跳过的
+  像素；块平均把每个 2×2 源像素平均成一个目标像素，正是"降一半分辨率"的语义。
+  9 个老型号的内嵌贴图只是 16×8/32×8（合计约 1 KB），**不放大、不改动**。
+- **降分辨率实现**：新增 `scripts/texture-resize.mjs`（零依赖、跨平台的 PNG 解码/缩放/编码）。
+  没有用 `sharp`/`pngjs`（要给"零第三方依赖"的仓库塞依赖）、没有用 Python PIL（本机没有）、
+  也没有用 Windows 的 `System.Drawing`（**只在 Windows 上存在 ⇒ 发布产物无法在 CI/macOS 重建**）。
+  解码正确性用两条独立证据夹住：与 Windows GDI+ 对同一张真实贴图做**逐像素交叉比对**（7 个采样点，
+  含四角，全部一致），以及 `test/texture-resize.test.mjs` 的往返与真实样本断言。
+- **视觉验收**：同一物理区域的原图 1:1 与缩后图放大并排比对（`--texture-size` 的 dry-run 会打印每张
+  图的前后尺寸与字节），肉眼无法区分；而孪生面板实际只有几百像素宽。
+- **体积构成（实测，`npm run analyze:models`）**：索引 12.78 MB（36.4%）+ 几何 11.78 MB（33.6%）+
+  纹理 10.67 MB（30.4%）。**10.67 MB 纹理全部来自那 5 个新型号**。
+- **裁定变更记录**：Ruling 24 的"全量原始精度、不抽稀"**只适用于几何**（顶点位置、UV、索引在本步全部
+  逐字节/逐值不变）；**底色贴图**经用户 2026-10-09 明确决策降为最长边 1024。`model-contract.test.mjs`
+  的体积下限因此从 25 MB 调到 15 MB（并注明最小文件 ur20 0.69 MB 仍远高于 0.5 MB 下限）。
+- **仍未做（需要时可再来一档）**：纹理 → 512² 约再省 2.5 MB；无损 WebP 约 −2.5 MB；
+  UV 的 `float32` → `uint16`（`KHR_mesh_quantization`，three 支持）约 −2.2 MB；
+  位置量化**不建议**（`loader.js` 的 `applyLinksToGroups()` 每帧往这 7 个组的 `matrix` 写**绝对**变换，
+  会覆盖量化的节点补偿 ⇒ 手臂会错位）；Draco/meshopt 需要改客户端加载路径 + 多托管一个 wasm。
+
+
+### 修复 — 孪生停住且不再恢复
+
+- **停滞的帧泵现在会出声，而不是静默**（`lib/twin-routes.js`）。帧泵不会在上一帧的读还没回来时
+  叠加第二帧（这是对的：worker 是单线程的，在飞上限只有 8），但它以前在那段时间里**一个事件都不发**
+  —— 实测：运动指令占住 worker 的 6 s 内零事件（`scripts/probe-twin-pump-stall.mjs`）。客户端于是
+  看到一条"开着的、安静的流"，画面永远停在最后一帧，与"机器人停了"完全无法区分。现在读在飞时
+  每秒发一个 `stale` 事件；读超过 15 s 的安全网则发 `frame-error`。两条路都**不关连接、不结束响应**。
+- **孪生的读再也不能毁掉机器人会话**（`lib/twin-worker.js`、`lib/worker.js`）。
+  `UrWorker.call()` 在请求超预算时会杀掉 Python 子进程（设计如此：卡在库代码里的单线程 worker
+  会让它后面的一切都排死）。而孪生既共用这条 60 s 的默认预算、又共用同一条 worker 队列，于是一次
+  排在长动作后面的读超时后会杀掉子进程 —— 连带 RTDE 与 Dashboard，孪生此后永远拿不到位姿。
+  现在孪生的读走**专用 2.5 s 预算 + `killOnTimeout:false`**：这一帧快速失败、会话留下、下一帧再试。
+  运动类工具自己的预算与"超时杀进程"行为完全不变。
+- **读"暂时拿不到"降级成陈旧帧，而不是报"未连接"**（`lib/twin-routes.js`）。
+  worker 忙/超时以前被答成 `connected:false`，客户端于是把整个 3D 视图藏起来、写上「未连接机器人」
+  —— 用户看到的正是"同步两个动作后就不动了"。现在宿主回放最后一笔已知读数并标记 `stale:true`
+  （**原始 `ts` 保持不变**，龄期继续增长；回放窗口 30 s），客户端保留画面并显示停滞提示。
+  真正的连接错误仍然如实报 `connected:false`。
+- **一个坏帧再也不能拆掉客户端的流**（`src/client/robot/twin-stream.js`）。
+  `EventSource.onerror` **就是**名为 `error` 的事件的事件处理器，而服务端事件按 `event:` 字段派发
+  —— 于是宿主文档里那句"单帧失败只发一个 `error` 事件、绝不拆流"，在真实浏览器里恰好**反过来**：
+  每个坏帧都拆一次连接。用符合规范的 `EventSource` 实测（`scripts/probe-twin-stream-error-event.mjs`）：
+  一个 `error` 帧 ⇒ 客户端重建了流。现在**按"带不带 `data`"区分**（服务端消息有 data，传输层错误没有），
+  并且宿主把这个事件改名为 `frame-error`，两者从此不可能再撞名。
+- **流永不放弃**（`src/client/robot/twin-stream.js`）。"连续 8 次重连失败即放弃"是个终态：没有定时器、
+  不再建连、画面永远停在最后一帧 —— 而真实世界的断流（宿主重启、窗口最小化时连接被浏览器掐掉、
+  笔记本休眠/唤醒）恰恰是"连续失败十几次、之后又能连上"的形状。现在改为无限重连 + 指数退避封顶
+  30 s，并且**只有收到真帧**才清零退避（不是 `open`：一个"能连上但一帧都不发"的端点不该被当作恢复）。
+- **数据通道的状态看得见、也会自愈**（`src/client/state.js` 新增 `getStreamHealth()` / `retryNow()`；
+  `src/client/twin-panel.js` 增加专门一行）。面板会写「数据已停止更新 Ns · 正在重试」（带帧数与失败数）、
+  重连时写「数据通道重连中…」，窗口重新可见时立刻重试，停滞 10 s 后**强制重建**通道
+  （浏览器的定时器节流可能让退避定时器一直不触发）。
+- **worker 错误码机器可读**（`lib/worker.js`）：`WORKER_BUSY` / `WORKER_TIMEOUT` / `WORKER_EXITED` 等，
+  孪生据此区分"暂时拿不到答案"与"机器人真的没连上"，不必解析中文散文。
+
+### 测试
+
+- `twin-routes.test.mjs` —— 这条 SSE 路由**以前一条测试都没有**，所以"静默停帧"与"error 撞名"
+  才能长期全绿：补上帧/心跳/405 断言、"worker 被占住时发 `stale`（绝不静默）"、读超时安全网、
+  单帧串行背压，以及"陈旧帧降级"策略（含 30 s 回放窗口）。
+- `twin-stream.test.mjs` —— 假 `EventSource` 现在**按规范派发**（服务端 `error` 消息同样命中
+  `onerror`），这正是旧假实现表达不出来的那一面；新增"连续失败 20 次永不放弃"、退避封顶/清零规则
+  与 `poke()`。
+- `twin-worker.test.mjs`（新增）—— 孪生读策略：短预算、`killOnTimeout:false`、worker 为 null、
+  错误码集合。
+- `stream-wiring.test.mjs`、`twin-panel.test.mjs` —— `stale`/`frame-error` 事件的停滞标记、
+  `getStreamHealth()`、`retryNow()`、「数据已停止更新」提示行与强制重建。
+- `worker.test.mjs` —— `killOnTimeout:false` 保住子进程；默认路径仍然杀掉它。
+- `scripts/` 里留下三个诊断探针（`probe-twin-pump-stall.mjs`、`probe-twin-stream-error-event.mjs`、
+  `probe-sse-lifetime.mjs`），让这三个传输层问题可以在真机上被**重新实测**，而不是靠重新推理。
+
 ## [0.6.5] - 2026-10
 
 > 本版把数字孪生从"只读预览"做成现场工具，并把 10 Hz 轮询换成推送通道。同时收尾了一批

@@ -2,6 +2,130 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.6.6] - Unreleased
+
+> Code comments below refer to this unreleased change as `0.6.6`; `package.json` is **already 0.6.6**,
+> but nothing is published yet — the profile still installs `#086d365` (0.6.5) from GitHub, so the ref
+> has to be updated and the profile reinstalled after the push.
+
+> **The digital twin stopped following the robot after a couple of moves, and never came back.**
+> Three defects combined to produce that: the frame pump went completely silent while a read was
+> outstanding (so the picture simply froze with no explanation), the twin's reads could *kill the
+> robot session* by timing out, and one bad frame tore the whole client stream down — eight of them
+> left it permanently dead. All three are fixed, each with a reproduction.
+
+### Changed — the 14 model assets were slimmed 40.6% (35.11 → 20.86 MB: lossless, then lossy)
+
+- **New `scripts/compress-models.mjs`** does exactly two things that cannot change what you see:
+  ① trimesh writes **every** vertex index as `UNSIGNED_INT` (4 bytes each) while the largest index in
+  these 14 models is only 24228 — `UNSIGNED_SHORT` is plenty; ② every primitive carries a `_color`
+  attribute that **no material reads** (three's `GLTFLoader` dutifully puts it in
+  `geometry.attributes._color` and nothing ever looks at it). The BIN holes and orphaned `accessor`s
+  left behind are reclaimed too.
+- **Proved, not claimed**: for every file the script asserts that vertex positions / UVs / texture bytes
+  are **byte-for-byte identical**, the index sequence is **value-for-value identical**, `accessor`
+  `min`/`max` and the node-name order are unchanged, and every `bufferView` is inside the buffer and
+  4-byte aligned — otherwise it refuses to write. After compressing:
+  `python scripts/verify-models.py` (14/14) and `node test/model-contract.test.mjs` (6/6, including the
+  14-model multi-pose assembly and inter-link gap checks) are green.
+- **Deliberately not done**: no decimation and no vertex-precision change (Ruling 24); no Draco/meshopt
+  (the client's `GLTFLoader` registers no decoder — that would mean changing the load path and shipping
+  an extra wasm); no position quantisation (`loader.js`'s `applyLinksToGroups()` writes an **absolute**
+  transform into those 7 groups' `matrix` every frame, which would overwrite the node compensation and
+  make the arm come apart). Texture re-encoding is a separate, **explicit** switch — see step 2.
+- **Step 2 · lossy, explicitly decided (→ 20.86 MB)**: `--texture-size 1024` box-filters the **eight**
+  2048×2048 base-colour PNGs embedded by the five newer models (ur15 ×1, ur18 ×2, ur20 ×1, ur30 ×2,
+  ur8long ×2 — ur8long reuses ur15's texture and ur30 reuses ur20's) down to 1024×1024
+  (10.67 MB → 3.25 MB). Integer-ratio downsampling uses a **box average** rather than bicubic: bicubic
+  interpolates and therefore skips source pixels when shrinking, while the box average turns each 2×2
+  source block into one target pixel — which is what "halve the resolution" means. The 9 older models
+  only embed 16×8/32×8 PNGs (≈1 KB total); they are neither upscaled nor touched.
+- **Implementation**: new `scripts/texture-resize.mjs` (dependency-free, cross-platform PNG decode /
+  resize / encode). Not `sharp`/`pngjs` (this repo ships zero third-party runtime deps), not Python PIL
+  (unavailable here), and not Windows `System.Drawing` — that exists **only on Windows**, so release
+  artifacts could not be rebuilt on CI/macOS. Decoding correctness is pinned by two independent pieces
+  of evidence: a **per-pixel cross-check against Windows GDI+** on the same real texture (7 sample
+  points including the corners — all identical) and `test/texture-resize.test.mjs` (round-trips plus a
+  real-asset sample).
+- **Visual acceptance**: the same physical region shown side by side (original 1:1 vs. the shrunk image
+  scaled back up) is indistinguishable to the eye — and the twin panel is only a few hundred pixels
+  wide. A dry run prints each texture's before/after dimensions and bytes.
+- **Measured composition** (`npm run analyze:models`): indices 12.78 MB (36.4%) + geometry 11.78 MB
+  (33.6%) + textures 10.67 MB (30.4%), with **all** of that texture coming from the 5 newer models.
+- **Ruling change, recorded**: Ruling 24's "full original precision, no decimation" now applies to
+  **geometry only** (positions, UVs and indices are byte-for-byte/value-for-value unchanged by both
+  steps); the **base-colour textures** were reduced to a 1024 longest edge by explicit user decision on
+  2026-10-09. `model-contract.test.mjs`'s floor therefore moved from 25 MB to 15 MB (its smallest file,
+  ur20 at 0.69 MB, still sits well above the 0.5 MB guard).
+- **Still on the table (another notch, if ever needed)**: textures → 512² ≈ −2.5 MB more; lossless
+  WebP ≈ −2.5 MB; UV `float32` → `uint16` (`KHR_mesh_quantization`, three supports it) ≈ −2.2 MB.
+
+### Fixed — the twin froze and never resumed
+
+- **A stalled frame pump is now loud, not silent** (`lib/twin-routes.js`). The pump refuses to stack
+  a second read on top of an outstanding one (correct: the worker is single-threaded, and its
+  in-flight ceiling is 8), but it used to emit **nothing at all** during that time — measured: 6 s
+  with zero events while a motion command held the worker
+  (`scripts/probe-twin-pump-stall.mjs`). The client therefore saw an open, quiet stream and kept the
+  last pose forever, indistinguishable from "the robot stopped". It now emits a throttled `stale`
+  event (once per second) while a read is outstanding, plus a `frame-error` if a read exceeds a
+  15 s safety net — either way the connection stays open and the pump keeps going.
+- **Twin reads can no longer destroy the robot session** (`lib/twin-worker.js`, `lib/worker.js`).
+  `UrWorker.call()` kills the Python child when a request exceeds its budget (by design: a
+  single-threaded worker stuck in library code would block everything after it). The twin shared
+  that default 60 s budget *and* the same worker queue as every motion command, so a read that
+  queued behind a long motion timed out and killed the child — taking RTDE and Dashboard with it,
+  after which the twin could never get a pose again. Twin reads now use a dedicated 2.5 s budget
+  with `killOnTimeout: false`: fail this frame fast, keep the session, try again on the next frame.
+  Motion commands keep their own budget and kill-on-timeout behaviour, unchanged.
+- **A temporarily unavailable read degrades to a stale frame instead of "not connected"**
+  (`lib/twin-routes.js`). A worker-busy/timeout failure used to be answered as `connected:false`,
+  which made the client hide the entire 3D view and write "未连接机器人" — exactly the "it synced
+  two moves and then stopped" report. The host now replays the last known reading with
+  `stale: true` (original `ts` preserved so the age keeps growing, window capped at 30 s) and the
+  client keeps the picture and shows the stall. A genuine connection error still reports
+  `connected:false`.
+- **The client stream can no longer be killed by a single bad frame** (`src/client/robot/twin-stream.js`).
+  `EventSource.onerror` *is* the event handler for events named `error`, and server-sent events are
+  dispatched by their `event:` field — so the host's documented "a failed frame emits an `error`
+  event and never tears the stream down" behaved in a real browser as the exact opposite: every bad
+  frame tore the connection down. Measured with a spec-compliant `EventSource`
+  (`scripts/probe-twin-stream-error-event.mjs`): one `error` frame ⇒ the client rebuilt the stream.
+  A server-sent event is now recognised by carrying `data` (a transport error does not), and the
+  host's event is named `frame-error` so the two can never collide again.
+- **The stream never gives up** (`src/client/robot/twin-stream.js`). "8 consecutive reconnect
+  failures ⇒ give up" was a terminal state: no timer, no reconnection, the last frame on screen
+  forever — and real outages (host restart, a minimised window losing the connection, laptop
+  sleep/wake) are exactly "fails a dozen times, then recovers". Reconnection is now unbounded with
+  exponential backoff capped at 30 s, and the backoff only resets on a **real frame** (not on
+  `open`: an endpoint that accepts and sends nothing must not look like a recovery).
+- **The feed's health is visible and self-healing** (`src/client/state.js` exposes
+  `getStreamHealth()` / `retryNow()`; `src/client/twin-panel.js` renders a dedicated HUD row). The
+  panel now says "data stopped updating Ns · retrying" (with the frame/failure counters), reports
+  "reconnecting", retries immediately when the window becomes visible again, and force-rebuilds the
+  channel after 10 s of stall (browser timer throttling can starve a backoff timer).
+- **Worker failures carry machine-readable codes** (`lib/worker.js`): `WORKER_BUSY` /
+  `WORKER_TIMEOUT` / `WORKER_EXITED` / … so the twin can distinguish "we could not get an answer in
+  time" from "the robot is really not connected" without parsing prose.
+
+### Tests
+
+- `twin-routes.test.mjs` — the SSE route had **no test at all**, which is how both the silent-stall
+  and the `error`-name collision stayed green: added frame/heartbeat/405 assertions, "a busy worker
+  emits `stale` (never silence)", the read-timeout safety net, single-flight backpressure, and the
+  stale-degradation policy including its 30 s window.
+- `twin-stream.test.mjs` — the fake `EventSource` now dispatches **per spec** (a server-sent `error`
+  message also hits `onerror`), which is what the old fake could not express; added "never gives up"
+  over 20 consecutive failures, backoff cap/reset rules, and `poke()`.
+- `twin-worker.test.mjs` (new) — the twin's read policy: short budget, `killOnTimeout:false`,
+  `null` worker handling, error codes.
+- `stream-wiring.test.mjs`, `twin-panel.test.mjs` — stale marking from `stale`/`frame-error` events,
+  `getStreamHealth()`, `retryNow()`, the "data stopped updating" row and its forced reconnect.
+- `worker.test.mjs` — `killOnTimeout:false` keeps the child alive; the default still kills it.
+- Diagnostic probes kept in `scripts/` (`probe-twin-pump-stall.mjs`,
+  `probe-twin-stream-error-event.mjs`, `probe-sse-lifetime.mjs`) so the three transport-level
+  questions can be re-answered on a real machine instead of re-derived.
+
 ## [0.6.5] - 2026-10
 
 > This release turns the digital twin from a read-only preview into a bench tool, and replaces the

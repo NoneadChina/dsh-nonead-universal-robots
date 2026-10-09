@@ -48,17 +48,20 @@ Every tool except `connect` takes an `ip` argument and requires that IP to be **
 
 ### Read-only 3D digital twin
 
-The plugin also ships a **read-only 3D digital twin** of the robot, rendered with three.js: the entry is a card in the **right sidebar's Start panel**, directly below the "Workspace files / New terminal / Browser" cards, and selecting it fills the right sidebar's content area with the live 3D view. The view polls a single state source, so it stays in sync with the live robot's **joint poses, tool (TCP) coordinate frame and recent motion trajectory**. The twin is **strictly read-only — it never sends a command to the robot**: it only polls the host's read-only routes and renders what it receives. A toolbar offers a reset-view control plus isometric / front / side / top presets, and the camera and base grid are framed from the model's bounding box, so a UR3 and a UR20 are both framed correctly. The numeric panel also shows the dashboard-side state (safety mode, robot mode, program state, speed scaling, joint temperatures, bus voltage/current), taken from the same route on a slower cadence.
+The plugin also ships a **read-only 3D digital twin** of the robot, rendered with three.js: the entry is a card in the **right sidebar's Start panel**, directly below the "Workspace files / New terminal / Browser" cards, and selecting it fills the right sidebar's content area with the live 3D view. The view subscribes to the host's **SSE stream** (`/twin/stream`, one frame every 100 ms), so it stays in sync with the live robot's **joint poses, tool (TCP) coordinate frame and recent motion trajectory**. The twin is **strictly read-only — it never sends a command to the robot**: it only subscribes to the host's read-only routes and renders what it receives. A toolbar offers a reset-view control plus isometric / front / side / top presets, and the camera and base grid are framed from the model's bounding box, so a UR3 and a UR20 are both framed correctly. The numeric panel also shows the dashboard-side state (safety mode, robot mode, program state, speed scaling, joint temperatures, bus voltage/current), taken from the same route on a slower cadence.
+
+**A stalled feed is shown, never hidden.** The twin and every motion command share one (single-threaded) worker, so while the robot is moving the twin's reads queue behind the motion: the stream then emits `stale` events and the panel says "data stopped updating Ns · retrying" instead of leaving a silently frozen arm on screen. Twin reads use a dedicated **2.5 s budget with `killOnTimeout:false`** — a read-only visualisation read must never destroy the robot session (RTDE/Dashboard) just because it was busy. After a disconnect the stream reconnects indefinitely (exponential backoff capped at 30 s) and retries immediately when the window becomes visible again or the feed has been stalled too long.
 
 Host-side routes (all fenced to loopback callers):
 
 | Route | Description |
 |---|---|
+| `GET /dsh-nonead-ur/twin/stream[?ip=<ip>]` | **SSE stream** (what the client uses by default): one full state frame every 100 ms, plus `stale` (this frame's read has not returned yet) and `frame-error` (this frame failed) events |
 | `GET /dsh-nonead-ur/twin/state[?ip=<ip>][&detail=1]` | Live pose (joint angles / TCP / model). `detail=1` adds the dashboard-side state (safety mode, run state, speed scaling, joint temperatures/currents); the pose channel keeps polling independently and a failing detail query never takes it down |
 | `GET /dsh-nonead-ur/twin/asset?model=<urXX>` | GLB mesh, with a content-hash `ETag` + `immutable` and `If-None-Match` → 304 support |
 | `GET /dsh-nonead-ur/twin/models` | The model list actually present locally |
 
-Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_connected` / `ambiguous_robot` / `worker_unavailable` / `robot_error`) and echo the resolved `ip`, so the UI can say which of four very different failures happened (it used to render one "not connected" line for all of them).
+Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_connected` / `ambiguous_robot` / `worker_unavailable` / `robot_error`) and echo the resolved `ip`, so the UI can say which of four very different failures happened (it used to render one "not connected" line for all of them). A read that is only **temporarily** unavailable (most often: the worker is busy executing a motion command) is *not* reported as `robot_error`: the host replays the last known reading with `stale:true` (for up to 30 s), so the twin keeps its picture and says the data is stale.
 
 ---
 
@@ -72,7 +75,7 @@ Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_c
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.6.5"
+       "dsh-nonead-universal-robots": "^0.6.6"
      },
      "dsh": {
        "profile": {
@@ -135,7 +138,7 @@ Verify the plugin and Python runtime without touching a real robot:
 
 ```sh
 npm run test:python   # python ur_worker.py --selfcheck: verify Python/numpy/paramiko/URBasic/RTDE config
-npm test              # run all 22 test files AND every check gate (see below), then summarise
+npm test              # run all 36 test files AND every check gate (see below), then summarise
 npm run test:node     # Node-side only: skips the test files *and* the gates that need Python
 npm run check         # all static + cross-language gates without running the test files
 npm run verify:host   # validate every tool schema through the host's real value-schema DSL, plus peer ranges
@@ -144,7 +147,7 @@ npm run verify:models # validate the structural contract of the 14 GLBs
 
 `npm test` runs two kinds of thing, and both must pass:
 
-- **22 test files** under `test/` (e2e protocol self-check, approval gate, twin routes, client
+- **36 test files** under `test/` (e2e protocol self-check, approval gate, twin routes, client
   state machine, FK, vendored-library regressions) — enumerated from `test/test-manifest.json`,
   which `check:manifest` keeps honest so a Python-using file can never be silently unlisted.
 - **10 check gates**: `check-test-manifest` / `check-package-metadata` / `check-client-bundle` /
@@ -247,7 +250,7 @@ This plugin shares the same ancestry as Nonead's [`Nonead-Universal-Robots-MCP`]
 - **Joint current** — the current RTDE recipe does not expose per-joint current directly, so `ur_get_joint_current` is not provided (the reference implementation's version of this tool has a value bug; this implementation does not carry it over).
 - **Threading / cancel** — motion commands poll until arrival within `commandTimeoutMs`; for long trajectories, remind the model in the prompt to set a reasonable timeout or split the motion into steps.
 - **Not a safety boundary** — this plugin is on par with the `bash` tool and can drive physical equipment; test thoroughly on a real robot before production use.
-- **Package size** — the published package is about **35 MB**, almost entirely the **14 `assets/models/*.glb`** meshes; the plugin's own code adds only a few hundred KB. If size matters for your deployment, regenerate a subset with `python scripts/convert-meshes.py --only <model…>`.
+- **Package size** — the published package is about **21 MB**, almost entirely the **14 `assets/models/*.glb`** meshes; the plugin's own code adds only a few hundred KB. The meshes are down from the converter's raw 35.11 MB in two reproducible steps (`node scripts/compress-models.mjs`, plus `npm run analyze:models` to see where the bytes go): a **lossless** pass to 28.27 MB (`uint32` → `uint16` indices — the largest index in these models is only 24228 — plus dropping the non-standard `_color` attribute no material reads; vertex positions, UVs, textures and the index sequence stay byte-for-byte/value-for-value identical, and the script proves it before writing), then a **lossy, explicitly decided** pass to 20.86 MB that box-filters the **eight** 2048×2048 base-colour PNGs embedded by the five newer models (ur15 ×1, ur18 ×2, ur20 ×1, ur30 ×2, ur8long ×2) down to 1024×1024 (`--texture-size 1024`). The twin panel is only a few hundred pixels wide, and a same-region 1:1 comparison shows no visible difference. Geometry precision is untouched (Ruling 24); `test/model-contract.test.mjs` guards the resulting size band. To drop whole models instead, regenerate a subset with `python scripts/convert-meshes.py --only <model…>`.
 - **Unknown models fall back** — a robot whose model has no bundled mesh (unknown or customized model string) is rendered with **approximate geometry instead of failing**; the twin never errors out on an unknown model.
 - **Asset pipeline** — the meshes are generated by `python scripts/convert-meshes.py` and their structure contract (7 named nodes per GLB, embedded textures) is validated by `python scripts/verify-models.py` (also exposed as `npm run verify:models`).
 
@@ -255,7 +258,7 @@ This plugin shares the same ancestry as Nonead's [`Nonead-Universal-Robots-MCP`]
 
 ## Third-party assets & licensing
 
-Beyond its own code, this package distributes 14 robot meshes under `assets/models/*.glb` (≈35 MB) plus `assets/kinematics.json`, all derived from Universal Robots' [`Universal_Robots_ROS2_Description`](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description) (branch `humble`, fetched 2026-09-21).
+Beyond its own code, this package distributes 14 robot meshes under `assets/models/*.glb` (≈21 MB) plus `assets/kinematics.json`, all derived from Universal Robots' [`Universal_Robots_ROS2_Description`](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description) (branch `humble`, fetched 2026-09-21).
 
 Two licence regimes apply, split by model, and they are never mixed within a model:
 

@@ -42,17 +42,20 @@
 
 ### 只读 3D 数字孪生
 
-插件还内置机器人的**只读 3D 数字孪生**（three.js 渲染）：入口是**右侧栏**「开始」面板里的一张卡片，位置在「工作区文件 / 新建终端 / 浏览器」三张卡片下面；点击后 3D 视图占满右侧栏的内容区。视图轮询同一份状态源，始终与真机同步显示**关节姿态、TCP 坐标系与近期运动轨迹**。数字孪生**严格只读，绝不下发任何机器人指令**——它只轮询 host 的只读路由并渲染收到的数据。工具栏提供「重置视角」与等轴测/前视/侧视/俯视四个预设，且相机与基座网格按模型包围盒取景 —— UR3 与 UR20 都能正确入画。数值面板还会显示 dashboard 侧状态（安全模式、机器人模式、程序状态、速度倍率、关节温度、母线电压电流），同样走这条路由、按较慢的节拍取。
+插件还内置机器人的**只读 3D 数字孪生**（three.js 渲染）：入口是**右侧栏**「开始」面板里的一张卡片，位置在「工作区文件 / 新建终端 / 浏览器」三张卡片下面；点击后 3D 视图占满右侧栏的内容区。视图订阅宿主的 **SSE 实时流**（`/twin/stream`，100 ms 一帧），始终与真机同步显示**关节姿态、TCP 坐标系与近期运动轨迹**。数字孪生**严格只读，绝不下发任何机器人指令**——它只订阅 host 的只读路由并渲染收到的数据。工具栏提供「重置视角」与等轴测/前视/侧视/俯视四个预设，且相机与基座网格按模型包围盒取景 —— UR3 与 UR20 都能正确入画。数值面板还会显示 dashboard 侧状态（安全模式、机器人模式、程序状态、速度倍率、关节温度、母线电压电流），同样走这条路由、按较慢的节拍取。
+
+**数据停滞会被如实显示**：孪生与运动指令共用同一条（单线程的）worker，机器人运动时孪生的读要排队 —— 这时流里会推 `stale` 事件、面板上写出「数据已停止更新 Ns · 正在重试」，而不是让画面静静冻住。孪生的读只带 **2.5 s 的专用预算且超时不杀 worker**：一条只读可视化读**绝不能**把整条机器人会话（RTDE/Dashboard）带走。断线后无限重连（指数退避封顶 30 s），窗口重新可见或停滞过久时立即重试。
 
 host 侧路由（均限定 loopback 调用方）：
 
 | 路由 | 说明 |
 |---|---|
+| `GET /dsh-nonead-ur/twin/stream[?ip=<ip>]` | **SSE 实时流**（客户端默认走这条）：每 100 ms 一帧完整状态快照，另有 `stale`（这一帧读还没回来）与 `frame-error`（这一帧失败）事件 |
 | `GET /dsh-nonead-ur/twin/state[?ip=<ip>][&detail=1]` | 实时位姿（关节角 / TCP / 型号）。`detail=1` 附带 dashboard 侧状态（安全模式、运行状态、速度倍率、关节温度/电流等），位姿通道仍独立轮询，detail 失败不影响位姿 |
 | `GET /dsh-nonead-ur/twin/asset?model=<urXX>` | GLB 网格，带内容哈希 `ETag` + `immutable`，支持 `If-None-Match` → 304 |
 | `GET /dsh-nonead-ur/twin/models` | 本地实际存在的模型清单 |
 
-失败响应带**机器可读的 `code`**（`no_robot` / `robot_not_connected` / `ambiguous_robot` / `worker_unavailable` / `robot_error`）并回显本次解析到的 `ip`，界面据此给出不同的提示与处置建议（以前四种完全不同的故障都渲染成同一句「未连接机器人」）。
+失败响应带**机器可读的 `code`**（`no_robot` / `robot_not_connected` / `ambiguous_robot` / `worker_unavailable` / `robot_error`）并回显本次解析到的 `ip`，界面据此给出不同的提示与处置建议（以前四种完全不同的故障都渲染成同一句「未连接机器人」）。读**暂时**拿不到（worker 正忙着执行运动指令是最常见的原因）时不会报 `robot_error`：宿主回放最后一笔已知读数并标记 `stale:true`（最多 30 s），孪生保留画面并显示停滞提示。
 
 ---
 
@@ -66,7 +69,7 @@ host 侧路由（均限定 loopback 调用方）：
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.6.5"
+       "dsh-nonead-universal-robots": "^0.6.6"
      },
      "dsh": {
        "profile": {
@@ -127,7 +130,7 @@ pip install -r requirements.txt
 
 ```sh
 npm run test:python   # python ur_worker.py --selfcheck：校验 Python/numpy/paramiko/URBasic/RTDE 配置
-npm test              # 跑全部 22 个测试文件 **以及全部门禁脚本**，最后汇总
+npm test              # 跑全部 36 个测试文件 **以及全部门禁脚本**，最后汇总
 npm run test:node     # 只跑 Node 侧：跳过需要 Python 的测试文件**与门禁**
 npm run check         # 只跑静态 + 跨语言门禁，不跑测试文件
 npm run verify:host   # 用宿主真实的 schema DSL 校验全部工具注册与 peer 版本
@@ -136,7 +139,7 @@ npm run verify:models # 校验 14 个 GLB 的结构契约
 
 `npm test` 跑两类东西，两类都必须过：
 
-- **22 个测试文件**（端到端协议自检、审批门禁、孪生路由、客户端状态机、FK、vendored 库回归）。
+- **36 个测试文件**（端到端协议自检、审批门禁、孪生路由、客户端状态机、FK、vendored 库回归）。
   名单来自 `test/test-manifest.json`，并由 `check:manifest` 保证"会调用 Python 的用例"不会被漏登记。
 - **10 个门禁脚本**：`check-test-manifest` / `check-package-metadata` / `check-client-bundle` /
   `check-doc-tools`（Node），以及 `check-worker-ops` / `check-tool-params` / `check-rtde-recipe` /
@@ -235,7 +238,7 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 - **关节电流**：当前 RTDE 配方未直接暴露单关节电流，故未提供 `ur_get_joint_current`（参考实现中的该工具存在取值错误，本实现未沿用）。
 - **线程/取消**：运动指令为阻塞到位的轮询，`commandTimeoutMs` 内完成；对长时间轨迹，请在描述中提醒模型设置合理超时或分步执行。
 - **非安全边界**：此插件与 bash 工具同级，可驱动物理设备，务必在真实机器人上充分测试后再用于生产。
-- **包体积**：发布包约 **35 MB**，几乎全部来自 **14 个 `assets/models/*.glb`** 网格；插件自身代码只有数百 KB。若部署在意体积，可用 `python scripts/convert-meshes.py --only <型号…>` 只重新生成需要的子集。
+- **包体积**：发布包约 **21 MB**，几乎全部来自 **14 个 `assets/models/*.glb`** 网格；插件自身代码只有数百 KB。网格从转换脚本的原始 35.11 MB 经两步可复现瘦身（`node scripts/compress-models.mjs`；`npm run analyze:models` 可看体积构成）：先**无损**降到 28.27 MB（索引 `uint32` → `uint16` —— 这 14 个型号最大索引值仅 24228 —— 并删掉没有任何材质读取的非标准属性 `_color`；顶点位置、UV、贴图与索引序列**逐字节/逐值不变**，脚本在写盘前自证），再经一次**明确决策的有损**处理降到 20.86 MB：5 个新型号里**共 8 张** 2048×2048 底色 PNG（ur15 ×1、ur18 ×2、ur20 ×1、ur30 ×2、ur8long ×2）用块平均降到 1024×1024（`--texture-size 1024`）。孪生面板实际只有几百像素宽，同区域 1:1 对比看不出差别。几何精度未动（Ruling 24）；`test/model-contract.test.mjs` 守住体积区间。若只想砍掉整个型号，可用 `python scripts/convert-meshes.py --only <型号…>` 重新生成子集。
 - **未知型号回退**：若某机器人没有内置网格（未知或定制型号字符串），会**回退到近似几何体渲染而不报错**，数字孪生不会因未知型号失败。
 - **资产管线**：网格由 `python scripts/convert-meshes.py` 生成，其结构契约（每个 GLB 含 7 个固定命名节点、贴图内嵌）由 `python scripts/verify-models.py` 校验（也暴露为 `npm run verify:models`）。
 
@@ -243,7 +246,7 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 
 ## 第三方资产与许可
 
-除插件自身代码外，本包还随附 14 个机器人网格 `assets/models/*.glb`（约 35 MB）与 `assets/kinematics.json`，全部派生自 Universal Robots 的 [`Universal_Robots_ROS2_Description`](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description)（`humble` 分支，获取日期 2026-09-21）。
+除插件自身代码外，本包还随附 14 个机器人网格 `assets/models/*.glb`（约 21 MB）与 `assets/kinematics.json`，全部派生自 Universal Robots 的 [`Universal_Robots_ROS2_Description`](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description)（`humble` 分支，获取日期 2026-09-21）。
 
 许可按型号分为两类，同一型号内不会混用：
 
