@@ -741,3 +741,79 @@ test('★ 背压：同一时刻只有一帧读在飞（绝不向单线程 worker
   req.close();
 });
 
+// ── 主动推送遥测：机器人运动期间孪生不再断流 ────────────────────────────────
+//
+// 背景：Python worker 是单线程 stdin 队列，运动命令（`_movej_confirm` / `_wait_robot_idle`
+// 那类确认循环）会占住它几十秒，孪生的读排在后面并超时 —— 用户看到的是「数据已停止更新
+// Ns · 正在重试」。现在 worker 主动推送 RTDE 缓存里的姿态（见 lib/worker.js 的 `_onPush`），
+// 孪生优先读它，于是每一帧**零 worker 往返**。
+
+test('★ 新鲜的主动推送让孪生帧完全绕开 worker（运动时唯一还通的路）', async () => {
+  let workerCalls = 0;
+  const countingWorker = {
+    call: async () => {
+      workerCalls += 1;
+      throw new Error('运动期间这次读会排在运动命令后面并超时；新鲜推送时本就不该调用它');
+    },
+  };
+  const now = 1_700_000_000_000;
+  const handler = createTwinStateHandler({
+    worker: countingWorker,
+    connectedIps: () => new Set(['1.2.3.4']),
+    modelFor: () => 'UR3',
+    now: () => now,
+    telemetry: (ip) => (ip === '1.2.3.4'
+      ? { at: now - 20, ts: now - 20, q: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], tcp: [0.3, 0, 0.5, 0, 0, 0] }
+      : undefined),
+  });
+
+  const result = await handler({ ip: '1.2.3.4' });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.body.connected, true);
+  assert.deepEqual(result.body.q, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+  assert.deepEqual(result.body.tcp, [0.3, 0, 0.5, 0, 0, 0]);
+  assert.equal(result.body.ts, now - 20, 'ts 必须是采样时刻，而不是推送到达的时刻');
+  assert.equal(workerCalls, 0, '新鲜推送时一次 worker 往返都不该发生');
+});
+
+test('推送过期就回退到显式读（陈旧缓存绝不冒充实时读数）', async () => {
+  let workerCalls = 0;
+  const now = 1_700_000_000_001;
+  const handler = createTwinStateHandler({
+    worker: {
+      call: async (op, params) => {
+        workerCalls += 1;
+        return {
+          get_joint_pose: { message: '', data: { joint_positions: [1, 1, 1, 1, 1, 1], ip: params?.ip } },
+          get_tcp_pose: { message: '', data: { tcp_pose: [0, 0, 1, 0, 0, 0], ip: params?.ip } },
+        }[op];
+      },
+    },
+    connectedIps: () => new Set(['1.2.3.4']),
+    modelFor: () => 'UR3',
+    now: () => now,
+    telemetry: () => ({ at: now - 5000, ts: now - 5000, q: [9, 9, 9, 9, 9, 9], tcp: [9, 9, 9, 9, 9, 9] }),
+  });
+
+  const result = await handler({ ip: '1.2.3.4' });
+
+  assert.deepEqual(result.body.q, [1, 1, 1, 1, 1, 1], '过期推送不得被当成实时读数');
+  assert.equal(result.body.ts, now, '这一帧是现读的，ts 用读取时刻');
+  assert.ok(workerCalls >= 2, '过期时必须回退到真实读');
+});
+
+test('推送读取抛错时静默降级到显式读（遥测是加分项，不能弄坏查询）', async () => {
+  const handler = createTwinStateHandler({
+    worker,
+    connectedIps: () => new Set(['1.2.3.4']),
+    modelFor: () => 'UR3',
+    telemetry: () => { throw new Error('推送缓存坏了') },
+  });
+
+  const result = await handler({ ip: '1.2.3.4' });
+
+  assert.equal(result.body.connected, true);
+  assert.deepEqual(result.body.q, [0, 0, 0, 0, 0, 0]);
+});
+

@@ -48,6 +48,13 @@ for line in sys.stdin:
         sys.exit(3)
     elif op == "hang":
         time.sleep(30)
+    elif op == "push":
+        # 先推一行**没有 id** 的主动推送（模拟孪生遥测），再回一条正常响应。
+        sys.stdout.write(json.dumps({"push": "telemetry", "ip": "1.2.3.4", "ts": 111,
+                                     "data": {"q": [1, 2, 3, 4, 5, 6], "tcp": [0, 0, 1, 0, 0, 0]}}) + "\\n")
+        sys.stdout.flush()
+        sys.stdout.write(json.dumps({"id": req["id"], "ok": True, "data": {"pushed": True}}) + "\\n")
+        sys.stdout.flush()
 `
 
 /** 建一个带假 worker 的临时 pythonDir，返回 { dir, worker() , cleanup() }。 */
@@ -264,4 +271,51 @@ test('契约：默认退避为 500 ms（与「自杀后约 0.5 s 换新进程」
   assert.equal(worker.restartDelayMs, 500)
   assert.equal(worker.commandTimeoutMs, 60000)
   assert.equal(worker.maxInFlight, 8)
+})
+
+// ── 主动推送遥测（孪生"完整跟随机器人动作"的通道）──────────────────────────
+//
+// worker 现在会主动推**没有 id** 的协议行（见 python/ur_worker.py 的 `_twin_push_loop`）。
+// 这一层必须把它当推送处理，而不是"一条匹配不上的响应"：后者会丢掉唯一能在运动期间
+// 继续更新的遥测来源。
+
+test('★ 主动推送行写入遥测缓存，且不会被记成「无法匹配的响应」', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await worker.call('push', {})
+
+    const telemetry = worker.latestTelemetry('1.2.3.4')
+    assert.ok(telemetry, '推送行必须写入遥测缓存')
+    assert.deepEqual(telemetry.q, [1, 2, 3, 4, 5, 6])
+    assert.deepEqual(telemetry.tcp, [0, 0, 1, 0, 0, 0])
+    assert.equal(telemetry.ts, 111, 'ts 用推送行自带的采样时刻')
+
+    const stats = worker.stats()
+    assert.equal(stats.unknownResponses, 0, '推送行不能被计成无法匹配的响应')
+    assert.equal(stats.droppedLines, 0, '推送行是合法 JSON，不能被记成噪声')
+    assert.ok(stats.pushed >= 1, '推送计数应增加')
+    assert.deepEqual(stats.telemetryIps, ['1.2.3.4'])
+
+    // 关节角不足 6 维的推送必须被丢弃：半截姿态会把机械臂画歪。
+    worker._onLine(JSON.stringify({
+      push: 'telemetry', ip: '1.2.3.4', ts: 222, data: { q: [1, 2], tcp: [0, 0, 1, 0, 0, 0] },
+    }))
+    assert.equal(worker.latestTelemetry('1.2.3.4').ts, 111, '不完整的推送不得覆盖上一笔好读数')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('dispose() 清空遥测缓存（不给已死会话留姿态）', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await worker.call('push', {})
+    assert.ok(worker.latestTelemetry('1.2.3.4'))
+    worker.dispose()
+    assert.equal(worker.latestTelemetry('1.2.3.4'), undefined)
+  } finally {
+    fixture.cleanup()
+  }
 })
