@@ -118,6 +118,13 @@ def err(message, code=None, data=None):
 # corrupt the response channel: URBasic (rtde.py, urScript.py, dashboard.py,
 # ...) prints diagnostic lines to stdout that are not part of the protocol.
 _PROTOCOL_OUT = sys.stdout
+
+# 协议行（响应 + 主动推送）的写入锁。
+#
+# 孪生遥测现在由后台线程**主动推送**（见 `_twin_push_loop`），它会与主线程的
+# `respond()` 并发写同一个 stdout。少了这把锁，两条 JSON 行会交错甚至互相截断，
+# Node 侧 readline 于是拿到无法解析的行 —— 表现为孪生随机丢帧、请求莫名超时。
+_PROTOCOL_LOCK = threading.Lock()
 _LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ur_worker.log")
 
 # 日志上限：一份现役 + 一份滚动的旧文件，磁盘占用因此被钳在 ~2×上限。
@@ -3535,6 +3542,19 @@ HANDLERS = {
 }
 
 
+def _write_protocol_line(body):
+    """写一行协议 JSON —— 响应与主动推送共用，必须整行原子（见 `_PROTOCOL_LOCK`）。"""
+    line = (body + "\n").encode("utf-8")
+    with _PROTOCOL_LOCK:
+        buf = getattr(_PROTOCOL_OUT, "buffer", None)
+        if buf is not None:
+            buf.write(line)
+            buf.flush()
+        else:
+            _PROTOCOL_OUT.write(line.decode("utf-8"))
+            _PROTOCOL_OUT.flush()
+
+
 def respond(payload):
     # Write UTF-8 bytes on the raw buffer so locale text encodings (e.g. GBK on
     # Chinese Windows) can never corrupt or reject the JSON. Node's readline
@@ -3545,14 +3565,81 @@ def respond(payload):
     # 是静默丢弃的，调用方只会看到一句笼统的 "timed out"。宁可在这里大声失败
     # （由 main() 的 except 兜住并回报一个可读错误）。
     body = json.dumps(payload, ensure_ascii=False, default=_json_default, allow_nan=False)
-    line = (body + "\n").encode("utf-8")
-    buf = getattr(_PROTOCOL_OUT, "buffer", None)
-    if buf is not None:
-        buf.write(line)
-        buf.flush()
-    else:
-        _PROTOCOL_OUT.write(line.decode("utf-8"))
-        _PROTOCOL_OUT.flush()
+    _write_protocol_line(body)
+
+
+# ---------------------------------------------------------------------------
+# 孪生遥测主动推送 —— 数字孪生"完整跟随机器人动作"的关键
+# ---------------------------------------------------------------------------
+#
+# 为什么必须有：本 worker 是单线程 stdin 队列，运动类工具（`_movej_confirm` /
+# `_wait_robot_idle` 的确认循环）会一直占着它，孪生的读因此排在后面并超时 ——
+# 用户看到的是「数据已停止更新 Ns」。但遥测数据本身**从来没有停过**：RTDE 由
+# URBasic 的后台线程以 500 Hz 持续写入 `model.dataDir`，读它与 stdin 队列无关。
+#
+# 所以遥测改由这里**主动推送**：推送行不带 `id`，与"请求/响应"天然区分，旧宿主
+# 只会把它记成一条无法匹配的响应（无副作用），因此协议向后兼容。
+
+# 推送节拍：孪生 SSE 每 100 ms 一帧，20 Hz 足够让每一帧都拿到新鲜读数。
+TWIN_PUSH_INTERVAL_S = 0.05
+
+# 推送线程开关（诊断可用 DSH_UR_TWIN_PUSH=0 关掉，便于对比"有没有推送"的行为差异）。
+TWIN_PUSH_DISABLED = os.environ.get("DSH_UR_TWIN_PUSH", "").strip().lower() in ("0", "off", "false", "no")
+
+
+def _twin_push_snapshot(ip):
+    """只读 RTDE 接收缓存，返回 ``{"q": […6], "tcp": […6]}``；拿不到就返回 None。
+
+    **绝不走命令队列、绝不做网络往返**：这正是它能在机器人运动期间继续出数的原因。
+    字段优先取原始 RTDE 数据（`_rtde_field`，零往返），缺失时回退到 URBasic 访问器。
+    """
+    robot = ROBOTS.get(ip)
+    if robot is None:
+        return None
+    model = ROBOT_MODELS.get(ip)
+    q = _rtde_field(model, "actual_q") if model is not None else None
+    tcp = _rtde_field(model, "actual_TCP_pose") if model is not None else None
+    if q is None:
+        try:
+            q = robot.get_actual_joint_positions()
+        except Exception:
+            return None
+    if tcp is None:
+        try:
+            tcp = robot.get_actual_tcp_pose()
+        except Exception:
+            return None
+    try:
+        q = [float(x) for x in q]
+        tcp = [float(x) for x in tcp]
+    except Exception:
+        return None
+    if len(q) < 6 or len(tcp) < 6:
+        return None
+    return {"q": q[:6], "tcp": tcp[:6]}
+
+
+def _twin_push_loop():
+    """后台推送线程：周期性把每台已连接机器人的姿态写成一行协议 JSON。
+
+    行里**没有 `id`** —— 这是与响应区分开的唯一标志，Node 侧据此把它当推送处理
+    （见 lib/worker.js 的 `_onLine`）。任何异常都不允许打死这条线程，更不允许影响主协议。
+    """
+    while True:
+        time.sleep(TWIN_PUSH_INTERVAL_S)
+        try:
+            for ip in list(ROBOTS.keys()):
+                snapshot = _twin_push_snapshot(ip)
+                if snapshot is None:
+                    continue
+                _write_protocol_line(json.dumps({
+                    "push": "telemetry",
+                    "ip": ip,
+                    "ts": int(time.time() * 1000),
+                    "data": snapshot,
+                }, ensure_ascii=False, default=_json_default, allow_nan=False))
+        except Exception:
+            continue
 
 
 def selfcheck():
@@ -3602,6 +3689,10 @@ def selfcheck():
 
 def main():
     global _CURRENT_REQUEST_ID, _CURRENT_TIMEOUT_MS
+    # 孪生遥测的推送线程：与运动命令**并行**（RTDE 缓存由 URBasic 自己的接收线程更新），
+    # 所以机器人运动期间孪生照样有数据。daemon=True：主线程退出即随之结束。
+    if not TWIN_PUSH_DISABLED:
+        threading.Thread(target=_twin_push_loop, name="twin-push", daemon=True).start()
     for line in sys.stdin:
         line = line.strip()
         if not line:
