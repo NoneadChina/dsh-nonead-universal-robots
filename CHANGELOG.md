@@ -2,6 +2,37 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.6.7] - Unreleased
+
+> **The digital twin no longer sits on "data stopped updating Ns".** 0.6.6 made a stall *visible*;
+> this release makes it *not happen*: telemetry went from "the twin asks" to "the worker pushes".
+
+### Fixed — the twin keeps following the robot while it moves (pushed telemetry)
+
+- **Root cause**: the twin's reads and every motion command share one **single-threaded stdin queue**
+  (`for line in sys.stdin` in `python/ur_worker.py`), and the motion confirmation loops
+  (`_movej_confirm` / `_movel_confirm` / `_wait_robot_idle`, 60 s budget) hold it for tens of seconds,
+  so a read simply queues until its 2.5 s budget expires. **The data itself never stopped**: RTDE is
+  written at 500 Hz by URBasic's own receiver thread into `model.dataDir`, which has nothing to do with
+  the command queue.
+- **Fix**: the worker now runs a 20 Hz background thread (`_twin_push_snapshot` + `_twin_push_loop`) that
+  **pushes** joint angles and TCP as a JSON line **without `id`**; the host's `_onLine` recognises it
+  *before* matching responses by id and stores it in a `latestTelemetry` cache; every twin frame reads
+  that cache first (**zero worker round trips**) and only falls back to an explicit read when it is older
+  than 300 ms or missing.
+- **Wire compatibility**: the absent `id` is the only marker — an older host just records it as an
+  unmatched response, with no side effects.
+- **One write lock for pushes and responses** (`_PROTOCOL_LOCK`): concurrent writes to stdout that are
+  not line-atomic interleave two JSON lines, which shows up as randomly dropped frames and odd timeouts.
+- **Strict validation**: a push whose joint angles or TCP are not 6-dimensional is **dropped outright**,
+  never allowed to overwrite a good reading with half a pose (the arm would visibly jump).
+- **Off switch**: `DSH_UR_TWIN_PUSH=0` disables the push channel for comparison (the twin then falls back
+  to the 0.6.6 "read + stale" behaviour).
+- **Evidence**: new `scripts/probe-twin-push-continuity.mjs` — with a fake worker whose `call()` never
+  settles (precisely "the queue is occupied"): **with push: 20 frames, max frame gap 112 ms; without push:
+  only 3 `stale` events.** Five regression cases cover push-priority, staleness fallback, error fallback,
+  push lines not counted as unmatched responses, and cache clearing on dispose.
+
 ## [0.6.6] - Unreleased
 
 > Code comments below refer to this unreleased change as `0.6.6`; `package.json` is **already 0.6.6**,

@@ -50,7 +50,7 @@ Every tool except `connect` takes an `ip` argument and requires that IP to be **
 
 The plugin also ships a **read-only 3D digital twin** of the robot, rendered with three.js: the entry is a card in the **right sidebar's Start panel**, directly below the "Workspace files / New terminal / Browser" cards, and selecting it fills the right sidebar's content area with the live 3D view. The view subscribes to the host's **SSE stream** (`/twin/stream`, one frame every 100 ms), so it stays in sync with the live robot's **joint poses, tool (TCP) coordinate frame and recent motion trajectory**. The twin is **strictly read-only — it never sends a command to the robot**: it only subscribes to the host's read-only routes and renders what it receives. A toolbar offers a reset-view control plus isometric / front / side / top presets, and the camera and base grid are framed from the model's bounding box, so a UR3 and a UR20 are both framed correctly. The numeric panel also shows the dashboard-side state (safety mode, robot mode, program state, speed scaling, joint temperatures, bus voltage/current), taken from the same route on a slower cadence.
 
-**A stalled feed is shown, never hidden.** The twin and every motion command share one (single-threaded) worker, so while the robot is moving the twin's reads queue behind the motion: the stream then emits `stale` events and the panel says "data stopped updating Ns · retrying" instead of leaving a silently frozen arm on screen. Twin reads use a dedicated **2.5 s budget with `killOnTimeout:false`** — a read-only visualisation read must never destroy the robot session (RTDE/Dashboard) just because it was busy. After a disconnect the stream reconnects indefinitely (exponential backoff capped at 30 s) and retries immediately when the window becomes visible again or the feed has been stalled too long.
+**The feed no longer stalls while the robot moves (0.6.7).** Telemetry is now **pushed by the worker** at 20 Hz, and every twin frame reads that push cache first — **without touching the single-threaded command queue**. While the robot is moving, what the motion confirmation loops (`_movej_confirm` and friends) occupy is the command queue, whereas the RTDE cache keeps being updated by URBasic's own receiver thread, so the pushes keep arriving. On the wire a push is simply a JSON line **without `id`**, so an older host treats it as an unmatched response and nothing breaks. Only when the cache is stale (>300 ms) or missing does the twin fall back to an explicit read, and twin reads still use a dedicated **2.5 s budget with `killOnTimeout:false`** — a read-only visualisation read must never destroy the robot session (RTDE/Dashboard) just because it was busy. If a stall does happen, the stream still emits `stale` events and the panel says "data stopped updating Ns · retrying" rather than leaving a silently frozen arm on screen. After a disconnect the stream reconnects indefinitely (exponential backoff capped at 30 s) and retries immediately when the window becomes visible again or the feed has been stalled too long. Set `DSH_UR_TWIN_PUSH=0` to turn the push channel off for comparison.
 
 Host-side routes (all fenced to loopback callers):
 
@@ -75,7 +75,7 @@ Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_c
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.6.6"
+       "dsh-nonead-universal-robots": "^0.6.7"
      },
      "dsh": {
        "profile": {
