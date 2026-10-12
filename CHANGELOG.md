@@ -2,7 +2,7 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
-## [0.6.8] - Unreleased
+## [0.6.8] - 2026-10-12
 
 > **The twin now follows the desktop app's colour theme.** The DOM half flips with the host's design
 > tokens and the WebGL half is repainted by JS; two token names that do not exist in the DSH design
@@ -32,7 +32,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
   fall back to the system preference, the observer fires and unsubscribes, the CSS references only
   real tokens).
 
-## [0.6.7] - Unreleased
+## [0.6.7] - 2026-10-10
 
 > **The digital twin no longer sits on "data stopped updating Ns".** 0.6.6 made a stall *visible*;
 > this release makes it *not happen*: telemetry went from "the twin asks" to "the worker pushes".
@@ -63,7 +63,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
   only 3 `stale` events.** Five regression cases cover push-priority, staleness fallback, error fallback,
   push lines not counted as unmatched responses, and cache clearing on dispose.
 
-## [0.6.6] - Unreleased
+## [0.6.6] - 2026-10-8
 
 > Code comments below refer to this unreleased change as `0.6.6`; `package.json` is **already 0.6.6**,
 > but nothing is published yet — the profile still installs `#086d365` (0.6.5) from GitHub, so the ref
