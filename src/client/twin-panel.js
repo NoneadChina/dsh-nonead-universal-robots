@@ -78,6 +78,7 @@ import { fkChain } from './robot/fk.js'
 import { interpolateAt } from './robot/interpolate.js'
 import { pushSample, trajectoryColors, trajectoryCsv, trajectoryPoints } from './robot/trajectory.js'
 import { injectStyles } from './styles.js'
+import { isDarkTheme, observeTheme, twin3dPalette } from './theme.js'
 import { activeStrings } from './strings.js'
 
 /**
@@ -869,7 +870,9 @@ export function mountTwinPanel({
   function ensureScene() {
     if (sceneHandle || sceneUnavailable) return sceneHandle
     try {
-      sceneHandle = sceneFactory(canvas) ?? {}
+      // 场景按**当前主题**建（浅色主题下原来的深色网格会糊成一片，见 theme.js）；
+      // 此后主题再变由 observeTheme 调 `applyTheme` 重刷。
+      sceneHandle = sceneFactory(canvas, { palette: twin3dPalette(isDarkTheme(doc)) }) ?? {}
     } catch (e) {
       // 没有 WebGL（或在构造中抛错）时**不能**让异常变成未处理的 promise rejection：
       // 那样 `handle` 永远是 null，状态行会永久停在「正在加载模型…」而画布一片空白。
@@ -982,6 +985,21 @@ export function mountTwinPanel({
   // 注册点必须在 `onVisibility` 初始化之后（同一作用域里提前读 const 会命中 TDZ）。
   win?.addEventListener?.('visibilitychange', onVisibility)
 
+  /*
+   * 主题跟随（0.6.8）：DOM 部分由 CSS 的 `--dsw-alias-*` token 自动翻转，但 WebGL 画布里的
+   * 网格线色与回退臂材质色是写进几何体/材质的**数值** —— 只能由这里在主题切换时自己重刷。
+   * 观察器建在挂载作用域而不是 `ensureScene()` 里：场景是懒建的，先建观察器才能保证"场景
+   * 建出来的那一刻用的就是当时的主题"。
+   */
+  const unobserveTheme = observeTheme((dark) => {
+    try {
+      sceneHandle?.applyTheme?.(twin3dPalette(dark))
+    } catch {
+      /* 重刷失败只影响配色，不得影响面板其余功能 */
+    }
+    invalidate()
+  }, doc)
+
   /* ---------------- 数据通道看门狗 ---------------- */
 
   /**
@@ -1081,6 +1099,8 @@ export function mountTwinPanel({
       // 否则未知型号会退化成 UR3 量级（清单第 14 条）。
       next = await modelLoader(rawModel, {
         armLinks: linkLengthsFromKinematics(resolveKinematics(rawModel)?.links) ?? undefined,
+        // 回退臂的材质色同样跟随主题：浅色主题下原来的灰蓝在浅底上几乎看不清（见 theme.js）。
+        fallbackColor: twin3dPalette(isDarkTheme(doc)).fallbackArm,
       })
     } catch (e) {
       if (!disposed && token === loadToken) {
@@ -1412,6 +1432,7 @@ export function mountTwinPanel({
     }
     win?.removeEventListener?.('resize', onResize)
     win?.removeEventListener?.('visibilitychange', onVisibility)
+    unobserveTheme()
     resizeObserver?.disconnect?.()
     resizeObserver = null
 

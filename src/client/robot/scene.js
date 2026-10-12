@@ -40,18 +40,23 @@ import {
 } from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { TWIN_3D_PALETTES } from '../theme.js'
 
 /**
  * 基座网格：平面与**基座平面 XY** 重合（z=0），网格的 X/Y 方向与基座 X/Y 重合。
  *
  * `GridHelper` 默认在 XZ 面（法线 +Y）；绕 X 轴 `+π/2` 后法线变为 +Z ⇒ 落在 XY 面。
  *
+ * 颜色来自主题色板（见 `theme.js`）：浅色主题下原来的深色网格会糊成一片，所以网格必须在
+ * 主题切换时重建 —— `GridHelper` 把两种颜色烘进几何体的顶点色，改色只能换几何体。
+ *
  * @param {number} [size=2] 网格边长（米）
  * @param {number} [divisions=20] 分格数（每格 size/divisions 米）
+ * @param {{gridMajor: number, gridMinor: number}} [colors=TWIN_3D_PALETTES.dark] 主题色板
  * @returns {GridHelper} 已摆正的网格（直接 add 进场景即可）
  */
-export function createBaseGrid(size = 2, divisions = 20) {
-  const grid = new GridHelper(size, divisions, 0x334455, 0x223344)
+export function createBaseGrid(size = 2, divisions = 20, colors = TWIN_3D_PALETTES.dark) {
+  const grid = new GridHelper(size, divisions, colors.gridMajor, colors.gridMinor)
   grid.name = 'base_grid'
   grid.rotation.x = Math.PI / 2
   return grid
@@ -156,7 +161,9 @@ export function gridExtentFor(radius) {
  *            onCameraChange: (listener: () => void) => void,
  *            dispose: () => void}}
  */
-export function createScene(canvas, { maxPixelRatio = 2, rendererFactory } = {}) {
+export function createScene(canvas, { maxPixelRatio = 2, rendererFactory, palette = TWIN_3D_PALETTES.dark } = {}) {
+  /** 当前 3D 色板；`applyTheme()` 会换掉它并重建依赖它的对象（目前是基座网格）。 */
+  let activePalette = palette
   // `rendererFactory` 是给**单测**留的注入点：真实 `WebGLRenderer` 需要 WebGL 上下文，
   // 而 Node 里没有。注入一个假 renderer 之后，本函数剩下的部分（光照、网格、相机、
   // controls 参数）就都能被断言了 —— 这正是清单第 21 条要解决的"createScene 无单测"。
@@ -191,7 +198,7 @@ export function createScene(canvas, { maxPixelRatio = 2, rendererFactory } = {})
   camera.up.set(0, 0, 1) // 世界 Z 向上 = 基座 Z 向上
   camera.position.set(...CAMERA_SPEC.position)
 
-  let grid = createBaseGrid()
+  let grid = createBaseGrid(2, 20, activePalette)
   scene.add(new AmbientLight(0xffffff, SCENE_LIGHTING.ambientIntensity))
   const dir = new DirectionalLight(0xffffff, SCENE_LIGHTING.directionalIntensity)
   dir.position.set(...SCENE_LIGHTING.directionalPosition)
@@ -225,10 +232,17 @@ export function createScene(canvas, { maxPixelRatio = 2, rendererFactory } = {})
     }
   })
 
-  /** 换掉基座网格：旧的要释放几何体/材质，否则每次换机型都会漏一份。 */
+  /**
+   * 换掉基座网格：旧的要释放几何体/材质，否则每次换机型都会漏一份。
+   *
+   * 判等里带上主题（`userData.dark`）：`GridHelper` 把线色烘进几何体的**顶点色**，换主题
+   * 只能换几何体 —— 而主题切换时 `size`/`divisions` 往往没变，只比这两个就会漏刷。
+   */
   function replaceGrid(radius) {
     const { size, divisions } = gridExtentFor(radius)
-    if (grid?.userData?.size === size && grid?.userData?.divisions === divisions) return
+    const dark = activePalette === TWIN_3D_PALETTES.dark
+    if (grid?.userData?.size === size && grid?.userData?.divisions === divisions
+      && grid?.userData?.dark === dark) return
     if (grid) {
       scene.remove(grid)
       try {
@@ -238,10 +252,27 @@ export function createScene(canvas, { maxPixelRatio = 2, rendererFactory } = {})
         /* 释放失败不应影响后续 */
       }
     }
-    grid = createBaseGrid(size, divisions)
+    grid = createBaseGrid(size, divisions, activePalette)
     grid.userData.size = size
     grid.userData.divisions = divisions
+    grid.userData.dark = dark
     scene.add(grid)
+  }
+
+  /**
+   * 应用 3D 色板（主题切换时由 `twin-panel` 调用）。
+   *
+   * 只重建"颜色被烘进几何体"的那一件（基座网格）；光照与环境贴图在两种主题下都可用，
+   * 不做无谓重建（重建 IBL 会白白闪一帧）。
+   *
+   * @param {{gridMajor: number, gridMinor: number}} next 新色板
+   * @returns {boolean} 是否真的应用了（色板未变或非法时为 false）
+   */
+  function applyTheme(next) {
+    if (next === null || next === undefined || next === activePalette) return false
+    activePalette = next
+    replaceGrid(fit?.radius ?? 0)
+    return true
   }
 
   /**
@@ -381,6 +412,7 @@ export function createScene(canvas, { maxPixelRatio = 2, rendererFactory } = {})
     render,
     fitTo,
     setViewPreset,
+    applyTheme,
     onCameraChange(listener) {
       cameraChangeListeners.add(listener)
     },

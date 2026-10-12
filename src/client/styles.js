@@ -22,6 +22,21 @@ export const TWIN_STYLE_ID = 'dsh-ur-twin-styles'
 export const TWIN_STYLE_ATTR = 'data-dsh-ur-twin-style'
 
 /** 面板样式表（单一真源；改样式只改这里）。 */
+/*
+ * ## 主题（0.6.8 起跟随桌面程序的颜色主题）
+ *
+ * 颜色一律写成 `var(--dsw-alias-*, <原来的深色值>)`：
+ *   - 宿主（DSH 客户端）在 `body` 上投影了一整套 `--dsw-alias-*` 设计 token，并随主题翻转
+ *     （深色时 body 带 `data-ds-dark-theme`）⇒ 面板**自动**跟随设置，也跟随第三方主题；
+ *   - 逗号后的 fallback 就是本面板原来的深色值 ⇒ 在**没有**宿主 token 层的环境里（单测、
+ *     极简宿主）渲染结果与改动前**逐字一致**。
+ * 三个 token 名已在本机 DSH 包内逐个核实存在（`@deepseek-ai/dsh-client-ui-theme` /
+ * `-layout` 的 CSS 字符串）：bg-base / bg-layer-1 / bg-layer-2 / border-l1 / border-l2 /
+ * label-primary / label-primary-foreground / label-tertiary / interactive-bg-active /
+ * state-business-primary / state-success-primary / state-warn-primary / state-error-primary。
+ * ⚠️ 不要写 `--dsw-alias-bg-elevated` 或 `--dsw-alias-border-secondary` —— 这两个名字在 DSH
+ * 设计系统里**没有定义**，会静默落到 fallback（浅色 fallback 在深色主题下就是一块白底）。
+ */
 export const TWIN_CSS = `
 .ur-twin-panel {
   position: relative;
@@ -32,8 +47,8 @@ export const TWIN_CSS = `
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  background: radial-gradient(circle at 50% 25%, #161b22 0%, #0b0f14 72%);
-  color: #c9d1d9;
+  background: radial-gradient(circle at 50% 25%, var(--dsw-alias-bg-layer-1, #161b22) 0%, var(--dsw-alias-bg-base, #0b0f14) 72%);
+  color: var(--dsw-alias-label-primary, #c9d1d9);
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, 'Courier New', monospace;
 }
 .ur-twin-view {
@@ -51,21 +66,24 @@ export const TWIN_CSS = `
   flex-wrap: wrap;
   gap: 4px;
   padding: 6px 8px;
-  border-bottom: 1px solid #21262d;
-  background: rgba(13, 17, 23, 0.72);
+  border-bottom: 1px solid var(--dsw-alias-border-l1, #21262d);
+  background: var(--dsw-alias-bg-layer-2, rgba(13, 17, 23, 0.72));
 }
 .ur-twin-toolbar-button {
   flex: 0 0 auto;
   padding: 2px 8px;
-  border: 1px solid #30363d;
+  border: 1px solid var(--dsw-alias-border-l2, #30363d);
   border-radius: 4px;
-  background: #161b22;
-  color: #c9d1d9;
+  background: var(--dsw-alias-bg-layer-1, #161b22);
+  color: var(--dsw-alias-label-primary, #c9d1d9);
   font: inherit;
   cursor: pointer;
 }
-.ur-twin-toolbar-button:hover { border-color: #58a6ff; color: #58a6ff; }
-.ur-twin-toolbar-button:active { background: #21262d; }
+.ur-twin-toolbar-button:hover {
+  border-color: var(--dsw-alias-state-business-primary, #58a6ff);
+  color: var(--dsw-alias-state-business-primary, #58a6ff);
+}
+.ur-twin-toolbar-button:active { background: var(--dsw-alias-interactive-bg-active, #21262d); }
 .ur-twin-canvas {
   display: block;
   width: 100%;
@@ -77,59 +95,59 @@ export const TWIN_CSS = `
   display: grid;
   gap: 2px;
   padding: 8px 10px;
-  border-top: 1px solid #21262d;
-  background: rgba(13, 17, 23, 0.72);
+  border-top: 1px solid var(--dsw-alias-border-l1, #21262d);
+  background: var(--dsw-alias-bg-layer-2, rgba(13, 17, 23, 0.72));
 }
 .ur-twin-hud-row {
   overflow: hidden;
   white-space: pre;
   text-overflow: ellipsis;
-  color: #8b949e;
+  color: var(--dsw-alias-label-tertiary, #8b949e);
 }
 .ur-twin-status {
   flex: 0 0 auto;
   padding: 6px 10px;
-  border-top: 1px solid #21262d;
-  color: #8b949e;
+  border-top: 1px solid var(--dsw-alias-border-l1, #21262d);
+  color: var(--dsw-alias-label-tertiary, #8b949e);
 }
 .ur-twin-error {
   flex: 0 0 auto;
   padding: 0 10px 6px;
-  color: #f85149;
+  color: var(--dsw-alias-state-error-primary, #f85149);
   white-space: pre-wrap;
 }
-.ur-twin-panel[data-ur-twin-connected='true'] .ur-twin-status { color: #3fb950; }
+.ur-twin-panel[data-ur-twin-connected='true'] .ur-twin-status { color: var(--dsw-alias-state-success-primary, #3fb950); }
 /* 安全状态异常时压过上面那条绿色：同等特异性，靠**写在后面**取胜，不要上移这两条。 */
-.ur-twin-panel[data-ur-twin-hazard='true'] .ur-twin-status { color: #f85149; }
-.ur-twin-hud-row[data-ur-twin-hazard='true'] { color: #f85149; }
+.ur-twin-panel[data-ur-twin-hazard='true'] .ur-twin-status { color: var(--dsw-alias-state-error-primary, #f85149); }
+.ur-twin-hud-row[data-ur-twin-hazard='true'] { color: var(--dsw-alias-state-error-primary, #f85149); }
 /* 关节超出 kinematics.json 的限位：和"安全异常"用同一个警示色，但只染那一行。 */
-.ur-twin-hud-row[data-ur-twin-overlimit='true'] { color: #f85149; }
+.ur-twin-hud-row[data-ur-twin-overlimit='true'] { color: var(--dsw-alias-state-error-primary, #f85149); }
 /* 待审批的运动目标：与幽灵臂的"待审批"橙色一致，让 HUD 文字与 3D 里的假臂对得上。
    空的时候（没有审批）这一行不染色，也就看不出占位。 */
-.ur-twin-hud-row[data-ur-twin-pending]:not(:empty) { color: #ffa657; }
+.ur-twin-hud-row[data-ur-twin-pending]:not(:empty) { color: var(--dsw-alias-state-warn-primary, #ffa657); }
 /* 工程辅助图层的开关（清单第 9 条）：克制的小按钮，激活态用实心蓝，一眼看出哪些图层开着。 */
 .ur-twin-layer-toggle {
   margin-right: 6px;
   padding: 1px 6px;
   font: inherit;
   font-size: 11px;
-  color: #8b949e;
+  color: var(--dsw-alias-label-tertiary, #8b949e);
   background: transparent;
-  border: 1px solid #30363d;
+  border: 1px solid var(--dsw-alias-border-l2, #30363d);
   border-radius: 4px;
   cursor: pointer;
 }
 .ur-twin-layer-toggle[aria-pressed='true'] {
-  color: #0d1117;
-  background: #58a6ff;
-  border-color: #58a6ff;
+  color: var(--dsw-alias-label-primary-foreground, #0d1117);
+  background: var(--dsw-alias-state-business-primary, #58a6ff);
+  border-color: var(--dsw-alias-state-business-primary, #58a6ff);
 }
 /* 身份行（机型 + IP）比读数更重要，给它正常前景色而不是注释灰。 */
-.ur-twin-hud-row[data-ur-twin-identity] { color: #c9d1d9; }
+.ur-twin-hud-row[data-ur-twin-identity] { color: var(--dsw-alias-label-primary, #c9d1d9); }
 /* 数据通道健康度（0.6.6）：停滞/重连必须一眼可见 —— 画面停住时用户要能分清
    "机器人停了"与"数据停了"，所以这一行用警示色（黄=停滞/重连中，红=通道不可用）。 */
-.ur-twin-hud-row[data-ur-twin-feed-state='stale'] { color: #d29922; }
-.ur-twin-hud-row[data-ur-twin-feed-state='retrying'] { color: #d29922; }
+.ur-twin-hud-row[data-ur-twin-feed-state='stale'] { color: var(--dsw-alias-state-warn-primary, #d29922); }
+.ur-twin-hud-row[data-ur-twin-feed-state='retrying'] { color: var(--dsw-alias-state-warn-primary, #d29922); }
 `.trim()
 
 /**

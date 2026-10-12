@@ -390,6 +390,19 @@ function assertClose(actual, expected, label, eps = 1e-9) {
  * 用例 1：挂载后的 DOM + 未连接不渲染空 3D + 样式走 <style> 字符串
  * ------------------------------------------------------------------ */
 
+test('★ 面板 CSS 用宿主设计 token 着色，且不引用不存在的 token', () => {
+  // 颜色一律走 `var(--dsw-alias-*, <fallback>)`：token 随宿主投影的 `body[data-ds-dark-theme]`
+  // 翻转，于是面板自动跟随桌面程序选择的颜色主题（也跟随第三方主题），无需 JS 参与。
+  assert.ok(TWIN_CSS.includes('var(--dsw-alias-'), '面板颜色必须来自宿主设计 token')
+  assert.ok(TWIN_CSS.includes('--dsw-alias-state-success-primary'), '连接正常态应使用成功色 token')
+  assert.ok(TWIN_CSS.includes('--dsw-alias-label-primary'), '前景色应使用 label token')
+  // ⚠️ 下面两个名字在 DSH 设计系统里**没有定义**（已在本机 theme/layout 包的 CSS 里逐个核实）：
+  // 写了只会静默落到 fallback —— 而浅色 fallback 落在深色主题上就是一块白底。
+  for (const missing of ['--dsw-alias-bg-elevated', '--dsw-alias-border-secondary']) {
+    assert.ok(!TWIN_CSS.includes(missing), `不得引用不存在的 token：${missing}`)
+  }
+})
+
 test('挂载后容器内出现 canvas 与状态元素；未连接不建场景；样式以 <style> 字符串注入', () => {
   const ctx = boot()
 

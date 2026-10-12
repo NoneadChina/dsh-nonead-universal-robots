@@ -20,12 +20,70 @@ import { fileURLToPath } from 'node:url'
 import { Vector3 } from 'three'
 
 import { createBaseGrid, fitDistanceFor, gridExtentFor, VIEW_PRESETS } from '../src/client/robot/scene.js'
+import {
+  DARK_THEME_ATTRIBUTE,
+  TWIN_3D_PALETTES,
+  isDarkTheme,
+  observeTheme,
+  twin3dPalette,
+} from '../src/client/theme.js'
 
 const sceneSource = readFileSync(
   fileURLToPath(new URL('../src/client/robot/scene.js', import.meta.url)), 'utf8',
 ).replace(/\r\n/g, '\n')
 
 const EPS = 1e-9
+
+/* ── 主题跟随（0.6.8）─────────────────────────────────────────────────────
+ * DOM 部分靠 CSS 的 `--dsw-alias-*` token 自动翻转（见 test/twin-panel.test.mjs 对 CSS 的
+ * 断言），但 WebGL 里的网格线色是**烘进几何体顶点色**的数值 —— 这两条契约钉住"色板真的
+ * 进了几何体"以及"主题判定只认宿主属性"。 */
+
+test('★ 主题色板真的进了网格顶点色（浅色主题不是同一张网）', () => {
+  const colorsOf = (grid) => Array.from(grid.geometry.getAttribute('color').array.slice(0, 12))
+    .map((value) => Number(value.toFixed(3)))
+  const dark = colorsOf(createBaseGrid(2, 20, TWIN_3D_PALETTES.dark))
+  const light = colorsOf(createBaseGrid(2, 20, TWIN_3D_PALETTES.light))
+  assert.notDeepEqual(dark, light, '两种主题必须给出不同的网格线色')
+  // 缺省仍是深色色板 ⇒ 既有的朝向契约与"不传主题"的调用方行为不变。
+  assert.deepEqual(colorsOf(createBaseGrid()), dark)
+})
+
+test('主题判定只认宿主的 data-ds-dark-theme，不退回系统偏好', () => {
+  const docWith = (attrs) => ({ body: { hasAttribute: (name) => attrs.includes(name) } })
+  assert.equal(isDarkTheme(docWith([DARK_THEME_ATTRIBUTE])), true)
+  // 「浅色主题 + 深色系统」：属性缺席就必须判浅色，**不得**去看 prefers-color-scheme。
+  assert.equal(isDarkTheme(docWith([])), false)
+  // 拿不到 body（Node / 极简宿主）按浅色处理，且不抛错。
+  assert.equal(isDarkTheme({}), false)
+  assert.equal(twin3dPalette(false), TWIN_3D_PALETTES.light)
+  assert.equal(twin3dPalette(true), TWIN_3D_PALETTES.dark)
+})
+
+test('observeTheme 在深色属性翻转时回调，取消后真的断开观察', () => {
+  const created = []
+  const original = globalThis.MutationObserver
+  class FakeObserver {
+    constructor(callback) { this.callback = callback }
+    observe(target, options) { created.push({ observer: this, target, options }) }
+    disconnect() { this.disconnected = true }
+  }
+  globalThis.MutationObserver = FakeObserver
+  try {
+    const seen = []
+    const stop = observeTheme((dark) => seen.push(dark), {
+      body: { hasAttribute: (name) => name === DARK_THEME_ATTRIBUTE },
+    })
+    assert.equal(created.length, 1, '必须观察 body')
+    assert.deepEqual(created[0].options.attributeFilter, [DARK_THEME_ATTRIBUTE], '只观察主题属性')
+    created[0].observer.callback()
+    assert.deepEqual(seen, [true])
+    stop()
+    assert.equal(created[0].observer.disconnected, true, '取消必须断开观察')
+  } finally {
+    globalThis.MutationObserver = original
+  }
+})
 
 test('网格平面与基座平面重合：法线为 +Z，且平面过 z=0', () => {
   const grid = createBaseGrid()

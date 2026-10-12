@@ -37,6 +37,7 @@
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { Group, Mesh, CapsuleGeometry, MeshStandardMaterial } from 'three'
 import { TWIN_ASSET_PATH } from '../../../lib/twin-paths.js'
+import { TWIN_3D_PALETTES } from '../theme.js'
 
 /** GLB 内 7 个网格节点的名字（与 scripts/convert-meshes.py 的 NODE_NAMES 一致）。 */
 export const LINK_MESH_NODES = ['base', 'shoulder', 'upperarm', 'forearm', 'wrist1', 'wrist2', 'wrist3']
@@ -151,12 +152,14 @@ export function linkLengthsFromKinematics(links) {
  * @param {number[]} [armLinks=ARM_LINKS] 7 段连杆长度（米）。
  *        内置型号的真实长度可由 `linkLengthsFromKinematics(kin.links)` 算出并传进来，
  *        这样回退臂的尺寸才与该型号相符；缺省仍是 UR3 量级的 `ARM_LINKS`。
+ * @param {number} [color=TWIN_3D_PALETTES.dark.fallbackArm] 材质色（来自主题色板：
+ *        浅色主题下原来的灰蓝在浅底上几乎看不清，见 `theme.js`）。
  */
-export function buildFallbackArm(armLinks = ARM_LINKS) {
+export function buildFallbackArm(armLinks = ARM_LINKS, color = TWIN_3D_PALETTES.dark.fallbackArm) {
   const links = normalizeArmLinks(armLinks)
   const root = new Group()
   root.name = 'fallback_arm'
-  const mat = new MeshStandardMaterial({ color: 0x8899aa, roughness: 0.6, metalness: 0.1 })
+  const mat = new MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.1 })
   for (let i = 0; i < 7; i++) {
     // 胶囊半径随连杆粗细、长度随连杆长度缩放；沿自身局部 +z 平移半段，让关节落在连杆一端。
     const len = Math.max(0.04, links[i] * 0.8)
@@ -198,7 +201,7 @@ export async function loadRobotModel(modelId, deps = {}) {
     root = scene
   } catch {
     // 未内置/加载失败 → 回退，不抛错。带上该型号的真实连杆长度，让回退臂的尺寸相符。
-    root = buildFallbackArm(deps.armLinks)
+    root = buildFallbackArm(deps.armLinks, deps.fallbackColor)
     usedFallback = true
   }
 
