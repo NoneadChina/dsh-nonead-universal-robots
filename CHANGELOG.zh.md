@@ -2,6 +2,30 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.8] - 未发布
+
+> **数字孪生开始跟随桌面程序的颜色主题。** DOM 部分随宿主设计 token 翻转，WebGL 部分由 JS 重刷；
+> 顺带修掉两个在 DSH 设计系统里**并不存在**的 token —— 在深色主题下它们会渲染成一块白底。
+
+### 变更 — 数字孪生跟随桌面程序的颜色主题
+
+- **DOM 部分**改用宿主设计 token 着色（`var(--dsw-alias-*, <原来的深色值>)`）：token 随宿主投影的
+  `body[data-ds-dark-theme]` 翻转 ⇒ 面板自动跟随「设置 → 外观」里选的主题，也跟随第三方主题，
+  **无需 JS**。逗号后的 fallback 就是原来的深色值，因此在**没有**宿主 token 层的环境里渲染结果
+  与改动前逐字一致。
+- **WebGL 部分**（CSS 够不到）由 JS 重刷：新增 `src/client/theme.js`（主题判定 + 3D 色板 +
+  `MutationObserver` 观察）；`twin-panel` 建场景时按当前主题取色板，切换时调
+  `scene.applyTheme()` 重建基座网格（`GridHelper` 把线色烘进几何体顶点色，改色只能换几何体），
+  回退臂的材质色同样跟随。
+- **判定只认 `body[data-ds-dark-theme]`**，不退回 `prefers-color-scheme` —— 否则
+  「浅色主题 + 深色系统」会被判反。拿不到 body 时按浅色处理且不抛错。
+- 顺带修掉两个**不存在**的 token 引用（`--dsw-alias-bg-elevated` 与
+  `--dsw-alias-border-secondary`，DSH 设计系统里没有定义）：写了只会静默落到 fallback，而浅色
+  fallback 落在深色主题上就是一块白底。改动前已在本机 `dsh-client-ui-theme` /
+  `-layout` 包里逐个核实真实 token 名。
+- 回归用例 4 个（色板真的进网格顶点色、主题判定不退回系统偏好、观察器回调与取消、CSS 只引用
+  真实 token）。
+
 ## [0.6.7] - 未发布
 
 > **数字孪生不再停在「数据已停止更新 Ns」。** 0.6.6 让停滞**如实可见**，这一版让它**不再发生**：

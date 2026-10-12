@@ -52,6 +52,8 @@ The plugin also ships a **read-only 3D digital twin** of the robot, rendered wit
 
 **The feed no longer stalls while the robot moves (0.6.7).** Telemetry is now **pushed by the worker** at 20 Hz, and every twin frame reads that push cache first — **without touching the single-threaded command queue**. While the robot is moving, what the motion confirmation loops (`_movej_confirm` and friends) occupy is the command queue, whereas the RTDE cache keeps being updated by URBasic's own receiver thread, so the pushes keep arriving. On the wire a push is simply a JSON line **without `id`**, so an older host treats it as an unmatched response and nothing breaks. Only when the cache is stale (>300 ms) or missing does the twin fall back to an explicit read, and twin reads still use a dedicated **2.5 s budget with `killOnTimeout:false`** — a read-only visualisation read must never destroy the robot session (RTDE/Dashboard) just because it was busy. If a stall does happen, the stream still emits `stale` events and the panel says "data stopped updating Ns · retrying" rather than leaving a silently frozen arm on screen. After a disconnect the stream reconnects indefinitely (exponential backoff capped at 30 s) and retries immediately when the window becomes visible again or the feed has been stalled too long. Set `DSH_UR_TWIN_PUSH=0` to turn the push channel off for comparison.
 
+**It follows the desktop app's colour theme.** The panel's DOM half is coloured with the host's design tokens (`--dsw-alias-*`), so the toolbar, HUD and status line flip automatically with whatever theme is selected under Settings → Appearance (and with third-party themes) — **no JS needed**. The base grid lines and the fallback arm's material colour inside the WebGL canvas are repainted on a theme change by `src/client/theme.js`, which watches `body[data-ds-dark-theme]` (CSS cannot reach values inside WebGL). Theme detection **only trusts that attribute** and never falls back to the system preference, so "light theme + dark system" is not read backwards.
+
 Host-side routes (all fenced to loopback callers):
 
 | Route | Description |
@@ -75,7 +77,7 @@ Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_c
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.6.7"
+       "dsh-nonead-universal-robots": "^0.6.8"
      },
      "dsh": {
        "profile": {

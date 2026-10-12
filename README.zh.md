@@ -46,6 +46,8 @@
 
 **运动期间也不再停更（0.6.7 起）**：遥测改由 worker **主动推送**（20 Hz），孪生的每一帧优先读这份推送缓存、**不经过那条单线程命令队列** —— 机器人运动时，运动确认循环（`_movej_confirm` 之类）占住的是命令队列，而 RTDE 缓存由 URBasic 自己的接收线程持续更新，推送因此照常到达（协议上是一条不带 `id` 的 JSON 行，旧宿主只会把它当成匹配不上的响应，向后兼容）。缓存过期（>300 ms）或缺失时才回退到显式读；孪生的读仍只带 **2.5 s 的专用预算且超时不杀 worker**：一条只读可视化读**绝不能**把整条机器人会话（RTDE/Dashboard）带走。万一真的停滞，流里仍会推 `stale` 事件、面板写出「数据已停止更新 Ns · 正在重试」，绝不静静冻住。断线后无限重连（指数退避封顶 30 s），窗口重新可见或停滞过久时立即重试。诊断时可用 `DSH_UR_TWIN_PUSH=0` 关掉推送做对照。
 
+**跟随桌面程序的颜色主题**：面板的 DOM 部分用宿主设计 token（`--dsw-alias-*`）着色 —— 工具栏、HUD 与状态行会随「设置 → 外观」里选的主题（以及第三方主题）自动翻转，**不需要 JS**。3D 画布里的基座网格线与回退臂材质色由 `src/client/theme.js` 监听 `body[data-ds-dark-theme]`、在主题切换时重刷（CSS 够不到 WebGL 里的数值）。主题判定**只认该属性**，不退回系统偏好，因此「浅色主题 + 深色系统」不会被判反。
+
 host 侧路由（均限定 loopback 调用方）：
 
 | 路由 | 说明 |
@@ -69,7 +71,7 @@ host 侧路由（均限定 loopback 调用方）：
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.6.7"
+       "dsh-nonead-universal-robots": "^0.6.8"
      },
      "dsh": {
        "profile": {

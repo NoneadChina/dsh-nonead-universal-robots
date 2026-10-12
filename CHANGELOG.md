@@ -2,6 +2,36 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.6.8] - Unreleased
+
+> **The twin now follows the desktop app's colour theme.** The DOM half flips with the host's design
+> tokens and the WebGL half is repainted by JS; two token names that do not exist in the DSH design
+> system are gone — on a dark theme they rendered as a white card.
+
+### Changed — the digital twin follows the desktop app's colour theme
+
+- **The DOM half** is now coloured with the host's design tokens
+  (`var(--dsw-alias-*, <previous dark value>)`): the tokens flip with the host's
+  `body[data-ds-dark-theme]` projection, so the panel follows whatever theme is selected under
+  Settings → Appearance — and any third-party theme — **with no JS involved**. The value after the
+  comma is the previous dark colour, so in an environment **without** a host token layer the
+  rendering is exactly what it was before.
+- **The WebGL half** (which CSS cannot reach) is repainted by JS: new `src/client/theme.js` (theme
+  detection + 3D palette + `MutationObserver`); `twin-panel` builds the scene with the current
+  theme's palette and calls `scene.applyTheme()` on a theme change to rebuild the base grid
+  (`GridHelper` bakes its line colours into the geometry's vertex colours, so recolouring means
+  replacing the geometry). The fallback arm's material colour follows too.
+- **Detection only trusts `body[data-ds-dark-theme]`** and never falls back to
+  `prefers-color-scheme` — otherwise "light theme + dark system" would be read backwards. With no
+  `body` available it treats the theme as light and does not throw.
+- Also fixed two references to tokens that **do not exist** (`--dsw-alias-bg-elevated` and
+  `--dsw-alias-border-secondary` are not defined in the DSH design system): they silently fell back,
+  and a light fallback on a dark theme is a white card. The real token names were verified one by
+  one in the local `dsh-client-ui-theme` / `-layout` packages before this change.
+- Four regression cases (the palette really reaches the grid's vertex colours, detection does not
+  fall back to the system preference, the observer fires and unsubscribes, the CSS references only
+  real tokens).
+
 ## [0.6.7] - Unreleased
 
 > **The digital twin no longer sits on "data stopped updating Ns".** 0.6.6 made a stall *visible*;
