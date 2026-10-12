@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.6.9] - 未发布
+## [0.6.9] - 2026-10-12
 
 > **每个型号画出来的可达范围都一样大，因为那个范围从来没被真正算出来。** 读连杆长度的函数只认
 > `links` 的**旧形状**，而真实数据是 6 个 `{x,y,z,roll,pitch,yaw}` 位移 —— 于是 14 个内置型号
