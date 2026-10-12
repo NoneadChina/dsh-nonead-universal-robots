@@ -28,6 +28,14 @@ const committed = join(root, 'lib', 'client.js');
 const scratch = join(root, 'lib', `.client.rebuild-check.js`);
 
 /**
+ * Read the artifact's body, normalising line endings first.
+ *
+ * ⚠️ The normalisation is not cosmetic. This repo is usually checked out on Windows with
+ * `core.autocrlf=true`, so **git itself** rewrites the committed LF into CRLF on clone / checkout /
+ * rebase / stash. Nothing about the artifact changed, but `readFileSync` then sees one extra byte
+ * per line (≈3.9 KB on a 652.7 KB bundle) while the esbuild rebuild just wrote LF — so the two
+ * hashes can never match and the gate cries wolf. Line endings are not a content difference.
+ *
  * The artifact minus its trailing `//# sourceMappingURL=` comment.
  *
  * esbuild writes the *output* filename into that comment, so a rebuild to a scratch path
@@ -38,7 +46,9 @@ const scratch = join(root, 'lib', `.client.rebuild-check.js`);
  * comment — 621855 identical bytes before it.
  */
 const bodyOf = (path) =>
-  readFileSync(path, 'utf8').replace(/\n?\/\/# sourceMappingURL=.*\s*$/, '\n');
+  readFileSync(path, 'utf8')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n?\/\/# sourceMappingURL=.*\s*$/, '\n');
 
 const sha = (text) => createHash('sha256').update(text).digest('hex');
 const human = (n) => `${(n / 1024).toFixed(1)} KB`;
