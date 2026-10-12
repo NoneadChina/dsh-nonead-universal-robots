@@ -2,6 +2,41 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.6.9] - Unreleased
+
+> **Every model drew the same reach envelope, because the reach was never computed.** The link-length
+> reader expected the *old* `links` shape, while the real data is 6 × `{x,y,z,roll,pitch,yaw}` — so it
+> returned `null` for all 14 built-in models.
+
+### Fixed — the reach envelope and the fallback arm now follow the model
+
+- **Root cause** (`src/client/robot/loader.js`): `linkLengthsFromKinematics()` accepted only
+  `[7 × 4×4 row-major number[16]]` and required `links.length >= 7`, whereas `assets/kinematics.json`
+  (the shape `fk.js` documents and consumes) holds **6 × `{x,y,z,roll,pitch,yaw}` fixed
+  displacements**. Every real model therefore returned `null`, and that single `null` produced both
+  symptoms:
+  - `reachRadiusFromKinematics()` also returned `null`, so `twin-panel` **never** updated
+    `reachSphere.scale` — the envelope stayed at its unit radius (1 m) for every robot, which is
+    exactly "the reach looks the same no matter which model is loaded";
+  - `loadRobotModel()`'s `armLinks` was always `undefined`, so the unknown-model fallback arm always
+    collapsed back to UR3-scale `ARM_LINKS`.
+- **Fix**: the function now understands both shapes. In the displacement shape a segment's length is
+  the magnitude `hypot(x,y,z)` of its entry — the same convention `fk.js` and `model-contract.test.mjs`
+  already use — while the legacy 4×4 row-major shape keeps its "distance between adjacent origins"
+  behaviour. Either way it returns exactly 7 segments (base + 6 links, the last one approximated).
+- **Measured after the fix** (reach upper bound = sum of the 6 segment magnitudes): `ur3 804 mm` ·
+  `ur3e 823` · `ur5 1098` · `ur5e`/`ur7e 1201` · `ur16e 1295` · `ur18 1358` · `ur10 1543` ·
+  `ur10e`/`ur12e 1627` · `ur15 1693` · `ur30 1729` · `ur8long 2135` · `ur20 2168` — a **2.70×** span
+  from UR3 to UR20.
+- **Why this stayed green for so long**: the unit tests fed hand-made *matrix* fixtures
+  (`straightLinks()`) and never read the real `assets/kinematics.json`. Assertions that read the
+  **real data** now pin it down: all 14 models resolve, the envelope grows monotonically, and
+  UR20/UR3 > 2.5.
+- **This was never a model-asset problem**: the 14 GLBs already differ per model (bounding boxes
+  ur3 0.35 m → ur20 1.06 m). Note the camera still frames each model by its own bounding box (the
+  0.6.3 design), so with the reach layer switched off the arm still fills the same frame — that is
+  framing normalisation, not a wrong size.
+
 ## [0.6.8] - 2026-10-12
 
 > **The twin now follows the desktop app's colour theme.** The DOM half flips with the host's design

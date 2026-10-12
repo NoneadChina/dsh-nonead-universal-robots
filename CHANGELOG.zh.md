@@ -2,6 +2,34 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.9] - 未发布
+
+> **每个型号画出来的可达范围都一样大，因为那个范围从来没被真正算出来。** 读连杆长度的函数只认
+> `links` 的**旧形状**，而真实数据是 6 个 `{x,y,z,roll,pitch,yaw}` 位移 —— 于是 14 个内置型号
+> 一律返回 `null`。
+
+### 修复 — 可达范围包络与回退臂重新跟着型号走
+
+- **根因**（`src/client/robot/loader.js`）：`linkLengthsFromKinematics()` 只接受
+  `[7 × 4×4 行主序 number[16]]` 且要求 `links.length >= 7`，而 `assets/kinematics.json`（`fk.js`
+  文件头明确记载并消费的形状）里是 **6 个 `{x,y,z,roll,pitch,yaw}` 固定位移**。于是每个真实型号
+  都拿到 `null`，而这一个 `null` 同时造成了两个症状：
+  - `reachRadiusFromKinematics()` 也是 `null` ⇒ `twin-panel` **从不**更新 `reachSphere.scale`：
+    包络球永远停在单位半径（1 m），换哪台机器人都一样大；
+  - `loadRobotModel()` 的 `armLinks` 永远是 `undefined` ⇒ 未知型号的回退臂永远塌回 UR3 量级。
+- **修法**：函数现在认识两种形状。位移形状下每段的长度就是该段位移的模长 `hypot(x,y,z)` —— 与
+  `fk.js`、`model-contract.test.mjs` 早已在用的口径一致；旧矩阵形状保持"相邻原点距离"的原行为。
+  两种形状都返回恰好 7 段（base + 6 连杆，末段近似）。
+- **修后实测**（可达上界 = 6 段模长之和）：`ur3 804 mm` · `ur3e 823` · `ur5 1098` ·
+  `ur5e`/`ur7e 1201` · `ur16e 1295` · `ur18 1358` · `ur10 1543` · `ur10e`/`ur12e 1627` ·
+  `ur15 1693` · `ur30 1729` · `ur8long 2135` · `ur20 2168` —— UR3 到 UR20 相差 **2.70 倍**。
+- **为什么它能一直绿灯**：旧单测喂的是手写的**矩阵**假数据（`straightLinks()`），从不读真实的
+  `assets/kinematics.json`。现在补了读**真实数据**的断言：14 个型号都能解出长度、包络随型号单调
+  变大、UR20/UR3 > 2.5。
+- **这从来不是模型资产的问题**：14 个 GLB 本来就随型号不同（包围盒 ur3 0.35 m → ur20 1.06 m）。
+  另外注意相机仍按各自包围盒取景（0.6.3 的设计），所以在**关掉可达范围图层**时机械臂依旧填满同一
+  个画框 —— 那是取景归一化，不是尺寸错误。
+
 ## [0.6.8] - 2026-10-12
 
 > **数字孪生开始跟随桌面程序的颜色主题。** DOM 部分随宿主设计 token 翻转，WebGL 部分由 JS 重刷；

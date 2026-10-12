@@ -71,7 +71,7 @@ host 侧路由（均限定 loopback 调用方）：
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.6.8"
+       "dsh-nonead-universal-robots": "^0.6.9"
      },
      "dsh": {
        "profile": {
