@@ -2,7 +2,7 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
-## [0.6.9] - Unreleased
+## [0.6.9] - 2026-10-12
 
 > **Every model drew the same reach envelope, because the reach was never computed.** The link-length
 > reader expected the *old* `links` shape, while the real data is 6 × `{x,y,z,roll,pitch,yaw}` — so it
