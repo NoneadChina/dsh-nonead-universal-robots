@@ -43,13 +43,17 @@ export const FORCE_ARROW_MAX_LENGTH = 0.6
 export const FORCE_ARROW_DEADZONE_N = 1
 
 /**
- * 型号的**可达范围上界**（米）：6 段相邻原点的欧氏距离之和，即"完全伸直"能到的距离。
+ * 型号的**可达范围上界**（米）：6 段固定位移的模长之和，即"完全伸直"能到的距离。
  *
  * ⚠️ 这是**上界**而不是厂商 spec 里的 reach：官方 reach 指"基座到腕心的最大径向距离"
- * （UR5e 是 850 mm），而这里把各段长度直接相加（UR5e ≈ 1.32 m），因为没有做关节偏置的
+ * （UR5e 是 850 mm），而这里把各段长度直接相加（UR5e ≈ 1.20 m），因为没有做关节偏置的
  * 极值优化。可视化上宁可画大一点（说明"最远能到这儿"），也要在界面上标注它是上界。
  *
- * @param {number[][]} links `kinematics.json` 的 `links`
+ * 段长由 `linkLengthsFromKinematics()` 给出（0.6.9 起它认识 `kinematics.json` 的**真实**
+ * 位移格式；此前它对真实数据一律返回 `null`，于是本函数也一律返回 `null` —— 可达球因此
+ * 永远停在单位半径，换什么型号都一样大）。
+ *
+ * @param {Array<{x?: number, y?: number, z?: number}>} links `kinematics.json` 的 `links`
  * @returns {number|null} 半径（米）；数据不足时 `null`
  */
 export function reachRadiusFromKinematics(links) {

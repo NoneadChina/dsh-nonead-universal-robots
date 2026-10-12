@@ -114,34 +114,82 @@ export function normalizeArmLinks(armLinks) {
 }
 
 /**
- * 从 `kinematics.json` 的 `links`（7 个 4×4 齐次变换）算出 7 段连杆长度（米）。
+ * 从容器的两种形状里取出平移分量 `[x, y, z]`。
  *
- * 每个矩阵按行主序展开，平移分量在索引 3/7/11；相邻两个原点的欧氏距离就是该段长度。
- * 第 7 段（末端）没有下一个原点可比，用最后一段近似。
+ * - **位移格式**（`assets/kinematics.json` 的真实形状，与 `fk.js` 同源）：`{x, y, z, …}`；
+ * - **旧矩阵格式**（现在只出现在单测的假数据里）：4×4 **行主序** `number[16]`，平移在 3/7/11。
  *
- * @param {number[][]} links 型号的关节变换表
+ * 形状不对、或分量不是有限数时返回 `null` —— 调用方据此放弃，**绝不猜**。
+ *
+ * @param {unknown} entry
+ * @returns {[number, number, number]|null}
+ */
+function translationOf(entry) {
+  if (entry !== null && typeof entry === 'object' && !Array.isArray(entry)) {
+    const { x = 0, y = 0, z = 0 } = entry
+    return [x, y, z].every(Number.isFinite) ? [x, y, z] : null
+  }
+  if (Array.isArray(entry) && entry.length >= 12) {
+    const [x, y, z] = [entry[3], entry[7], entry[11]]
+    return [x, y, z].every(Number.isFinite) ? [x, y, z] : null
+  }
+  return null
+}
+
+/** 两点间的欧氏距离（米）。 */
+function distanceBetween(a, b) {
+  return Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2])
+}
+
+/**
+ * 从 `kinematics.json` 的 `links` 算出 7 段连杆长度（米）。
+ *
+ * 数据有**两种形状**，本函数都吃：
+ *
+ * 1. **位移格式（真实数据）**：`[6 × {x,y,z,roll,pitch,yaw}]`（见 `fk.js` 的文件头）。每一项是
+ *    "相对上一个坐标系"的**固定位移**（在关节旋转之前施加），所以该链段的长度就是位移向量的
+ *    模长 `hypot(x,y,z)`。⛔ 不要按"相邻原点距离"去读它：那需要累积变换，而这里是相对量。
+ *    全表的可达上界口径与此一致（`test/model-contract.test.mjs` 用的也是这个和）。
+ * 2. **旧矩阵格式**：`[7 × 4×4 行主序 number[16]]`，平移在索引 3/7/11，相邻两个原点的欧氏
+ *    距离即段长。
+ *
+ * 两种形状都返回**恰好 7 个**长度（`LINK_MESH_NODES` 是 7 个：base + 6 连杆）：第 7 段（末端）
+ * 没有下一个原点可比，用第 6 段近似（保持历史行为）。
+ *
+ * ⚠️ **0.6.9 修掉的 bug**：此前的实现只认第 2 种形状、且要求 `links.length >= 7`，而真实数据是
+ * 第 1 种形状、只有 6 项 ⇒ 对**任何**内置型号都返回 `null`：可达范围包络球因此永远停在单位半径
+ * （1 m，与型号无关 —— "换哪台机器人都一样大"），未知型号的回退臂也永远退化成 UR3 量级。
+ * 它对旧单测是绿的，因为那边喂的是自造的矩阵假数据；**接真实数据**的断言已随本次修复补进
+ * `test/fallback-arm.test.mjs` 与 `test/overlays.test.mjs`。
+ *
+ * @param {Array<{x?: number, y?: number, z?: number}|number[]>} links 型号的关节变换表
  * @returns {number[]|null} 7 个长度；数据不足或形状不对时 `null`（调用方据此保持缺省）
  */
 export function linkLengthsFromKinematics(links) {
-  if (!Array.isArray(links) || links.length < 7) return null
+  if (!Array.isArray(links) || links.length === 0) return null
   const points = []
-  for (let i = 0; i < 7; i++) {
-    const m = links[i]
-    if (!Array.isArray(m) || m.length < 12) return null
-    const x = m[3]
-    const y = m[7]
-    const z = m[11]
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
-    points.push([x, y, z])
+  for (const entry of links) {
+    const point = translationOf(entry)
+    if (point === null) return null
+    points.push(point)
   }
-  const lengths = []
-  for (let i = 0; i < 6; i++) {
-    const [ax, ay, az] = points[i]
-    const [bx, by, bz] = points[i + 1]
-    lengths.push(Math.hypot(bx - ax, by - ay, bz - az))
+  const displacementForm = links.every(
+    (entry) => entry !== null && typeof entry === 'object' && !Array.isArray(entry),
+  )
+  let lengths
+  if (displacementForm) {
+    // 位移格式：每项就是一个链段的固定位移，段长 = 模长。
+    if (points.length < 6) return null
+    lengths = points.map(([x, y, z]) => Math.hypot(x, y, z))
+  } else {
+    // 旧矩阵格式：要有 7 个原点才谈得上 6 段 + 末端近似。
+    if (points.length < 7) return null
+    lengths = []
+    for (let i = 0; i < 6; i++) lengths.push(distanceBetween(points[i], points[i + 1]))
   }
-  lengths.push(lengths[5])
-  return lengths
+  if (lengths.length === 0 || lengths.some((value) => !Number.isFinite(value))) return null
+  while (lengths.length < 7) lengths.push(lengths[lengths.length - 1])
+  return lengths.slice(0, 7)
 }
 
 /**

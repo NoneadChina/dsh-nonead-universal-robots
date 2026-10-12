@@ -7,6 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 
 import {
   createCogMarker,
@@ -43,6 +44,20 @@ test('reachRadiusFromKinematics：6 段之和，数据不足返回 null', () => 
   assert.equal(reachRadiusFromKinematics([[1]]), null)
   // 所有段长为 0（畸形）→ null，而不是画一个半径 0 的球
   assert.equal(reachRadiusFromKinematics(straightLinks(0)), null)
+})
+
+test('reachRadiusFromKinematics：真实型号数据下可达半径随型号变化（0.6.9 回归）', async () => {
+  const KIN = JSON.parse(await readFile(new URL('../assets/kinematics.json', import.meta.url), 'utf8'))
+  const small = reachRadiusFromKinematics(KIN.ur3.links)
+  const mid = reachRadiusFromKinematics(KIN.ur10.links)
+  const big = reachRadiusFromKinematics(KIN.ur20.links)
+
+  // 旧实现对真实位移格式一律拿到 null ⇒ 可达球永远停在单位半径（换什么型号都一样大）。
+  assert.ok(small !== null && mid !== null && big !== null, '真实数据必须能算出可达半径')
+  assert.ok(Math.abs(small - 0.804) < 0.01, `ur3 实测 ${small}`)
+  assert.ok(Math.abs(big - 2.168) < 0.02, `ur20 实测 ${big}`)
+  assert.ok(small < mid && mid < big, '可达半径必须随型号单调变大')
+  assert.ok(big > small * 2.5, `UR20/UR3 应 >2.5，实测 ${(big / small).toFixed(2)}`)
 })
 
 test('forceArrowFor：死区内不画、按比例缩放、超长被钳住', () => {

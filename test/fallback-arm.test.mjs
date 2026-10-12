@@ -7,6 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 
 import {
   ARM_LINKS,
@@ -66,6 +67,31 @@ test('linkLengthsFromKinematics：相邻原点距离，形状不对时返回 nul
   const broken = straightLinks(0.4)
   broken[3] = [1, 0, 0, Number.NaN, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
   assert.equal(linkLengthsFromKinematics(broken), null, '平移分量非有限数时必须放弃')
+})
+
+test('linkLengthsFromKinematics：认识 assets/kinematics.json 的真实位移格式（0.6.9 回归）', async () => {
+  const KIN = JSON.parse(await readFile(new URL('../assets/kinematics.json', import.meta.url), 'utf8'))
+  const ids = Object.keys(KIN)
+  assert.equal(ids.length, 14, '内置型号数变了 —— 请同步更新本断言')
+
+  const reach = {}
+  for (const id of ids) {
+    const lengths = linkLengthsFromKinematics(KIN[id].links)
+    // 旧实现（只认 7 × 4×4 矩阵）对这里**一律**返回 null —— 那正是"换什么型号可达范围都一样大"的根因。
+    assert.ok(Array.isArray(lengths), `${id}: 真实位移格式必须能算出长度`)
+    assert.equal(lengths.length, 7, `${id}: 必须恰好 7 段（base + 6 连杆）`)
+    for (const value of lengths) {
+      assert.ok(Number.isFinite(value) && value >= 0, `${id}: 段长必须是有限非负数，实测 ${value}`)
+    }
+    reach[id] = lengths.slice(0, 6).reduce((sum, value) => sum + value, 0)
+  }
+
+  // 量级（米）：UR3 ≈ 0.804、UR20 ≈ 2.168 —— 与官方 reach 的 2.5 倍以上跨度一致。
+  assert.ok(Math.abs(reach.ur3 - 0.804) < 0.01, `ur3 实测 ${reach.ur3}`)
+  assert.ok(Math.abs(reach.ur20 - 2.168) < 0.02, `ur20 实测 ${reach.ur20}`)
+  assert.ok(reach.ur20 > reach.ur3 * 2.5, `UR20/UR3 应 >2.5，实测 ${(reach.ur20 / reach.ur3).toFixed(2)}`)
+  // 同族升级必须单调变长（否则就是数据抄错了）。
+  assert.ok(reach.ur3 < reach.ur5 && reach.ur5 < reach.ur10 && reach.ur10 < reach.ur20)
 })
 
 test('buildFallbackArm(armLinks)：几何尺寸跟着传入的长度走，而不是永远 UR3 量级', () => {
