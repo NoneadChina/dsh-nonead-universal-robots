@@ -28,9 +28,16 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
-/** 工具表规模（0.5.0：53 → 67；0.6.0 按三本官方手册补齐后：67 → 83）。
- *  改动工具表时**必须**同步这个数与 check-host-compat.mjs。 */
-const EXPECTED_TOOLS = 83
+import { expectedToolCount } from '../scripts/tool-registry.mjs'
+
+/**
+ * 工具表规模 —— **从 `lib/index.js` 源码推导**，不再写死一个数字。
+ *
+ * 写死的数字曾散在三处（本文件、`check-host-compat.mjs`、`check-doc-tools.mjs` 的动态计数），
+ * 加/减一个工具要人工同步，漏一处就互相矛盾。现在唯一来源是 `scripts/tool-registry.mjs`；
+ * 而"运行期注册数 == 源码声明数"这条断言仍然抓得住"静默丢工具"（这正是它的意义）。
+ */
+const EXPECTED_TOOLS = expectedToolCount()
 const pythonDir = fileURLToPath(new URL('../python/', import.meta.url))
 const workerSource = readFileSync(join(pythonDir, 'ur_worker.py'), 'utf8').replace(/\r\n/g, '\n')
 const indexSource = readFileSync(fileURLToPath(new URL('../lib/index.js', import.meta.url)), 'utf8')

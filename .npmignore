@@ -8,3 +8,7 @@ __pycache__/
 node_modules/
 .gitignore
 *.tgz
+
+# 客户端 source map（3.5 MB，比 client.js 本身还大）。`files: ["lib"]` 是整目录白名单，
+# 不在这里挡住的话它会随包发布：既多传 3.5 MB，又让面板源码可被 DevTools 一键还原。
+lib/*.map

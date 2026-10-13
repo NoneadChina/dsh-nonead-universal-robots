@@ -18,11 +18,12 @@
  *
  * 退出码：0 = 全部通过；1 = 存在失败；2 = 环境错误。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createRequire, registerHooks } from 'node:module'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { expectedToolCount } from './tool-registry.mjs'
 
 const PLUGIN_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '..')
 const PEER_PACKAGES = [
@@ -31,8 +32,12 @@ const PEER_PACKAGES = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/schemastery',
 ]
-/** 工具表当前规模（当前的 83 个）；注册数少于它即为「静默丢工具」。 */
-const EXPECTED_TOOLS = 83
+/**
+ * 工具表当前规模 —— **从 `lib/index.js` 源码推导**（唯一来源 `scripts/tool-registry.mjs`），
+ * 不再写死一个数字：写死的数字与真实注册数漂移时，这条断言会从一个"静默丢工具"的守卫
+ * 变成一处需要人工同步的负担。
+ */
+const EXPECTED_TOOLS = expectedToolCount(PLUGIN_ROOT)
 /**
  * 孪生侧注册的 `kind:'exact'` 路由条数。
  *
@@ -50,18 +55,41 @@ const fail = (title, detail) => {
 }
 const note = (text) => console.log(`note  ${text}`)
 
+/**
+ * Windows 上 `Program Files` 不在 PATH 里，只能枚举目录来找宿主的 node_modules。
+ *
+ * ⚠️ **不能写死 `DSH Desktop`**：本机装的是 `Nonead DSH Desktop`，写死会让这条门禁在这台机器上
+ * 永远"找不到宿主"（于是它从未真正跑过）。这里枚举 `Program Files` 下的每个目录，取
+ * `<厂商目录>\resources\app\node_modules`（Electron 应用的标准布局）。
+ */
+function desktopCandidates() {
+  const found = []
+  for (const base of ['C:\\Program Files', 'C:\\Program Files (x86)']) {
+    let entries = []
+    try {
+      entries = readdirSync(base, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      found.push(join(base, entry.name, 'resources', 'app', 'node_modules'))
+    }
+  }
+  return found
+}
+
 /** 定位宿主 node_modules（含 @deepseek-ai/dsh-tools 的那个）。 */
 function findHostModules(argv) {
+  const explicit = typeof argv[2] === 'string' && !argv[2].startsWith('--') ? argv[2] : undefined
   const candidates = [
-    argv[2],
+    explicit,
     process.env.DSH_HOST_NODE_MODULES,
     // DSH Desktop 的实际安装位置：**必须排在上面那个 walk-up 之前**。
     // 本仓库自己的 node_modules 里也有（devDependency 带进来的）@deepseek-ai/dsh-tools，
     // 但那是**驱动脚本用的旧 dev 副本**（0.1.2-rc.1），不是运行插件的那份；用它去校验
     // DSL 与 peer 版本会得到误导性的结论（例如 "0/67 注册成功"）。
-    // Windows 上 Program Files 不在 PATH 里，所以候选路径写死并逐个探测存在性。
-    'C:\\Program Files\\DSH Desktop\\resources\\app\\node_modules',
-    'C:\\Program Files (x86)\\DSH Desktop\\resources\\app\\node_modules',
+    ...desktopCandidates(),
   ]
   const hasHost = (dir) => typeof dir === 'string' && dir !== ''
     && existsSync(join(dir, '@deepseek-ai', 'dsh-tools', 'package.json'))
@@ -104,7 +132,17 @@ function hostEntry(hostModules, specifier) {
 
 const hostModules = findHostModules(process.argv)
 if (hostModules === undefined) {
-  console.error('找不到宿主 node_modules；请显式传路径：node scripts/check-host-compat.mjs <host node_modules>')
+  const message =
+    '找不到宿主 node_modules（需要含 @deepseek-ai/dsh-tools 的那一份）；' +
+    '请显式传路径：node scripts/check-host-compat.mjs <host node_modules>'
+  // `--allow-missing-host` 让这条门禁可以安全地接入 `npm run check`：装了宿主的机器
+  // 会真跑校验，没装的机器得到一条**响亮的跳过说明**而不是硬失败。
+  // 默认（不带该开关）仍然是 exit 2 —— 环境错误必须与"检查通过"区分开。
+  if (process.argv.includes('--allow-missing-host')) {
+    console.log(`SKIP  ${message}`)
+    process.exit(0)
+  }
+  console.error(message)
   process.exit(2)
 }
 console.log(`plugin  ${PLUGIN_ROOT}`)

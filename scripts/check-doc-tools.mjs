@@ -22,12 +22,12 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { registeredToolNames } from './tool-registry.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const indexSource = readFileSync(`${root}lib/index.js`, 'utf8');
 
-/** Tool names as registered by lib/index.js. */
-const registered = [...indexSource.matchAll(/toolName:\s*'(ur_[a-z0-9_]+)'/g)].map((m) => m[1]);
+/** Tool names as registered by lib/index.js（唯一来源见 tool-registry.mjs）。 */
+const registered = registeredToolNames(root);
 const registeredSet = new Set(registered);
 
 /** Tool names that appear inside a markdown table row. */

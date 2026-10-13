@@ -14,6 +14,8 @@
  *   node test/<name>.test.mjs
  * 只跑 Node 测试（跳过需要 Python 的）：
  *   node scripts/run-tests.mjs --skip-python
+ * 环境确实缺依赖、你**明确接受**跳过时（否则有跳过即视为失败）：
+ *   node scripts/run-tests.mjs --allow-skip
  */
 
 import { spawnSync } from 'node:child_process';
@@ -46,27 +48,45 @@ const PYTHON_DEPENDENT = new Set(manifest.pythonDependent);
  * 没装依赖。`ur_worker.py` 顶层就 `import numpy`，所以这里以"能否 import numpy"为准；
  * paramiko 只有 list_programs 用得到，缺失时给一条提示但仍视为可用。
  */
+/**
+ * 解释器可用吗？**分两级探测，因为两者的门槛不一样**：
+ *   - `interpreter`：解释器本身能启动 —— 4 条只做 AST/正则的 Python 门禁只需要这一级
+ *     （`check-worker-ops` / `check-tool-params` / `check-rtde-recipe` / `check-approval-gate`）；
+ *   - `deps`：`import numpy` 成功 —— `ur_worker.py` 顶层就 `import numpy`，所以**测试文件**
+ *     与 `check-new-ops.py`（它会 import worker）需要这一级。
+ *
+ * 旧探针只有一级（numpy），于是 4 条根本不需要 numpy 的门禁被一并跳过；`needsDeps` 字段虽然
+ * 写着却从没被读过。paramiko 单独探测：只有 `ur_list_programs` 的 SSH 用例需要它。
+ */
 function probePython() {
   // `UR_PYTHON` 在前：README 与 test/selftest.test.mjs 一直是这样约定的
-  // （`UR_PYTHON || PYTHON || 'python'`）。
+  // （`UR_PYTHON || PYTHON || 'python'`）。`cwd` 锚定仓库根：解释器垫片/相对路径不该依赖调用者站哪。
   const bin = process.env.UR_PYTHON ?? process.env.PYTHON ?? 'python';
-  const probe = 'import numpy; print("ok")';
-  const r = spawnSync(bin, ['-c', probe], { encoding: 'utf8' });
-  if (r.status !== 0) {
-    const why = (r.stderr ?? '').trim().split('\n').pop() ?? '';
+  const run = (code) => spawnSync(bin, ['-c', code], { encoding: 'utf8', cwd: root });
+  if (run('import sys').status !== 0) {
     console.log(
-      `note  ${bin} 不能 import numpy${why ? `（${why}）` : ''}：跳过需要 Python 的用例。` +
-        '\n      这是环境问题，不是插件缺陷。装依赖或指定解释器：' +
-        '\n        pip install -r requirements.txt' +
-        '\n        UR_PYTHON=C:\\Python312\\python.exe npm test',
+      `note  找不到可用的 Python 解释器（${bin}）：**所有** Python 门禁与用例都会被跳过。\n` +
+        '      这是环境问题，不是插件缺陷。指定解释器：' +
+        '\n        UR_PYTHON=C:\\Python312\\python.exe node scripts/run-tests.mjs',
     );
-    return false;
+    return { bin, interpreter: false, deps: false };
   }
-  const p = spawnSync(bin, ['-c', 'import paramiko'], { encoding: 'utf8' });
-  if (p.status !== 0) {
+  const numpy = run('import numpy; print("ok")');
+  const deps = numpy.status === 0;
+  if (!deps) {
+    const why = (numpy.stderr ?? '').trim().split('\n').pop() ?? '';
+    console.log(
+      `note  ${bin} 不能 import numpy${why ? `（${why}）` : ''}：需要 numpy 的用例与 ` +
+        'check-new-ops.py 会被跳过；**只做 AST/正则的 4 条 Python 门禁仍然照跑**。\n' +
+        '      这是环境问题，不是插件缺陷。装依赖或指定解释器：' +
+        '\n        pip install -r requirements.txt' +
+        '\n        UR_PYTHON=C:\\Python312\\python.exe node scripts/run-tests.mjs',
+    );
+  }
+  if (run('import paramiko').status !== 0) {
     console.log(`note  ${bin} 没有 paramiko：ur_list_programs 的 SSH 用例会失败（其余用例不受影响）`);
   }
-  return true;
+  return { bin, interpreter: true, deps };
 }
 
 const files = readdirSync(testDir)
@@ -78,7 +98,7 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const hasPython = probePython();
+const python = probePython();
 const results = [];
 
 for (const file of files) {
@@ -87,13 +107,21 @@ for (const file of files) {
     results.push({ file, status: 'skipped', detail: '--skip-python' });
     continue;
   }
-  if (!hasPython && needsPython) {
-    results.push({ file, status: 'skipped', detail: '未找到 Python 解释器（可用 PYTHON=<path> 指定）' });
+  if (needsPython && !python.deps) {
+    results.push({
+      file,
+      status: 'skipped',
+      detail: python.interpreter
+        ? `Python 缺依赖（${python.bin} 不能 import numpy）`
+        : `没有可用的 Python 解释器（${python.bin}）`,
+    });
     continue;
   }
   process.stdout.write(`\n── ${file} ──\n`);
   const r = spawnSync(process.execPath, [join(testDir, file)], {
     stdio: 'inherit',
+    // `cwd` 锚定仓库根：用例里用相对路径（fixtures、python/）时不该依赖调用者站在哪。
+    cwd: root,
     env: process.env,
   });
   results.push({
@@ -124,21 +152,26 @@ const CHECKS = [
   { name: 'python scripts/check-new-ops.py', needsPython: true, needsDeps: true },
 ];
 
-const pythonBin = process.env.UR_PYTHON ?? process.env.PYTHON ?? 'python';
+const pythonBin = python.bin;
 for (const check of CHECKS) {
   const label = check.name;
   if (check.needsPython && skipPython) {
     results.push({ file: label, status: 'skipped', detail: '--skip-python' });
     continue;
   }
-  if (check.needsPython && !hasPython) {
-    results.push({ file: label, status: 'skipped', detail: '环境无可用依赖（numpy/paramiko），非插件缺陷' });
+  if (check.needsPython && !python.interpreter) {
+    results.push({ file: label, status: 'skipped', detail: '环境无可用 Python 解释器，非插件缺陷' });
+    continue;
+  }
+  // `needsDeps` 以前只写在数据里、循环从不读它 ⇒ 4 条只做 AST/正则的门禁被连带跳过。
+  if (check.needsDeps && !python.deps) {
+    results.push({ file: label, status: 'skipped', detail: '环境无 numpy（该门禁会 import worker）' });
     continue;
   }
   process.stdout.write(`\n── ${label} ──\n`);
   const r = check.needsPython
-    ? spawnSync(pythonBin, [check.name.split(' ')[1]], { stdio: 'inherit', env: process.env })
-    : spawnSync(check.bin, check.args, { stdio: 'inherit', env: process.env });
+    ? spawnSync(pythonBin, [check.name.split(' ')[1]], { stdio: 'inherit', cwd: root, env: process.env })
+    : spawnSync(check.bin, check.args, { stdio: 'inherit', cwd: root, env: process.env });
   results.push({
     file: label,
     status: r.status === 0 ? 'pass' : 'fail',
@@ -154,9 +187,31 @@ for (const r of results) {
   const mark = r.status === 'pass' ? 'PASS' : r.status === 'skipped' ? 'SKIP' : 'FAIL';
   console.log(`${mark}  ${r.file}${r.detail ? ` — ${r.detail}` : ''}`);
 }
+const ran = results.length - skippedAll.length;
 console.log(
   `\n共 ${results.length} 项（测试文件 + 门禁）：通过 ${results.length - failedAll.length - skippedAll.length}，` +
     `失败 ${failedAll.length}，跳过 ${skippedAll.length}`,
 );
 
-process.exit(failedAll.length === 0 ? 0 : 1);
+/*
+ * "全绿"必须是**真的跑了**才算。
+ *
+ * 旧写法是 `process.exit(failedAll.length === 0 ? 0 : 1)` —— 把"跳过"当绿。在一台没装 numpy 的
+ * 机器上，11 个测试文件 + 5 条门禁会全部跳过，`npm test` 照样打印「失败 0」并 exit 0：
+ * 看起来全绿，实际上什么都没验证过。显式的跳过开关（`--skip-python` / `--allow-skip`）照旧放行，
+ * 因为它们表达的正是"我知道这些没跑"。
+ */
+const allowSkip = skipPython || process.argv.includes('--allow-skip');
+if (failedAll.length > 0) process.exit(1);
+if (ran === 0) {
+  console.error('\n没有任何一项真正执行（全部被跳过）—— 这不能算通过。');
+  process.exit(1);
+}
+if (skippedAll.length > 0 && !allowSkip) {
+  console.error(
+    `\n有 ${skippedAll.length} 项被跳过 —— 这不能算通过。\n` +
+      '  如果这是你明确接受的环境状态，请显式加 --allow-skip（或 --skip-python）。',
+  );
+  process.exit(1);
+}
+process.exit(0);
