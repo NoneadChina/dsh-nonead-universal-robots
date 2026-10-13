@@ -24,6 +24,8 @@ import {
   createTwinModelsHandler,
   createTwinStreamHandler,
 } from '../lib/twin-routes.js';
+// 审批状态是**宿主侧单例**：陈旧帧回放要不要带上它，必须能被测到（见幽灵目标那条用例）。
+import { pendingMotion } from '../lib/pending-motion.js';
 
 // ── fixtures ───────────────────────────────────────────────────────────────
 
@@ -319,6 +321,41 @@ test('★ 读暂时失败 ⇒ 回放最后一笔已知读数并标 stale（conne
   assert.equal(stale.body.stale_ms, 3000, '必须给出这帧有多旧');
   assert.deepEqual(stale.body.q, ok.body.q, '必须回放最后一笔已知关节角');
   assert.equal(stale.body.ts, 1000, '★ ts 不得回填 —— 客户端靠它算龄期');
+});
+
+test('★ 陈旧帧回放不得带出"幽灵待审批目标"：该项必须现场重读', async () => {
+  const codeRef = { code: null };
+  const clock = { t: 1000 };
+  const h = createTwinStateHandler({
+    worker: flakyWorker(codeRef),
+    connectedIps: () => new Set(['1.2.3.4']),
+    now: () => clock.t,
+  });
+
+  const token = pendingMotion.begin('ur_movej', { q: [0.1, 0, 0, 0, 0, 0] });
+  let ended = false;
+  try {
+    const fresh = await h({ ip: '1.2.3.4' });
+    assert.ok(fresh.body.pending_motion, '有审批时好帧必须带上目标');
+
+    codeRef.code = 'WORKER_TIMEOUT';
+    clock.t = 4000;
+    const staleWith = await h({ ip: '1.2.3.4' });
+    assert.ok(staleWith.body.pending_motion, '审批仍在进行时，陈旧帧也要把目标画出来（现场重读）');
+
+    // 审批结束之后再回放：**绝不能**还带着那个目标（旧实现整块回放缓存 ⇒ 幽灵目标）。
+    pendingMotion.end(token);
+    ended = true;
+    const staleWithout = await h({ ip: '1.2.3.4' });
+    assert.equal(staleWithout.body.stale, true, '仍然是陈旧帧');
+    assert.equal(
+      staleWithout.body.pending_motion,
+      undefined,
+      '★ 审批已结束，陈旧帧不得继续回放它的目标 —— 那会让面板显示一个不存在的待批动作',
+    );
+  } finally {
+    if (!ended) pendingMotion.end(token);
+  }
 });
 
 test('★ 只有"暂时拿不到"才降级：真正的连接错误仍然必须是 connected:false', async () => {

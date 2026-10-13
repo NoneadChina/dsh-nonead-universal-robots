@@ -26,7 +26,7 @@ const PYTHON = process.env.PYTHON ?? 'python'
 
 /** 假 worker：`echo` 正常回包；`die` 直接退出（模拟崩溃）；`hang` 永不回包。 */
 const FAKE_WORKER = `
-import json, sys, time
+import json, os, sys, time
 
 for line in sys.stdin:
     line = line.strip()
@@ -34,7 +34,14 @@ for line in sys.stdin:
         continue
     req = json.loads(line)
     op = req.get("op")
-    if op == "echo":
+    if op == "env":
+        sys.stdout.write(json.dumps({"id": req["id"], "ok": True, "data": {
+            "pythonutf8": os.environ.get("PYTHONUTF8"),
+            "pythonioencoding": os.environ.get("PYTHONIOENCODING"),
+            "pythonunbuffered": os.environ.get("PYTHONUNBUFFERED"),
+        }}) + "\\n")
+        sys.stdout.flush()
+    elif op == "echo":
         sys.stdout.write(json.dumps({"id": req["id"], "ok": True, "data": {"echo": req.get("v")}}) + "\\n")
         sys.stdout.flush()
     elif op == "fail":
@@ -315,6 +322,46 @@ test('dispose() 清空遥测缓存（不给已死会话留姿态）', async () =
     assert.ok(worker.latestTelemetry('1.2.3.4'))
     worker.dispose()
     assert.equal(worker.latestTelemetry('1.2.3.4'), undefined)
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('stdio 编码：spawn 的 env 必须钉住 PYTHONUTF8 / PYTHONIOENCODING', async () => {
+  // worker 的 stdio 协议固定是 UTF-8（出站侧 ur_worker.py 直接写 sys.stdout.buffer 就是
+  // 为了绕开 GBK）。入站侧若交给解释器默认值，中文 Windows 上就是 cp936：中文程序名静默
+  // 乱码、非法字节序列直接抛 UnicodeDecodeError 把进程打死。宿主必须主动钉死。
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    const env = await worker.call('env', {})
+    assert.equal(env.pythonutf8, '1', 'PYTHONUTF8 必须为 1（否则 stdin/stdout 走系统 locale）')
+    assert.equal(env.pythonioencoding, 'utf-8', 'PYTHONIOENCODING 必须是 utf-8')
+    assert.equal(env.pythonunbuffered, '1', '既有行为不得丢：仍然要求无缓冲')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('dispose() 取消已排队的重启退避：拆卸之后绝不再 spawn，等待方立即失败', async () => {
+  const fixture = fakeWorkerFixture({ restartDelayMs: 400 })
+  try {
+    const worker = fixture.worker()
+    await assert.rejects(() => worker.call('die'), /exited/)
+    const spawnsBefore = worker.respawnCount
+
+    // 下一次 call() 会先等退避；在它等待期间把 worker 拆掉。
+    const pending = worker.call('echo', { v: 'after-dispose' })
+    worker.dispose()
+    await assert.rejects(() => pending, /disposed/i,
+      '等待退避的调用方必须立刻失败，而不是等到自己的命令超时')
+
+    // 退避窗口过去之后，仍然不能有任何新子进程被拉起来（旧实现会在这里凭空 spawn，
+    // 而那时 this.proc 已被清空 —— 没人持有、也没人会 kill 那个 Python 进程）。
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    assert.equal(worker.respawnCount, spawnsBefore, '拆卸后不得再 spawn 子进程')
+    assert.equal(worker.proc, null, '拆卸后不得留下子进程引用')
+    assert.equal(worker._respawnTimer, null, '退避定时器必须已被取消（不是等它自己烧完）')
   } finally {
     fixture.cleanup()
   }
