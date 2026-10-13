@@ -150,6 +150,26 @@ const CHECKS = [
   { name: 'python scripts/check-approval-gate.py', needsPython: true },
   // Needs numpy/paramiko (it imports the worker), unlike the four static gates above.
   { name: 'python scripts/check-new-ops.py', needsPython: true, needsDeps: true },
+  /*
+   * 离线探针：不需要真机、也不需要宿主，纯靠注入的假流与真实定时器驱动孪生/SSE 的连续性。
+   *
+   * 它们以前**不接入任何门禁**，于是只能人工跑 —— 而"只有脚本、没人跑"正是审计里反复出现的
+   * 症状。后两条需要 `EventSource`：Node 22.3 起用 `--experimental-eventsource` 打开。不加开关
+   * 它们会立刻以 1 退出（探针自己拒绝退化成"不模拟 onerror 的假实现"），所以这里显式带上。
+   */
+  { name: 'node scripts/probe-sse-lifetime.mjs', bin: process.execPath, args: ['scripts/probe-sse-lifetime.mjs'] },
+  { name: 'node scripts/probe-twin-pump-stall.mjs', bin: process.execPath, args: ['scripts/probe-twin-pump-stall.mjs'] },
+  { name: 'node scripts/probe-twin-push-continuity.mjs', bin: process.execPath, args: ['scripts/probe-twin-push-continuity.mjs'] },
+  {
+    name: 'node --experimental-eventsource scripts/probe-twin-stall-end-to-end.mjs',
+    bin: process.execPath,
+    args: ['--experimental-eventsource', 'scripts/probe-twin-stall-end-to-end.mjs'],
+  },
+  {
+    name: 'node --experimental-eventsource scripts/probe-twin-stream-error-event.mjs',
+    bin: process.execPath,
+    args: ['--experimental-eventsource', 'scripts/probe-twin-stream-error-event.mjs'],
+  },
 ];
 
 const pythonBin = python.bin;

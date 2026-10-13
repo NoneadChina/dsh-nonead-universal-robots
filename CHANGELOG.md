@@ -128,6 +128,10 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **Tool counting has one source of truth** (`scripts/tool-registry.mjs`). It used to be computed
   dynamically in one gate and hardcoded as `83` in two others; a tool added without updating all three
   would make the gates contradict each other.
+- **The five offline twin/SSE probes are now part of the suite.** `scripts/probe-*.mjs` were wired into
+  no gate at all — "a script nobody runs" is the very symptom this release is about. They need no robot
+  and no host; the two that exercise `EventSource` run with `--experimental-eventsource` (Node ≥22.3),
+  which is now the documented dev floor.
 
 ### Changed — published package
 
