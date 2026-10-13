@@ -126,6 +126,19 @@ class RealTimeClient(object):
         '''
         return self.__robotModel.rtcConnectionState > ConnectionState.DISCONNECTED
         
+    def __quiesce(self):
+        """等上一段被跟踪的程序停下来，并把它的等待线程收尾。
+
+        `SendProgram` 一直有这一步，而 `Send()` **完全没有** —— 见 `Send()` 里的说明。
+        """
+        if self.__thread is not None:
+            if self.__robotModel.rtcProgramRunning:
+                self.__robotModel.stopRunningFlag = True
+                while self.__robotModel.rtcProgramRunning:
+                    time.sleep(0.1)
+                self.__robotModel.stopRunningFlag = False
+            self.__thread.join()
+
     def SendProgram(self,prg=''):
         '''
         Send a new command or program (string) to the UR controller. 
@@ -156,15 +169,9 @@ class RealTimeClient(object):
             self.lastSendFailure = '发送被中止：stopRunningFlag 已置位（机器人正在停止）'
             return False
  
-        #Close down previous thread 
-        if self.__thread is not None:
-            if self.__robotModel.rtcProgramRunning:
-                self.__robotModel.stopRunningFlag = True
-                while self.__robotModel.rtcProgramRunning: time.sleep(0.1)
-                self.__robotModel.stopRunningFlag = False
-            self.__thread.join()
-            
-        
+        #Close down previous thread（与 `Send()` 共用同一套静默期）
+        self.__quiesce()
+
         #Rest status bits
         self.__robotModel.rtcProgramRunning = True
         self.__robotModel.rtcProgramExecutionError = False
@@ -205,6 +212,15 @@ class RealTimeClient(object):
                 self.lastSendFailure = '未连接到机器人实时端口（30003）'
                 print('SendProgram: Not connected to robot')
                 return False
+
+        # ⚠️ 与 `SendProgram` 同样的静默期。`Send()` 走的是一批**状态设置**（数字/模拟输出、
+        # 工具电压、负载、力控参数、motion version…），以前**完全不做**这一步：当上一段经
+        # `send_script`（verify=false 允许发阻塞/长动作脚本）下发的程序还在跑时，它的等待线程
+        # 仍活着，于是两个线程并发 `sendall` 到**同一个** 30003 socket，并且都在改
+        # `lastSendFailure` / `rtcProgramRunning` / `rtcProgramExecutionError`；等待线程收尾时
+        # 还会自己发 `prgRest`。行协议可能被交错或被那段收尾脚本覆盖，控制器收到的是半截脚本，
+        # 而 `Send()` 只回报"字节写成功了" —— 与本项目"不得谎报生效"的底线冲突。
+        self.__quiesce()
 
         #Rest status bits
         self.__robotModel.rtcProgramRunning = True

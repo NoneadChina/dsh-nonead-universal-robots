@@ -11,6 +11,10 @@ import time
 
 DEFAULT_TIMEOUT = 2.0
 
+# 单次 `recv()` 的字节数。上游是 1024 且**不累积** —— 超过一个分片的应答会被截断，
+# 余下的字节串进下一条命令的窗口。这里放大到 4096 并按换行切分（见 `__receive`）。
+RECV_CHUNK = 4096
+
 class ConnectionState:
     ERROR = 0
     DISCONNECTED = 1
@@ -51,6 +55,11 @@ class DashBoard(threading.Thread):
         self.__reconnectTimeout = 2 #Seconds (while in run)
         self.__conn_state = ConnectionState.DISCONNECTED
         self.last_respond = None
+        # 应答序号：`__send()` 靠它区分"我这条命令的应答"与"上一条命令的应答"。
+        # 只递增、不重置，避免"序号回绕后与旧值相等"这种假匹配。
+        self.respond_seq = 0
+        # 收包缓冲：`__receive()` 按换行切分完整应答，半个应答留在缓冲里等下一片。
+        self.__recv_buf = ''
         self.__stop_event = True
         threading.Thread.__init__(self)
         self.__dataEvent = threading.Condition()
@@ -414,9 +423,17 @@ class DashBoard(threading.Thread):
                 if msg is not None:
                     #self._logger.info('UR Dashboard respond ' + msg)
                     self.last_respond = msg
-
-                with self.__dataEvent:
-                    self.__dataEvent.notifyAll()
+                    self.respond_seq += 1
+                    # ⚠️ **只在真的收到消息时 notify。**
+                    #
+                    # 旧写法在 select 超时（这一轮根本没有数据）时也无条件 `notifyAll()`，
+                    # 于是 `wait_dbs()` 会立刻返回 True，而 `last_respond` 仍是 None ——
+                    # `__send()` 据此报告"发送成功"，真正的应答稍后才到，正好落进**下一条
+                    # 命令**的窗口。后果是实打实的：上一条 `isProgramSaved` 刚回过 "True"，
+                    # 一台**没在远程控制模式**的机器人就会被报成 `remote_control: true`，
+                    # 模型据此下发 URScript 并被控制器静默丢弃。
+                    with self.__dataEvent:
+                        self.__dataEvent.notifyAll()
                 t0 = time.time()
                 self.__conn_state = ConnectionState.STARTED
 
@@ -461,6 +478,23 @@ class DashBoard(threading.Thread):
         with self.__dataEvent:
             return bool(self.__dataEvent.wait(timeout))
 
+    def __await_respond(self, since_seq, timeout):
+        """等到收到一条**比 `since_seq` 更新**的应答，或超时。返回是否收到。
+
+        不能只等"任意一次 notify"：接收线程在 select 超时（这一轮没有数据）时也会
+        notify，于是 `wait_dbs()` 立刻返回 True，而 `last_respond` 仍是 None —— 调用方
+        据此以为发送成功。这里以**应答序号**为判据，与 notify 的时机解耦。
+        """
+        deadline = time.time() + timeout
+        while True:
+            if getattr(self, 'respond_seq', 0) != since_seq:
+                return True
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            with self.__dataEvent:
+                self.__dataEvent.wait(min(remaining, 0.2))
+
     def sendCommand(self, cmd):
         '''发送一条 Dashboard 命令并**同步等待**它自己的应答。
 
@@ -473,13 +507,18 @@ class DashBoard(threading.Thread):
         是**上一条命令的应答**。这对 `is in remote control` 是致命的 —— 例如上一条
         `isProgramSaved` 刚回过 "True"，于是一台**没在远程控制模式**的机器人被报成
         `remote_control: true`，模型据此下发 URScript 并被控制器静默丢弃。
-        ⇒ 这里先清空 `last_respond`，再发送，然后只认"发送之后新到达"的应答。
+        ⇒ 这里先记下应答序号、清空 `last_respond`，再发送，最后**只认序号前进了的那一条**。
         '''
+        before_seq = getattr(self, 'respond_seq', 0)
         self.last_respond = None
         try:
             getattr(self, cmd)()
         except Exception as exc:
             return False, '%s: %s' % (type(exc).__name__, exc)
+        # 序号没前进 ⇒ 这一条命令没有拿到自己的应答。**绝不**把 `last_respond` 交出去：
+        # 它可能是上一条命令留下的（"没拿到"必须如实报失败，而不是拿旧值凑数）。
+        if getattr(self, 'respond_seq', 0) == before_seq:
+            return False, ''
         respond = self.last_respond
         if respond is None:
             return False, ''
@@ -497,6 +536,8 @@ class DashBoard(threading.Thread):
         '''
         t0 = time.time()
         last_fail_log = 0.0
+        # 记下发送前的应答序号：本次只认"发送之后**新到**的那一条应答"。
+        before_seq = getattr(self, 'respond_seq', 0)
         while (time.time()-t0<self.__reconnectTimeout):
             if self.__sock is None:
                 # 接收线程已判定断链：这里不能再去 select([None]) —— 那会抛 TypeError
@@ -509,9 +550,10 @@ class DashBoard(threading.Thread):
                 (_, writable, _) = select.select([], [self.__sock], [], DEFAULT_TIMEOUT)
                 if len(writable):
                     self.__sock.sendall(buf)
-                    # 带超时地等应答：sendCommand() 依赖"发送之后新到达的应答"来避免
-                    # 读到陈旧值，超时返回 False 而不是永久阻塞。
-                    self.wait_dbs(DEFAULT_TIMEOUT * 2)
+                    # 带超时地等**属于本条命令**的应答：以发送前的应答序号为界，只有序号
+                    # 前进才算收到（`wait_dbs()` 会被"空轮 notify"提前唤醒，不能作为判据），
+                    # 超时返回而不是永久阻塞。
+                    self.__await_respond(before_seq, DEFAULT_TIMEOUT * 2)
                     return True
             except:
                 # NOTE: this `except` sits inside the reconnect loop. With a dead socket
@@ -542,7 +584,7 @@ class DashBoard(threading.Thread):
             return None
         (readable, _, _) = select.select([self.__sock], [], [], DEFAULT_TIMEOUT)
         if len(readable):
-            data = self.__sock.recv(1024)
+            data = self.__sock.recv(RECV_CHUNK)
             if len(data) == 0:
                 return None
             
@@ -557,6 +599,23 @@ class DashBoard(threading.Thread):
                 text = data.decode('utf-8')
             except UnicodeDecodeError:
                 text = data.decode('latin-1')
-            return text.rstrip('\r\n')
+
+            # 按**换行**切分，而不是"一次 recv 当一条应答"：上游用 1024 字节的 recv 且
+            # 完全不累积，超过一个分片的应答会被截断，余下的字节串进**下一条命令**的窗口。
+            # 现在以最后一个换行为界，把"确定完整"的部分交出去，其余留在缓冲里等下一片；
+            # 多行应答的语义保持不变（内部换行原样保留）。
+            buf = getattr(self, '_DashBoard__recv_buf', '') + text
+            cut = buf.rfind('\n')
+            if cut < 0:
+                if len(data) >= RECV_CHUNK:
+                    # 整整一满块还没见到换行 ⇒ 这条应答被 TCP 分片了，继续攒。
+                    self.__recv_buf = buf
+                    return None
+                # 不以 \n 结尾的应答：保持旧行为（把当前内容当作应答返回），
+                # 免得把这类控制器变成"永远等不到应答"。
+                self.__recv_buf = ''
+                return buf.rstrip('\r\n') or None
+            self.__recv_buf = buf[cut + 1:]
+            return buf[:cut].rstrip('\r\n') or None
             
             

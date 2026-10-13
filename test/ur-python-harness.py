@@ -340,5 +340,481 @@ def probe_tool_io_names():
 
 out['tool_io_names'] = probe_tool_io_names()
 
+
+# ---------------------------------------------------------------------------
+# 9. `t=` 必须真的进生成的 URScript（回归：movej/movel 的时长参数曾被静默丢弃）
+#
+# 这个缺陷活了很久，正是因为**没有任何测试看过"传了 t 之后生成的脚本长什么样"**。
+# 只扫源码也抓不住它：旧代码里 `t_val = ''` 与 `tval = 't={t},'` 同时存在，
+# 真正的错误是"格式串引用前者、赋值给了后者"—— 只有真的执行一遍才看得见。
+# ---------------------------------------------------------------------------
+
+def probe_motion_t_param():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location('ur_uscript_probe', _USCRIPT_DIR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    # `_move()` 只用局部变量拼字符串、不碰 socket ⇒ 绕过 __init__ 直接造实例。
+    move = getattr(object.__new__(module.UrScript), '_move')
+
+    joint_5 = move(movetype='j', q=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6], a=1.4, v=1.05, t=5, r=0)
+    linear_3 = move(movetype='l', pose=[0.1, 0.2, 0.3, 0, 0, 0], a=1.2, v=0.25, t=3, r=0)
+    joint_0 = move(movetype='j', q=[0, 0, 0, 0, 0, 0], a=1.4, v=1.05, t=0, r=0)
+    process = move(movetype='p', pose=[0.1, 0.2, 0.3, 0, 0, 0], a=1.2, v=0.25, t=0, r=0)
+    return {
+        'j_has_t5': 't=5' in joint_5,
+        'l_has_t3': 't=3' in linear_3,
+        'j_has_t0': 't=0' in joint_0,
+        'p_has_no_t': 't=' not in process,
+        'j_text': joint_5.strip()[:160],
+        'l_text': linear_3.strip()[:160],
+    }
+
+
+out['motion_t_param'] = probe_motion_t_param()
+
+
+# ---------------------------------------------------------------------------
+# 10. 错误码映射：缺字段 / 溢出是"参数错"（BADARG），不是"内部错误"（HUGE）
+# ---------------------------------------------------------------------------
+
+def probe_error_codes():
+    return {
+        'key_error': ur_worker._error_code_for(KeyError('distance')),
+        'overflow': ur_worker._error_code_for(OverflowError('int(inf)')),
+        'value_error': ur_worker._error_code_for(ValueError('bad')),
+        'unknown': ur_worker._error_code_for(RuntimeError('boom')),
+    }
+
+
+out['error_codes'] = probe_error_codes()
+
+
+# ---------------------------------------------------------------------------
+# 11. 入站方向也必须是 UTF-8（stdout 侧早就钉住了，stdin 侧以前没管）
+# ---------------------------------------------------------------------------
+
+def probe_stdin_utf8():
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+    main = src[src.index('def main():'):]
+    return {
+        # 必须**覆盖 stdin**（stdout 侧一直是 UTF-8，缺陷只在入站方向）。
+        'reconfigures_stdin': ('reconfigure(encoding="utf-8")' in src
+                               and 'sys.stdin, sys.stdout, sys.stderr' in src),
+        'calls_force_utf8': '_force_utf8_stdio()' in main,
+        'guards_decode_error': 'UnicodeDecodeError' in main,
+        'loop_reads_line': 'sys.stdin.readline()' in main,
+    }
+
+
+out['stdin_utf8'] = probe_stdin_utf8()
+
+
+# ---------------------------------------------------------------------------
+# 12. 工具数字输出：`Send()` 的结果必须被交出来（物理动作不能"发不出去也报成功"）
+# ---------------------------------------------------------------------------
+
+def probe_tool_digital_out_send_result():
+    """真的调一遍 `set_tool_digital_out`，看它把 `Send()` 的结果交没交出来。
+
+    它驱动的是夹爪/气阀这类**物理执行器**：掉线或非远程控制模式下 `Send()` 返回 False
+    并写下 `lastSendFailure`，而旧实现把返回值丢掉 ⇒ worker 无条件回报"已设置"。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location('ur_uscript_tdo', _USCRIPT_DIR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class _FakeRtc:
+        def __init__(self, ok):
+            self.ok = ok
+            self.sent = []
+
+        def Send(self, text):
+            self.sent.append(text)
+            return self.ok
+
+    def once(ok):
+        script = object.__new__(module.UrScript)
+        rtc = _FakeRtc(ok)
+        script.robotConnector = type('C', (), {'RealTimeClient': rtc})()
+        returned = script.set_tool_digital_out(1, True)
+        return returned, (rtc.sent[0].strip() if rtc.sent else None)
+
+    ok_returned, ok_sent = once(True)
+    fail_returned, _ = once(False)
+    return {
+        'ok_returns_true': ok_returned is True,
+        'fail_returns_false': fail_returned is False,
+        'sent_text': ok_sent,
+        'uses_manual_function_name': ok_sent == 'set_tool_digital_out(1, True)',
+    }
+
+
+out['tool_digital_out_send'] = probe_tool_digital_out_send_result()
+
+
+# ---------------------------------------------------------------------------
+# 13. 诚实性契约（源码级）：验证过的读取 / 只能声称"已下发"
+# ---------------------------------------------------------------------------
+
+def probe_honesty_contracts():
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+
+    def body(name):
+        start = src.index('def %s(' % name)
+        end = src.index('\ndef ', start + 1)
+        return src[start:end]
+
+    get_di = body('op_get_digital_in')
+    set_do = body('op_set_digital_out')
+    force = body('op_force_mode')
+    end_force = body('op_end_force_mode')
+    verified = body('_read_tool_digital_in_verified')
+    return {
+        # 工具数字输入：必须走哨兵验证过的读取，且不得再直接调上游那个"逐句回读寄存器"的封装
+        'tool_di_uses_verified': '_read_tool_digital_in_verified(' in get_di,
+        'tool_di_no_stale_readback': 'robot.get_tool_digital_in(' not in get_di,
+        'verified_has_probe_sentinel': 'ur_write_tool_di_probe' in verified,
+        'verified_has_read_program': 'ur_read_tool_digital_in' in verified,
+        'verified_refuses_without_finish': 'NOT_EXECUTED' in verified,
+        # 工具数字输出：必须判发送结果
+        'tool_do_checks_send': 'if not robot.set_tool_digital_out(' in set_do,
+        # 状态型命令：只能声称"已下发"，并带 verified:False
+        'force_mode_unverified': '"verified": False' in force and '已下发' in force,
+        'end_force_unverified': '"verified": False' in end_force and '已下发' in end_force,
+    }
+
+
+out['honesty_contracts'] = probe_honesty_contracts()
+
+
+# ---------------------------------------------------------------------------
+# 14. Dashboard 陈旧应答串台：没收到应答时，绝不把上一条的应答交出去
+# ---------------------------------------------------------------------------
+
+def probe_dashboard_crosstalk():
+    """真的建一条 TCP 连接（假 Dashboard 服务端**故意不回答**），验证两件事：
+
+      - "发送成功" ≠ "收到应答"：`sendCommand()` 必须返回 (False, '')；
+      - 它**绝不能**把上一条命令留下的 "true" 交出去。
+
+    真机故障链：上一条 `isProgramSaved` 回过 "True"，于是 `is in remote control` 被报成
+    true ⇒ 模型据此下发 URScript，而控制器在本地/示教器模式下把它静默丢弃。
+    """
+    import socket
+    import threading
+    from URBasic import dashboard as dashmod
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('127.0.0.1', 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    seen = []
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+        except OSError:
+            return
+        buf = b''
+        try:
+            while True:
+                chunk = conn.recv(dashmod.RECV_CHUNK)
+                if not chunk:
+                    break
+                buf += chunk
+                while b'\n' in buf:
+                    line, buf = buf.split(b'\n', 1)
+                    seen.append(line.decode('utf-8', 'replace').strip())
+                    # 故意不回答任何命令：模拟"应答没回来 / 接收线程已死"。
+        except OSError:
+            pass
+
+    threading.Thread(target=serve, daemon=True).start()
+
+    old_timeout = dashmod.DEFAULT_TIMEOUT
+    dashmod.DEFAULT_TIMEOUT = 0.25          # 让探针在秒级内跑完
+    sock = socket.create_connection(('127.0.0.1', port), timeout=2)
+    try:
+        dash = dashmod.DashBoard.__new__(dashmod.DashBoard)
+        dash._DashBoard__robotModel = None
+        dash._DashBoard__reconnectTimeout = 2
+        dash._DashBoard__conn_state = dashmod.ConnectionState.STARTED
+        dash.last_respond = 'true'          # ← 上一条命令留下的陈旧应答
+        dash.respond_seq = 7
+        dash._DashBoard__recv_buf = ''
+        dash._DashBoard__stop_event = False
+        dash._DashBoard__dataEvent = threading.Condition()
+        dash._DashBoard__dataAccess = threading.Lock()
+        dash._DashBoard__sock = sock
+
+        ok, respond = dash.sendCommand('ur_is_remote_control')
+        seq_after = dash.respond_seq
+    finally:
+        dashmod.DEFAULT_TIMEOUT = old_timeout
+        for closable in (sock, server):
+            try:
+                closable.close()
+            except OSError:
+                pass
+
+    return {
+        'sent': list(seen),
+        'ok': bool(ok),
+        'respond': str(respond),
+        'seq_unchanged': seq_after == 7,
+    }
+
+
+out['dashboard_crosstalk'] = probe_dashboard_crosstalk()
+
+
+# ---------------------------------------------------------------------------
+# 15. Dashboard 契约（源码级）：notify 只能由"真的收到消息"触发
+# ---------------------------------------------------------------------------
+
+def probe_dashboard_contract():
+    src = open(os.path.join(PY, 'URBasic', 'dashboard.py'), encoding='utf-8').read()
+    run_body = src[src.index('def run(self):'):src.index('def wait_dbs(')]
+    seg = run_body[run_body.index('msg = self.__receive()'):]
+    seg = seg[:seg.index('t0 = time.time()')]
+    return {
+        # notify 必须落在 `if msg is not None:` 分支内（空轮通知会让 wait_dbs 假醒）
+        'notify_inside_message_branch': 'notifyAll()' in seg and 'if msg is not None:' in seg,
+        'seq_incremented': 'self.respond_seq += 1' in seg,
+        'send_awaits_by_seq': '__await_respond(before_seq' in src,
+        'sendcommand_guards_stale': "'respond_seq', 0) == before_seq" in src,
+        'recv_accumulates_and_splits': 'self.__recv_buf' in src and 'rfind' in src,
+        'recv_chunk_is_bigger': 'recv(RECV_CHUNK)' in src,
+    }
+
+
+out['dashboard_contract'] = probe_dashboard_contract()
+
+
+# ---------------------------------------------------------------------------
+# 16. 状态型命令的诚实性：一律走 ok_unverified（措辞降级 + verified:False）
+# ---------------------------------------------------------------------------
+
+UNVERIFIED_OPS = [
+    'op_set_tool_voltage', 'op_set_tcp', 'op_set_payload', 'op_set_payload_inertia',
+    'op_force_mode_settings', 'op_tool_communication', 'op_set_tool_output_mode',
+    'op_motion_version', 'op_set_conveyor_tick', 'op_set_gravity', 'op_zero_ftsensor',
+    'op_conveyor_tracking',
+]
+
+
+def probe_unverified_ops():
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+    result = {}
+    for name in UNVERIFIED_OPS:
+        start = src.index('def %s(' % name)
+        end = src.index('\ndef ', start + 1)
+        body = src[start:end]
+        result[name] = {
+            'uses_ok_unverified': 'return ok_unverified({' in body,
+            'no_plain_ok_success': 'return ok({' not in body,
+        }
+    return result
+
+
+out['unverified_ops'] = probe_unverified_ops()
+
+
+def probe_ok_unverified_behavior():
+    """`ok_unverified()` 真的降级了吗？（这不是源码匹配，是把函数跑一遍）"""
+    out = ur_worker.ok_unverified({"message": "已设置 X", "data": {"ip": "1.2.3.4"}})
+    data = out.get("data") or {}
+    message = out.get("message") or ""
+    return {
+        'verified_false': data.get('verified') is False,
+        'keeps_original_fields': data.get('ip') == '1.2.3.4',
+        'message_keeps_head': message.startswith('已设置 X'),
+        'message_appends_note': '未校验' in message,
+    }
+
+
+out['ok_unverified_behavior'] = probe_ok_unverified_behavior()
+
+
+# ---------------------------------------------------------------------------
+# 17. RTDE：START 应答必须被采信 + 收包必须跨 recv 边界累积
+#
+# 两条都用**真 socket 对**驱动 `__receive()`（不是把它 mock 掉），因为缺陷正好在
+# "字节怎么被切开"这一层：mock 掉就什么都测不出来。
+# ---------------------------------------------------------------------------
+
+def probe_rtde_start_and_buffer():
+    import socket
+    import struct
+    import threading
+    from URBasic import rtde as rtdemod
+    from URBasic.connectionState import ConnectionState as CS
+
+    def pair():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+        cli = socket.create_connection(srv.getsockname(), timeout=2)
+        conn, _ = srv.accept()
+        return srv, cli, conn
+
+    def make_rt(cli):
+        rt = rtdemod.RTDE.__new__(rtdemod.RTDE)
+        rt._RTDE__sock = cli
+        rt._RTDE__conn_state = CS.CONNECTED
+        rt._RTDE__dataEvent = threading.Condition()
+        rt._RTDE__recv_buffer = bytes()
+        rt._RTDE__recv_resync_bytes = 0
+        rt._RTDE__start_refused = False
+        rt._RTDE__receive_progress = False
+        return rt
+
+    cmd = rtdemod.Command.RTDE_CONTROL_PACKAGE_START
+    result = {}
+
+    # (a) accepted=False：**绝不能**把状态置成 STARTED
+    srv, cli, conn = pair()
+    try:
+        rt = make_rt(cli)
+        conn.sendall(struct.pack('>HB', 4, cmd) + b'\x00')
+        rt._RTDE__receive()
+        result['refused_is_running'] = bool(rt.isRunning())
+        result['refused_flag'] = bool(getattr(rt, '_RTDE__start_refused', False))
+        # (b) accepted=True：必须恢复 STARTED
+        conn.sendall(struct.pack('>HB', 4, cmd) + b'\x01')
+        rt._RTDE__receive()
+        result['accepted_is_running'] = bool(rt.isRunning())
+    finally:
+        for s in (conn, cli, srv):
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    # (c) 跨 recv 边界的半包：先发一半 → 必须**留着**（不入状态、不清空）；补齐后 → 必须处理
+    srv, cli, conn = pair()
+    try:
+        rt = make_rt(cli)
+        frame = struct.pack('>HB', 4, cmd) + b'\x01'
+        conn.sendall(frame[:3])
+        time.sleep(0.05)
+        rt._RTDE__receive()
+        result['half_not_processed'] = not rt.isRunning()
+        result['half_kept_in_buffer'] = len(rt._RTDE__recv_buffer) == 3
+        conn.sendall(frame[3:])
+        time.sleep(0.05)
+        rt._RTDE__receive()
+        result['completed_after_second_half'] = bool(rt.isRunning())
+    finally:
+        for s in (conn, cli, srv):
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    return result
+
+
+out['rtde_start_buffer'] = probe_rtde_start_and_buffer()
+
+
+# ---------------------------------------------------------------------------
+# 18. 日志限幅按字节算（中文下按字符算会把上限撑到约 3 倍）
+# ---------------------------------------------------------------------------
+
+def probe_capped_log_bytes():
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), 'dsh-capped-log-probe.log')
+    for stale in (path, path + '.1'):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+    log = ur_worker._CappedLog(path, 64)
+    # 每次写 10 个中文字符 = **30 字节**。按字符算会以为每次只写 10 ⇒ 5 次后仍不滚动。
+    for _ in range(5):
+        log.write("中" * 10)
+    log.flush()
+    size = os.path.getsize(path)
+    rolled = os.path.exists(path + '.1')
+    log._handle.close()
+    for stale in (path, path + '.1'):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+    return {'live_size_bytes': size, 'rolled': rolled}
+
+
+out['capped_log_bytes'] = probe_capped_log_bytes()
+
+
+# ---------------------------------------------------------------------------
+# 19. realTimeClient.Send 必须先等上一段程序静默（否则两线程并发写同一 socket）
+# ---------------------------------------------------------------------------
+
+def probe_send_quiesces():
+    from URBasic import realTimeClient as rtcmod
+    from URBasic.connectionState import ConnectionState as CS
+
+    class _FakeThread:
+        def __init__(self):
+            self.joined = 0
+
+        def join(self):
+            self.joined += 1
+
+    class _Model:
+        def __init__(self):
+            self.rtcConnectionState = CS.STARTED
+            self.rtcProgramRunning = False
+            self.rtcProgramExecutionError = False
+            self.stopRunningFlag = False
+
+    client = rtcmod.RealTimeClient.__new__(rtcmod.RealTimeClient)
+    client._RealTimeClient__robotModel = _Model()
+    client._RealTimeClient__thread = _FakeThread()
+    sent = []
+    # 绕开真正的 socket：只记录"发出去的字符串"
+    client._RealTimeClient__sendPrg = lambda prg: (sent.append(prg), True)[1]
+    returned = client.Send('set_digital_out(0, True)\n')
+    return {
+        'returns_true': returned is True,
+        'joined_waiting_thread': client._RealTimeClient__thread.joined == 1,
+        'sent_payload': (sent[0] if sent else None),
+    }
+
+
+out['send_quiesces'] = probe_send_quiesces()
+
+
+# ---------------------------------------------------------------------------
+# 20. 契约（源码级）：list_programs 必须回报"用了内置默认口令"与主机密钥策略
+# ---------------------------------------------------------------------------
+
+def probe_list_programs_contract():
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+    start = src.index('def op_list_programs(')
+    end = src.index('\ndef ', start + 1)
+    body = src[start:end]
+    return {
+        'reports_default_password': 'used_default_password' in body,
+        'reports_host_key_policy': 'host_key_policy' in body,
+        'warns_about_mitm': 'AutoAddPolicy' in body and '中间人' in body,
+        # 真硬化必须有一条**可选**的严格路径：传了 known_hosts 就走 RejectPolicy。
+        'supports_known_hosts': 'known_hosts' in body and 'RejectPolicy' in body,
+        'no_silent_fallback': 'known_hosts 指向的文件不存在' in body,
+    }
+
+
+out['list_programs_contract'] = probe_list_programs_contract()
+
+
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + '\n')
 ur_worker._PROTOCOL_OUT.flush()

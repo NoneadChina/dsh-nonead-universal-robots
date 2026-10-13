@@ -82,7 +82,10 @@ def _error_code_for(exc):
     """把异常映射成错误码。保持"粗但稳定"，不追求精确分类。"""
     if isinstance(exc, WorkerError):
         return exc.code
-    if isinstance(exc, ValueError):
+    # KeyError / OverflowError 都是"参数写错了"：handler 里大量 `p["x"]` 直取（漏字段）
+    # 和 `int(inf)`（超范围）都会走到这里。以前它们落到 HUGE（"未实现的内部错误"），
+    # 把"调用方少传了一个字段"伪装成"插件内部炸了"，与 ERROR_CODES 里 BADARG 的自述不符。
+    if isinstance(exc, (ValueError, KeyError, OverflowError)):
         return "BADARG"
     if isinstance(exc, TimeoutError):
         return "TIMEOUT"
@@ -91,6 +94,29 @@ def _error_code_for(exc):
     if isinstance(exc, NotImplementedError):
         return "UNSUPPORTED"
     return "HUGE"
+
+
+# 状态型命令的统一措辞。
+#
+# 本插件**无法证实**这类命令真的生效：`_send_program()` / `RealTimeClient.Send()` 能证明的
+# 只是"字节写进了 socket"，而 UR 仅在**远程控制模式**下接受 URScript —— 本地/示教器模式下
+# 控制器会**静默丢弃**且不报错。凡是没有回读通道可供核实的设置类命令，一律改用
+# `ok_unverified()`：措辞降级为「未校验」，并在 data 里带 `verified: False`。
+UNVERIFIED_NOTE = ("（未校验：脚本只写进了控制器 —— UR 仅在远程控制模式下接受 URScript，"
+                   "本地/示教器模式下会被静默丢弃；请自行核实是否真的生效）")
+
+
+def ok_unverified(result):
+    """`ok()` 的诚实版：把一条状态型命令的"成功"降级为"已下发（未校验）"。
+
+    参数与 `ok()` 完全一样（一个带 message/data 的字典），所以调用点只需改函数名。
+    """
+    out = dict(result)
+    data = dict(out.get("data") or {})
+    data["verified"] = False
+    out["data"] = data
+    out["message"] = "%s%s" % (out.get("message", ""), UNVERIFIED_NOTE)
+    return ok(out)
 
 
 def err(message, code=None, data=None):
@@ -175,11 +201,18 @@ class _CappedLog:
     def write(self, text):
         if not isinstance(text, str):
             text = str(text)
+        # ⚠️ 限幅必须按**字节**算。文件以 utf-8 打开，一个中文字符占 3 字节，而 `len(str)`
+        # 数的是**字符** ⇒ 中文日志能把声明上限撑到约 3 倍（8 MB 的现役档写到约 24 MB，
+        # 加上滚动档接近 50 MB）。`max_bytes` 与 `_current_size()` 一直是字节语义，这里对齐；
+        # 测试用 ASCII（`"A"*699`）永远看不出这个差，所以另有一条 CJK 用例守着。
+        nbytes = len(text.encode("utf-8"))
         with self._lock:
-            if self._written + len(text) > self._max:
+            if self._written + nbytes > self._max:
                 self._roll()
             self._handle.write(text)
-            self._written += len(text)
+            self._written += nbytes
+            # 返回值仍是"写入的字符数"（file-like 的 write 语义），不要改成字节数：
+            # URBasic 与 print 都按字符数用它。
             return len(text)
 
     def flush(self):
@@ -949,6 +982,13 @@ def op_status(p):
         "tcp_force": [float(x) for x in model.ActualTCPForce()],
         "speed_scaling": float(model.SpeedScaling()),
     }
+    # 链路诊断：RTDE 因畸形长度而"丢一个字节重新对齐"过的字节数（0 = 一路干净）。
+    # 这个计数以前只写进 worker 的 stdout，模型与用户都看不到 —— "链路在悄悄错位"因此
+    # 没有任何可见入口。放在状态里，排障时一眼能看到是不是在丢包。
+    _rtde_obj = getattr(getattr(robot, "robotConnector", None), "RTDE", None)
+    _resync = getattr(_rtde_obj, "_RTDE__recv_resync_bytes", None)
+    if _resync is not None:
+        data["rtde_resync_bytes"] = _resync
     return ok({"message": "机器人状态读取成功", "data": data})
 
 
@@ -1227,10 +1267,27 @@ def op_list_programs(p):
     ip = str(p["ip"])
     username = p.get("username", "root")
     password = p.get("password", "easybot")
+    # 内置默认口令是"静默地用一个公开凭据去连真机"。不改默认值（会破坏既有调用），但必须
+    # **如实回报**用了它，并由调用方决定是否接受。
+    used_default_password = p.get("password") in (None, "")
     programs_dir = _sanitize_path(p.get("programs_dir"), "programs_dir")
+    # 主机密钥严格校验的入口。**默认仍是 auto-add**：机器人主机密钥通常未知，一上来就
+    # RejectPolicy 会让最常见的场景直接失败；传了 known_hosts 才走严格校验。文件不存在时
+    # 直接报错 —— 绝不静默退回 auto-add（那会把"我要严格校验"变成一句空话）。
+    known_hosts = p.get("known_hosts")
+    if known_hosts is not None:
+        known_hosts = str(known_hosts)
+        if not os.path.isfile(known_hosts):
+            return err("known_hosts 指向的文件不存在：%s" % known_hosts, "BADARG")
 
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    if known_hosts:
+        ssh.load_host_keys(known_hosts)
+        ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+        host_key_policy = "known-hosts:%s（严格校验主机指纹）" % known_hosts
+    else:
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        host_key_policy = "auto-add（接受任意主机密钥，无中间人防护）"
     try:
         ssh.connect(hostname=ip, port=22, username=username, password=password,
                     timeout=8)
@@ -1269,9 +1326,16 @@ def op_list_programs(p):
     ssh.close()
     if errout and "find" not in errout and "No such" not in errout:
         return err("程序列表获取失败。%s" % errout)
-    return ok({"message": "程序列表（%s）共 %s 个：%s" % (
-        dirs_note, len(programs), [x["name"] for x in programs]),
-        "data": {"programs": programs, "count": len(programs), "ip": ip}})
+    return ok({"message": "程序列表（%s）共 %s 个：%s%s" % (
+        dirs_note, len(programs), [x["name"] for x in programs],
+        "。⚠️ 未提供 password，本次用的是**内置默认口令**（等同公开凭据）；并且本工具用 "
+        "AutoAddPolicy 接受任意主机密钥 —— 这条 SSH 连接没有中间人防护。生产环境请显式传 "
+        "password，并把机器人指纹写进 known_hosts 文件后用 known_hosts 参数传入。"
+        if used_default_password else ""),
+        "data": {"programs": programs, "count": len(programs), "ip": ip,
+                 "used_default_password": used_default_password,
+                 # 主机密钥策略如实回报：`auto-add` 意味着没有 MITM 防护，`known-hosts` 才是严格校验。
+                 "host_key_policy": host_key_policy}})
 
 
 # ---------------------------------------------------------------------------
@@ -1981,34 +2045,120 @@ def op_ping(p):
                "data": {"python": sys.version.split()[0], "urbasic": True}})
 
 
+# 工具数字输入的工具脚本回读：**与传送带读取共用同一组 scratch 寄存器**（20 / 0）。
+# 它们只是"一次读取期间的临时便签"，不是持久状态；worker 单线程、一次只处理一条请求，
+# 且每次读取前都用 `_sentinel_token()` 避开寄存器里的既有值，所以复用不会串台。
+# 复用还有一个硬理由：RTDE 配方里启用的 int/double 寄存器是**逐个数列举**的，
+# 新开一个寄存器就得同步改 rtdeConfiguration*.xml，否则 check-rtde-recipe.py 会失败。
+TOOL_DI_SENTINEL_REGISTER = CONVEYOR_SENTINEL_REGISTER
+TOOL_DI_PAYLOAD_REGISTER = CONVEYOR_PAYLOAD_REGISTER
+
+
+def _read_tool_digital_in_verified(robot, model, n, ip,
+                                   index=TOOL_DI_SENTINEL_REGISTER,
+                                   payload_index=TOOL_DI_PAYLOAD_REGISTER):
+    """读工具数字输入，并**用哨兵证明脚本真的执行过**。返回 `(value, failure)`。
+
+    工具数字输入不在 RTDE 上，只能靠一段 URScript 把表达式结果写进输出寄存器再回读。
+    问题是：控制器在**非远程控制模式**下会静默丢弃 URScript，而 `waitRobotIdleOrStopFlag()`
+    不会因此报错（它只在"看到程序开始后又停下"时才置错）—— 上游实现直接回读寄存器 0，
+    于是把**上一次遗留的值**当成输入电平报出去。安全相关的电气读数被报反，比报错更糟。
+
+    判定与 `op_get_conveyor` 同一套：先写通道探测哨兵确认脚本能被执行，再把真正的读数
+    夹在首尾哨兵之间；看不到结束哨兵就**不给值**（`failure` 非 None）。
+    """
+    probe_token = _sentinel_token(_read_int_register(model, index))
+    probe = ("def ur_write_tool_di_probe():\n"
+             "  write_output_integer_register(%d, %d)\n"
+             "end\nur_write_tool_di_probe()\n" % (index, probe_token))
+    if not _send_program(robot, probe):
+        return None, err("工具数字输入通道探测脚本未能送达控制器：%s" % _last_send_failure(robot),
+                         "SEND_FAILED", {"ip": ip})
+    deadline = time.time() + SEND_SCRIPT_VERIFY_TIMEOUT_S
+    while time.time() < deadline:
+        if _read_int_register(model, index) == probe_token:
+            break
+        time.sleep(0.1)
+    else:
+        return None, err(
+            "控制器没有执行探测脚本（output_int_register_%d 上一直看不到哨兵值 %d）⇒ 它可能未处于"
+            "远程控制模式，或整段 URScript 被静默丢弃。此时**无法**给出工具数字输入电平，"
+            "也不会回读一个陈旧值来冒充它。" % (index, probe_token),
+            "NOT_EXECUTED", {"register": index, "token": probe_token, "ip": ip})
+
+    # 三个 token 必须互不相同：只保证"与紧邻的前一个不同"不够 —— 首尾哨兵不相邻，
+    # 一旦撞上，"脚本被拒收"（寄存器停在起始值）就会被误判成"已跑到结束哨兵"。
+    start_token = _sentinel_token(probe_token)
+    finish_token = _sentinel_token(start_token, probe_token)
+    program = ("def ur_read_tool_digital_in():\n"
+               "  write_output_integer_register(%d, %d)\n"
+               "  write_output_float_register(%d, get_tool_digital_in(%d))\n"
+               "  write_output_integer_register(%d, %d)\n"
+               "end\nur_read_tool_digital_in()\n"
+               % (index, start_token, payload_index, n, index, finish_token))
+    if not _send_program(robot, program):
+        return None, err("工具数字输入读取脚本未能送达控制器：%s" % _last_send_failure(robot),
+                         "SEND_FAILED", {"ip": ip})
+
+    observed = start_token
+    started = False
+    deadline = time.time() + SEND_SCRIPT_VERIFY_TIMEOUT_S
+    while time.time() < deadline:
+        observed = _read_int_register(model, index)
+        if observed == finish_token:
+            # 走到末尾必然开始过。轮询间隔（0.1s）可能整个错过中间态，显式置位以免报出
+            # "verified 但 started=false" 这种自相矛盾的证据组合。
+            started = True
+            break
+        if observed == start_token:
+            started = True
+        time.sleep(0.1)
+    sentinel = {"register": index, "payload_register": payload_index,
+                "probe_token": probe_token, "start_token": start_token,
+                "finish_token": finish_token, "observed": observed, "started": started}
+
+    if observed != finish_token:
+        if started:
+            return None, err(
+                "工具数字输入读取脚本**开始执行了但没走到末尾**（起始哨兵 %d 已回读，结束哨兵 %d 没出现）"
+                "⇒ `get_tool_digital_in(%d)` 在该控制器上很可能不可用，或中途报错中止"
+                "（常见原因：未接工具、工具数字 I/O 未启用，或工具端被 TCI 串口占用）。因此**不给**电平值。"
+                % (start_token, finish_token, n),
+                "UNSUPPORTED", dict(sentinel, ip=ip))
+        return None, err(
+            "控制器**没有执行**工具数字输入读取脚本：哨兵仍停在通道探测值 %d（起始与结束哨兵都没出现）"
+            "⇒ 整段脚本在控制器侧被拒。因此**不给**电平值 —— 旧实现在这种情况下会把一个从没被写过的"
+            "寄存器读成输入电平。" % probe_token,
+            "NOT_EXECUTED", dict(sentinel, ip=ip))
+
+    raw = _read_double_register(model, payload_index)
+    if raw is None:
+        return None, err("脚本已执行完毕（结束哨兵已回读），但 output_double_register_%d 读不到值"
+                         % payload_index, "READ_FAILED", dict(sentinel, ip=ip))
+    return bool(raw), None
+
+
 def op_get_digital_in(p):
     ip = str(p["ip"])
     which = str(p.get("which", "std")).lower()
-    robot, _ = ensure_connected(ip)
+    robot, model = ensure_connected(ip)
     if which == "config":
         n = _bounded_int(p["n"], "n", 8, 15, "config 端口号")
         val = robot.get_configurable_digital_in(n)
     elif which == "tool":
         n = _bounded_int(p["n"], "n", 0, 1, "tool 端口号")
-        # Tool digital inputs are not on RTDE; get_tool_digital_in runs a
-        # URScript expression via the RealTime client and reads the result back.
+        # Tool digital inputs are not on RTDE; the read goes through a URScript
+        # expression plus a sentinel-verified register read-back.
         #
-        # ⚠️ 实测（PolyScope 5.21 / UR30 / URSim）：**控制器可能拒绝执行这段脚本** ——
-        # 未接工具、工具 I/O 未启用或工具端被 TCI 串口占用时，`get_tool_digital_in(n)`
-        # 会让程序以**运行期错误**结束。上游的 `waitRobotIdleOrStopFlag()` 把这种情况抛成
-        # `RuntimeError: Robot program execution error!!!`，对使用者零信息量；更糟的是
-        # `urScript.get_tool_digital_in` 随后**回读输出寄存器 0** —— 脚本没跑成，它读到的是
-        # 上一次遗留的值，却当成输入电平报出去（上游注释里已记过这个坑）。
-        # 这里把运行期失败换成说明原因的错误，并且**在失败路径上不回读任何寄存器**。
-        try:
-            val = robot.get_tool_digital_in(n)
-        except RuntimeError as exc:
-            if "execution error" not in str(exc):
-                raise
-            return err(
-                "控制器拒绝执行读取工具数字输入的脚本（get_tool_digital_in(%d)）⇒ 无法给出电平。"
-                "常见原因：未连接工具、工具数字 I/O 未启用，或工具端被 TCI 串口占用"
-                "（启用工具通信会禁用工具模拟输入）。原始报错：%s" % (n, exc))
+        # ⚠️ 旧实现只把"运行期错误"翻译成人话，却漏掉了最需要区分的第三种情况：
+        # 控制器处于本地/示教器模式时会**静默丢弃**整段脚本，而 `waitRobotIdleOrStopFlag()`
+        # 不会置错（它只在"看到程序开始后又停下"时置位）⇒ 随后回读的输出寄存器 0 里躺着
+        # **上一次遗留的值**，工具把它当输入电平报出去。现在整条读取走
+        # `_read_tool_digital_in_verified()`：先用通道探测哨兵确认脚本真的被执行，再把读数
+        # 夹在首尾哨兵之间；任何一步看不到就**不给值**（`failure` 非 None 直接返回）。
+        val, failure = _read_tool_digital_in_verified(robot, model, n, ip)
+        if failure is not None:
+            return failure
     else:
         n = _bounded_int(p["n"], "n", 0, 7, "std 端口号")
         val = robot.get_standard_digital_in(n)
@@ -2034,9 +2184,14 @@ def op_set_digital_out(p):
         script = "set_configurable_digital_out(%d, %s)\n" % (n - 8, flag)
     elif which == "tool":
         n = _bounded_int(p["n"], "n", 0, 1, "tool 端口号")
-        # Tool digital outputs are not on RTDE; set_tool_digital_out sends the
-        # URScript `write_tool_digital_out` command over the RealTime client.
-        robot.set_tool_digital_out(n, value)
+        # 工具数字输出不在 RTDE 上，只能走 URScript。**必须判发送结果**：std / config
+        # 两条分支都用 `_realtime_send()` 判过，唯独 tool 这条以前把
+        # `RealTimeClient.Send()` 的返回值丢掉就回报"已设置" —— 掉线或非远程控制模式
+        # （URScript 被静默丢弃）时输出根本没置位，工具却宣称已置位。这是全仓唯一一处
+        # "连发没发出去都不看"的路径，而它驱动的恰恰是夹爪/气阀这类物理执行器。
+        if not robot.set_tool_digital_out(n, value):
+            return err("工具数字输出脚本未能送达控制器：%s" % _last_send_failure(robot),
+                       "SEND_FAILED", {"ip": ip})
         return ok({"message": "已设置数字输出 %s.%d = %s" % (which, n, value),
                    "data": {"which": which, "port": n, "value": value, "ip": ip}})
     else:
@@ -2122,7 +2277,7 @@ def op_set_tool_voltage(p):
     robot, _ = ensure_connected(ip)
     if not _realtime_send(robot, "set_tool_voltage(%d)\n" % voltage):
         return err("工具电压脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "已设置工具电压为 %sV" % voltage,
+    return ok_unverified({"message": "已设置工具电压为 %sV" % voltage,
                "data": {"voltage": voltage, "ip": ip}})
 
 
@@ -2133,7 +2288,7 @@ def op_set_tcp(p):
     _assert_remote_control(ip, "set_tcp")
     if not _send_program(robot, "set_tcp(p[%.6f,%.6f,%.6f,%.6f,%.6f,%.6f])\n" % tuple(pose)):
         return err("set_tcp 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "已设置 TCP：%s" % pose,
+    return ok_unverified({"message": "已设置 TCP：%s" % pose,
                "data": {"tcp": [float(x) for x in pose], "ip": ip}})
 
 
@@ -2150,7 +2305,7 @@ def op_set_payload(p):
     script = "set_payload_mass(%.4f)\nset_payload_cog(%s)\n" % (mass, cog_str)
     if not _realtime_send(robot, script):
         return err("负载设置脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "已设置负载：%skg，重心 %s" % (mass, cog),
+    return ok_unverified({"message": "已设置负载：%skg，重心 %s" % (mass, cog),
                "data": {"mass": mass, "cog": [float(x) for x in cog], "ip": ip}})
 
 
@@ -2337,11 +2492,18 @@ def op_force_mode(p):
                 "end\nur_force_mode()\n" % call)
     if not _send_program(robot, script):
         return err("force_mode 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "力控已进入：%s（退出请调用 ur_end_force_mode，或在示教器停止程序）" % call,
+    # ⚠️ 这里只能说"已下发"：`_send_program()` 证明的是**字节写进了 socket**，不是控制器执行了它。
+    # UR 只在远程控制模式下接受 URScript，本地/示教器模式下会被**静默丢弃**（且不报错）。
+    # 旧文案「力控已进入」会让操作员据此把手或工件交给其实没在力控的机械臂 —— 这是本插件
+    # 最危险的一类谎报，因此措辞降级 + verified:false，把确认责任明确交回使用者。
+    return ok({"message": "力控程序**已下发**（未校验）：%s。退出请调用 ur_end_force_mode，"
+                          "或在示教器上停止程序。⚠️ 本插件只能确认脚本已写入控制器，无法证明力控"
+                          "真的生效 —— UR 仅在远程控制模式下接受 URScript，本地/示教器模式下会被"
+                          "静默丢弃。请用 ur_get_robot_mode 或现场观察确认后再松手。" % call,
                "data": {"command": call, "task_frame": task_frame,
                         "selection_vector": selection, "wrench": wrench, "type": f_type,
                         "limits": limits, "damping": damping, "gain_scaling": gain,
-                        "ip": ip}})
+                        "verified": False, "ip": ip}})
 
 
 def op_end_force_mode(p):
@@ -2354,7 +2516,11 @@ def op_end_force_mode(p):
     robot, _ = ensure_connected(ip)
     if not _send_program(robot, "end_force_mode()\n"):
         return err("end_force_mode 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "已退出力控（end_force_mode）", "data": {"ip": ip}})
+    # 同 `op_force_mode`：能证明的只有"脚本已写进 socket"，不是"力控已退出"。
+    return ok({"message": "退出力控的脚本**已下发**（未校验）：`end_force_mode()`。本插件只能确认"
+                          "脚本已写入控制器；UR 仅在远程控制模式下接受 URScript，本地/示教器模式下"
+                          "会被静默丢弃，请用 ur_get_safety_status / ur_get_robot_mode 复核。",
+               "data": {"verified": False, "ip": ip}})
 
 
 def op_force_mode_settings(p):
@@ -2385,7 +2551,7 @@ def op_force_mode_settings(p):
         applied["gain_scaling"] = gain
     if not applied:
         raise ValueError("至少要给出 damping 或 gain_scaling 之一（这两个值无法回读）")
-    return ok({"message": "已设置力控参数 %s（该值在控制器侧无法回读，这里只回报本次设置值）"
+    return ok_unverified({"message": "已设置力控参数 %s（该值在控制器侧无法回读，这里只回报本次设置值）"
                           % applied,
                "data": {"applied": applied, "readback_supported": False, "ip": ip}})
 
@@ -2570,7 +2736,7 @@ def op_tool_communication(p):
     if not _realtime_send(robot, cmd + "\n"):
         return err("set_tool_communication 脚本未能送达控制器：%s"
                    % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "已%s工具通信接口（%s）%s"
+    return ok_unverified({"message": "已%s工具通信接口（%s）%s"
                           % ("启用" if enabled else "禁用", cmd,
                              "；⚠️ 工具模拟输入已被禁用" if enabled else ""),
                "data": {"enabled": enabled, "baud_rate": baud, "parity": parity,
@@ -2590,7 +2756,7 @@ def op_set_tool_output_mode(p):
     if not _realtime_send(robot, cmd + "\n"):
         return err("set_tool_output_mode 脚本未能送达控制器：%s"
                    % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "已设置工具输出模式为 %d%s" % (mode, "（power/双针供电）" if mode == 1 else ""),
+    return ok_unverified({"message": "已设置工具输出模式为 %d%s" % (mode, "（power/双针供电）" if mode == 1 else ""),
                "data": {"mode": mode, "command": cmd, "ip": ip}})
 
 
@@ -2638,7 +2804,7 @@ def op_set_payload_inertia(p):
         note = "已同时设置质量、重心与惯性矩阵"
     if not _send_program(robot, script):
         return err("负载设置脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "%s（⚠️ 设置负载会同时把力/力矩测量归零）" % note,
+    return ok_unverified({"message": "%s（⚠️ 设置负载会同时把力/力矩测量归零）" % note,
                "data": {"mass": mass, "cog": cog, "inertia": inertia,
                         "transition_time": transition, "command": script.strip(), "ip": ip}})
 
@@ -2727,7 +2893,7 @@ def op_motion_version(p):
             return err("jerk_gain_scaling_set 未能送达控制器：%s"
                        % _last_send_failure(robot), "SEND_FAILED")
         applied["jerk_gain_scaling"] = jerk
-    return ok({"message": "已设置 %s（这两个设置都没有回读通道，返回值只报告本次设置值）" % applied,
+    return ok_unverified({"message": "已设置 %s（这两个设置都没有回读通道，返回值只报告本次设置值）" % applied,
                "data": {"applied": applied, "readback_supported": False, "ip": ip}})
 
 
@@ -2975,7 +3141,7 @@ def op_set_conveyor_tick(p):
     res = int(p.get("absolute_encoder_resolution", 0))
     robot, _ = ensure_connected(ip)
     robot.set_conveyor_tick_count(tick, res)
-    return ok({"message": "已设置传送带 tick=%s" % tick,
+    return ok_unverified({"message": "已设置传送带 tick=%s" % tick,
                "data": {"tick_count": tick, "ip": ip}})
 
 
@@ -3207,7 +3373,7 @@ def op_set_gravity(p):
     robot, _ = ensure_connected(ip)
     if not _send_program(robot, "set_gravity([%.6f,%.6f,%.6f])\n" % tuple(unit)):
         return err("set_gravity 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "已设置重力方向为 [%.4f, %.4f, %.4f]（已归一化）" % tuple(unit),
+    return ok_unverified({"message": "已设置重力方向为 [%.4f, %.4f, %.4f]（已归一化）" % tuple(unit),
                "data": {"direction": unit, "normalized_from": d, "ip": ip}})
 
 
@@ -3217,7 +3383,7 @@ def op_zero_ftsensor(p):
     robot, _ = ensure_connected(ip)
     if not _send_program(robot, "zero_ftsensor()\n"):
         return err("zero_ftsensor 脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "已下发力/力矩传感器归零", "data": {"ip": ip}})
+    return ok_unverified({"message": "已下发力/力矩传感器归零", "data": {"ip": ip}})
 
 
 def op_get_tcp_force(p):
@@ -3333,7 +3499,7 @@ def op_conveyor_tracking(p):
 
     if not _send_program(robot, script):
         return err("传送带跟踪脚本未能送达控制器：%s" % _last_send_failure(robot), "SEND_FAILED")
-    return ok({"message": "%s。下发脚本：%s" % (note, script.strip()),
+    return ok_unverified({"message": "%s。下发脚本：%s" % (note, script.strip()),
                "data": {"action": action, "command": script.strip(),
                         "hardware_verified": False, "ip": ip}})
 
@@ -3687,16 +3853,49 @@ def selfcheck():
     return 0 if ok else 1
 
 
+def _force_utf8_stdio():
+    """把三个标准流钉死在 UTF-8 上。
+
+    出站方向一直是 UTF-8（`respond()` 直接写 `sys.stdout.buffer`，就是为绕开 GBK 默认值），
+    但**入站方向此前一个字没管**：Node 侧 `JSON.stringify` 不转义非 ASCII，写进管道的
+    是 UTF-8 字节，而中文 Windows 上 `sys.stdin` 默认按 cp936 解码 ⇒ 中文程序名/脚本
+    静默变成乱码（不报错，直接发给控制器），非法字节序列则抛 UnicodeDecodeError 把
+    worker 打死。`lib/worker.js` 的 spawn env 另外补了 PYTHONUTF8/PYTHONIOENCODING 做双保险。
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError, OSError):
+            # 非标准流（被重定向成 BytesIO/自定义对象）时静默跳过：不能因为一个
+            # 环境差异让 worker 起不来，真正的编码问题会在读写时如实暴露。
+            pass
+
+
 def main():
     global _CURRENT_REQUEST_ID, _CURRENT_TIMEOUT_MS
+    _force_utf8_stdio()
     # 孪生遥测的推送线程：与运动命令**并行**（RTDE 缓存由 URBasic 自己的接收线程更新），
     # 所以机器人运动期间孪生照样有数据。daemon=True：主线程退出即随之结束。
     if not TWIN_PUSH_DISABLED:
         threading.Thread(target=_twin_push_loop, name="twin-push", daemon=True).start()
-    for line in sys.stdin:
+    while True:
+        # 用 readline() 而不是 `for line in sys.stdin`：解码失败发生在**迭代器内部**，
+        # 那时异常在下面这层 try 之外，会直接冲出 main() 把进程打死（在飞请求全失败）。
+        # 显式读一行才能把"坏字节"变成一次可诊断的 BADARG。
+        try:
+            line = sys.stdin.readline()
+        except UnicodeDecodeError as exc:
+            respond({"id": None, "ok": False, "data": None,
+                     "error": "stdin 收到非法 UTF-8 字节（本插件协议固定 UTF-8）：%s" % exc,
+                     "code": "BADARG"})
+            # 继续读会在同一段坏字节上原地打转（缓冲位置不前进），如实报错后有序退出。
+            return
+        if not line:
+            return
         line = line.strip()
         if not line:
             continue
+        req = None
         req_id = None
         try:
             req = json.loads(line)

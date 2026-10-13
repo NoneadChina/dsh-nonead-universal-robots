@@ -184,3 +184,166 @@ test('契约：README 声明的依赖可自检（ur_ping / --selfcheck 的字段
   assert.ok(!existsSync(sitecustomize) || true,
     '提示：python/sitecustomize.py 若存在则属于本机私货，不得进入发布产物')
 })
+
+test('movej/movel 的 t= 必须真的进 URScript（时长参数曾被静默丢弃）', () => {
+  // 旧实现把结果赋给了 `tval`，而格式串引用的是 `t_val`（始终为空字符串）⇒ 传 t=5
+  // 仍按 a/v 跑，时长完全不受控；而 ur_worker 自拼的 `command` 回报里却带着 t
+  // —— 功能失效 + 回报伪造，两条都违反本项目的「诚实读回」底线。
+  const r = probe.motion_t_param
+  assert.equal(r.j_has_t5, true, `movej 的 t=5 必须出现在脚本里，实测：${r.j_text}`)
+  assert.equal(r.l_has_t3, true, `movel 的 t=3 必须出现在脚本里，实测：${r.l_text}`)
+  assert.equal(r.j_has_t0, true, 't 缺省（0）也要如实写出 t=0，而不是由格式串留空')
+  assert.equal(r.p_has_no_t, true, 'movep 不接受 t，不得凭空塞进脚本')
+})
+
+test('错误码：缺字段 / 溢出属于参数错（BADARG），不是内部错误（HUGE）', () => {
+  const c = probe.error_codes
+  assert.equal(c.key_error, 'BADARG', 'KeyError（handler 直取 p["x"] 而调用方漏传）应为 BADARG')
+  assert.equal(c.overflow, 'BADARG', 'OverflowError（int(inf)）应为 BADARG，而不是"插件内部炸了"')
+  assert.equal(c.value_error, 'BADARG')
+  assert.equal(c.unknown, 'HUGE', '真正未预料的异常仍必须落到 HUGE')
+})
+
+test('入站方向也钉死 UTF-8：stdin 必须 reconfigure，且坏字节不能打死进程', () => {
+  // Node 侧 JSON.stringify 不转义非 ASCII，写进管道的是 UTF-8 字节；中文 Windows 上
+  // 解释器默认 cp936 ⇒ 中文程序名静默乱码、非法字节序列抛 UnicodeDecodeError 把 worker
+  // 打死（旧写法 `for line in sys.stdin` 的解码点在 try 之外）。
+  const s = probe.stdin_utf8
+  assert.equal(s.reconfigures_stdin, true, 'worker 必须把 stdin 也 reconfigure 成 UTF-8')
+  assert.equal(s.calls_force_utf8, true, 'main() 必须真的调用它')
+  assert.equal(s.loop_reads_line, true, '主循环必须显式 readline()，才能把解码失败变成可诊断的响应')
+  assert.equal(s.guards_decode_error, true, '解码失败必须被捕获并如实回报，而不是冲出 main()')
+})
+
+test('工具数字输出必须把 Send() 的结果交出去（物理动作不能"发不出去也报成功"）', () => {
+  const r = probe.tool_digital_out_send
+  assert.equal(r.ok_returns_true, true, 'Send() 返回 true 时 set_tool_digital_out 必须返回 true')
+  assert.equal(
+    r.fail_returns_false,
+    true,
+    'Send() 返回 false（掉线 / 非远程控制）时 set_tool_digital_out 必须返回 false —— '
+    + '旧实现丢掉了这个返回值，于是 worker 无条件回报"已设置"，而夹爪/气阀根本没动',
+  )
+  assert.equal(
+    r.uses_manual_function_name,
+    true,
+    `必须用手册里的 set_tool_digital_out（旧名 write_tool_digital_out 会被控制器拒收），实测发出：${r.sent_text}`,
+  )
+})
+
+test('诚实性契约：工具数字输入必须哨兵验证；状态型命令只能声称"已下发"', () => {
+  const h = probe.honesty_contracts
+  assert.equal(h.tool_di_uses_verified, true, '工具数字输入必须走哨兵验证过的读取')
+  assert.equal(
+    h.tool_di_no_stale_readback,
+    true,
+    '不得再直接调上游封装：它在脚本被静默丢弃时会回读寄存器里上一次遗留的值，把陈旧值当电平回报',
+  )
+  assert.equal(h.verified_has_probe_sentinel, true, '必须先用通道探测哨兵证明脚本能被执行')
+  assert.equal(h.verified_has_read_program, true, '必须把真正的读数夹在首尾哨兵之间')
+  assert.equal(h.verified_refuses_without_finish, true, '看不到结束哨兵时必须拒绝给值（NOT_EXECUTED）')
+  assert.equal(h.tool_do_checks_send, true, '工具数字输出必须判 set_tool_digital_out 的返回值')
+  assert.equal(h.force_mode_unverified, true, 'force_mode 只能声称"已下发"，并带 verified:false')
+  assert.equal(h.end_force_unverified, true, 'end_force_mode 同理')
+})
+
+test('Dashboard 应答不得串台：没收到应答时必须如实报失败，而不是交出上一条的应答', () => {
+  const r = probe.dashboard_crosstalk
+  assert.ok(
+    r.sent.includes('is in remote control'),
+    `命令必须真的发出去（实测服务端收到的命令：${JSON.stringify(r.sent)}）`,
+  )
+  assert.equal(r.ok, false, '服务端没有回答，"发送成功"不得被当成"拿到了应答"')
+  assert.equal(r.respond, '', `不得把陈旧的 "true" 交出去，实测 respond=${JSON.stringify(r.respond)}`)
+  assert.equal(r.seq_unchanged, true, '应答序号没有前进 ⇒ 这一条命令没有自己的应答')
+})
+
+test('Dashboard 契约：notify 只能由"真的收到消息"触发，收包要按行累积', () => {
+  const c = probe.dashboard_contract
+  assert.equal(
+    c.notify_inside_message_branch,
+    true,
+    'notifyAll 必须在 `if msg is not None:` 分支内 —— 空轮通知会让 wait_dbs() 假醒，'
+    + '__send() 据此误报发送成功，真正的应答落进下一条命令的窗口',
+  )
+  assert.equal(c.seq_incremented, true, '收到消息必须递增应答序号（__send 靠它判定归属）')
+  assert.equal(c.send_awaits_by_seq, true, '__send 必须按应答序号等待，而不是等任意一次 notify')
+  assert.equal(c.sendcommand_guards_stale, true, 'sendCommand 必须核对序号是否前进')
+  assert.equal(c.recv_accumulates_and_splits, true, '收包必须按换行累积切分，否则分片应答会串到下一条命令')
+  assert.equal(c.recv_chunk_is_bigger, true, '单次 recv 不得再用 1024 字节')
+})
+
+test('状态型命令一律"未校验"：12 个设置类 op 必须走 ok_unverified', () => {
+  const r = probe.unverified_ops
+  const names = Object.keys(r)
+  assert.equal(names.length, 12, `受检 op 数量应固定为 12（实测 ${names.length}）`)
+  for (const name of names) {
+    assert.equal(
+      r[name].uses_ok_unverified,
+      true,
+      `${name} 必须用 ok_unverified：它只能证明"脚本写进了控制器"，不能声称"已生效"`,
+    )
+    assert.equal(r[name].no_plain_ok_success, true, `${name} 不得再有直接 return ok({ 的成功回报`)
+  }
+})
+
+test('ok_unverified 的降级是真的（跑一遍函数，而不是匹配源码）', () => {
+  const b = probe.ok_unverified_behavior
+  assert.equal(b.verified_false, true, 'data 里必须带 verified:false')
+  assert.equal(b.keeps_original_fields, true, '原有 data 字段必须保留')
+  assert.equal(b.message_keeps_head, true, '原消息必须仍在前半段（不丢信息）')
+  assert.equal(b.message_appends_note, true, '消息末尾必须附上"未校验"的说明')
+})
+
+test('RTDE START 被拒绝时必须如实反映（isRunning 不得说谎）', () => {
+  const r = probe.rtde_start_buffer
+  assert.equal(
+    r.refused_is_running,
+    false,
+    'accepted=False 时 isRunning() 必须为 False —— 否则 ensure_connected 的守卫失效，'
+    + '之后每次读姿态都要空等 sync() 的 5 s 超时，报出来的却是"等待新的 RTDE 数据超时"',
+  )
+  assert.equal(r.refused_flag, true, '被拒绝这件事必须被记下来，供上层区分"没连上"与"被拒绝"')
+  assert.equal(r.accepted_is_running, true, 'accepted=True 时仍必须正常进入 STARTED')
+})
+
+test('RTDE 收包必须跨 recv 边界累积：半个包留着等下一片，不得丢弃', () => {
+  const r = probe.rtde_start_buffer
+  assert.equal(r.half_not_processed, true, '只有半个包时不得处理（更不得当成已收到）')
+  assert.equal(r.half_kept_in_buffer, true, '半个包必须留在缓冲里 —— 旧实现直接丢掉整块缓冲')
+  assert.equal(
+    r.completed_after_second_half,
+    true,
+    '补齐后必须处理成功：旧实现把每个跨 recv 边界的包都整帧丢了',
+  )
+})
+
+test('日志限幅按字节算：中文不得把上限撑到 3 倍', () => {
+  const r = probe.capped_log_bytes
+  assert.equal(r.rolled, true, '写满就该滚动 —— 按字符算时 5 次 CJK 写入（实际 150 字节）根本不会滚')
+  assert.ok(
+    r.live_size_bytes <= 90,
+    `现役日志必须贴近声明上限（64 B），按字节算是 ≤90；实测 ${r.live_size_bytes} B`,
+  )
+})
+
+test('realTimeClient.Send 必须先等上一段程序静默（防止两线程并发写同一 socket）', () => {
+  const r = probe.send_quiesces
+  assert.equal(r.returns_true, true, '可写路径仍应返回 True')
+  assert.equal(
+    r.joined_waiting_thread,
+    true,
+    'Send() 必须与 SendProgram() 一样先收尾上一段程序的等待线程 —— 否则两个线程并发'
+    + 'sendall 到同一个 30003 socket，行协议可能被交错，而 Send 只回报"写成功"',
+  )
+  assert.equal(r.sent_payload, 'set_digital_out(0, True)\n', '命令本身必须原样发出去')
+})
+
+test('契约：list_programs 必须如实回报"用了内置默认口令"与主机密钥策略', () => {
+  const c = probe.list_programs_contract
+  assert.equal(c.reports_default_password, true, '不提供 password 时必须回报 used_default_password')
+  assert.equal(c.reports_host_key_policy, true, 'AutoAddPolicy 这件事必须出现在返回值里')
+  assert.equal(c.warns_about_mitm, true, '必须明确写出"没有中间人防护"')
+  assert.equal(c.supports_known_hosts, true, '必须提供 known_hosts 这条严格校验路径（RejectPolicy）')
+  assert.equal(c.no_silent_fallback, true, 'known_hosts 文件不存在必须报错，不得静默退回 auto-add')
+})

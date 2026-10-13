@@ -75,6 +75,12 @@ class RTDE(threading.Thread): #, metaclass=Singleton
         self.__stop_event = True
         threading.Thread.__init__(self)
         self.__dataEvent = threading.Condition()
+        # 收包缓冲：`recv()` 不保证一次收全一个包，缓冲必须**跨调用累积**（见 `__receive`）。
+        self.__recv_buffer = bytes()
+        # 因畸形长度而重新对齐的字节数（0 = 一路干净）。用于观测，不作为控制流。
+        self.__recv_resync_bytes = 0
+        # 控制器**拒绝** START 时置位：让上层能区分"没连上"与"连上了但被拒绝"。
+        self.__start_refused = False
 
         self.__conn_state = ConnectionState.DISCONNECTED
         self.__sock = None
@@ -300,9 +306,21 @@ class RTDE(threading.Thread): #, metaclass=Singleton
         以 `__conn_state` 是否真的进入 STARTED 作为判据。
         '''
         cmd = Command.RTDE_CONTROL_PACKAGE_START
+        self.__start_refused = False
         if not self.__send(cmd):
             return False
-        return True
+        # ⚠️ 应答由 `__receive` 处理（见其中 RTDE_CONTROL_PACKAGE_START 分支）。这里**主动泵**
+        # 一次，而不是等调用方那一次 `__receive()` —— 否则本函数只能回答"字节写没写出去"，
+        # 而 `run()` 里那段"重连后重新 setup"的恢复分支就永远看不到"START 被拒绝"。
+        deadline = time.time() + DEFAULT_TIMEOUT * 2
+        while time.time() < deadline:
+            self.__receive()
+            if self.__conn_state == ConnectionState.STARTED:
+                return True
+            if self.__conn_state == ConnectionState.ERROR or self.__start_refused:
+                return False
+            time.sleep(0.02)
+        return self.__conn_state == ConnectionState.STARTED
 
     def __sendPause(self):
         '''
@@ -401,7 +419,14 @@ class RTDE(threading.Thread): #, metaclass=Singleton
             return False
 
     def __receive(self):
-        byte_buffer = bytes()
+        """
+        读一次 socket，并处理缓冲里所有**完整**的包。
+
+        ⚠️ 收包缓冲是**实例字段**，跨调用累积。旧实现把它当局部变量、每次调用重建，并把
+        跨 `recv()` 边界的半个包**直接丢掉** ⇒ 凡是跨边界的包都整帧丢失。丢到的若是刷新
+        看门狗用的 `timestamp` 帧，`run()` 会以为数据流停滞而去重建会话（表现为"跑一会儿
+        就重连"）；丢到别处则是某次读数悄悄不更新。两种都不报错，也都没计数。
+        """
         self.__receive_progress = False
 
         if self.__sock is None:
@@ -416,15 +441,25 @@ class RTDE(threading.Thread): #, metaclass=Singleton
                 # self._logger.info("RTDE disconnected")
                 self.__disconnect()
                 return None
-            byte_buffer +=  more
+            self.__recv_buffer += more
             self.__receive_progress = True
 
-        while len(byte_buffer) >= 3:
-            (packet_size, packet_command) = struct.unpack_from('>HB', byte_buffer)
-            buffer_length = len(byte_buffer)
+        while len(self.__recv_buffer) >= 3:
+            (packet_size, packet_command) = struct.unpack_from('>HB', self.__recv_buffer)
+            buffer_length = len(self.__recv_buffer)
+
+            if packet_size < 3:
+                # 合法包长度至少是 3（头本身）。更小的值说明缓冲已经错位：**丢一个字节重新
+                # 对齐**，而不是整块清空（清空会把后面完好的包一起扔掉）。
+                self.__recv_resync_bytes += 1
+                if self.__recv_resync_bytes == 1 or self.__recv_resync_bytes % 100 == 0:
+                    print("RTDE stream desynchronised - dropped %d byte(s) to resync"
+                          % self.__recv_resync_bytes)
+                self.__recv_buffer = self.__recv_buffer[1:]
+                continue
 
             if ((buffer_length) >= packet_size):
-                packet, byte_buffer = byte_buffer[3:packet_size], byte_buffer[packet_size:]
+                packet, self.__recv_buffer = self.__recv_buffer[3:packet_size], self.__recv_buffer[packet_size:]
                 data = self.__decodePayload(packet_command, packet)
                 # print('Elad: rtde line 419. data =',data)
                 # print('Elad: payload (big) =',int.from_bytes(packet, byteorder='big',signed=True))
@@ -460,22 +495,34 @@ class RTDE(threading.Thread): #, metaclass=Singleton
                     self.__rtde_output_config = data
                     self.__rtde_output_config.names = self.__rtde_output_names
                 elif(packet_command == Command.RTDE_CONTROL_PACKAGE_START):
-                    # self._logger.info('RTDE started')
-                    self.__conn_state = ConnectionState.STARTED
+                    # ⚠️ START 的应答里带一个 accepted 布尔（`__decodePayload` 返回 `bool(...)`）。
+                    # 旧实现**无视它**、无条件置 STARTED —— 控制器拒绝时（最常见的原因是
+                    # 上一次会话还没释放）`isRunning()` 照样为 True，于是
+                    # `ur_worker.ensure_connected()` 的 `if not RTDE.isRunning()` 守卫失效，
+                    # 之后每一次读姿态都要空等 `sync()` 的 5 s 超时，报出来的是
+                    # "等待新的 RTDE 数据超时"而不是"会话被拒绝"。
+                    if data is True:
+                        # self._logger.info('RTDE started')
+                        self.__conn_state = ConnectionState.STARTED
+                    else:
+                        self.__conn_state = ConnectionState.ERROR
+                        self.__start_refused = True
+                        print("RTDE start refused by the controller (accepted=%r) - "
+                              "通常是上一次会话尚未释放" % (data,))
                 elif(packet_command == Command.RTDE_CONTROL_PACKAGE_PAUSE):
                     # self._logger.info('RTDE paused')
                     self.__conn_state = ConnectionState.PAUSED
                 elif(packet_command == Command.RTDE_DATA_PACKAGE):
                     self.__updateModel(data)
                 elif(packet_command == 0):
-                    byte_buffer = bytes()
+                    self.__recv_buffer = bytes()
             else:
-                print("skipping package - unexpected packet_size - length: " + str(len(byte_buffer)))
-                byte_buffer = bytes()
+                # 半包：**留着**等下一片。旧实现在这里打印一句然后丢掉整块缓冲 ——
+                # 那正是"跨 recv 边界的包整帧丢失"的来源，而且它把日志写成了
+                # "unexpected packet_size"，把正常的分片说成了异常。
+                break
 
-        if len(byte_buffer) != 0:
-            # self._logger.warning('skipping package - not a package but buffer was not empty')
-            byte_buffer = bytes()
+        # 缓冲区里可能还留着半个包：**不丢**，留给下一次 recv 补齐（见本函数开头的说明）。
 
     def __updateModel(self, rtde_data_package):
         self.__packageCounter = self.__packageCounter + 1

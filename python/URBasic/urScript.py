@@ -220,7 +220,11 @@ end
             pose = q
         pose = np.array(pose)
         if movetype == 'j' or movetype == 'l':
-            tval = 't={t},'.format(**locals())
+            # ⚠️ 这里必须写 `t_val`（下面 movestr 的占位符就是它）。历史上写成了 `tval`，
+            # 于是 `t=` **从来没有进过生成的 URScript**：调用方传 t=5 仍按 a/v 跑，时长
+            # 完全不受控（手册语义是"给了 t 就忽略 a/v"），而调用方拿到的回报里却带着 t。
+            # test/vendored-fixes.test.mjs 的 `motion_t_param` 用例守住这一行。
+            t_val = 't={t},'.format(**locals())
 
         if movetype == 'c':
             if pose_via is None:
@@ -2063,7 +2067,11 @@ end
         # 后果是控制器拒收这段脚本，而调用方只看到"已发送" ⇒ **数字输出永远没被设置，
         # 工具却回报成功**。这里改用手册里的真名。
         value = 'True' if b else 'False'
-        self.robotConnector.RealTimeClient.Send(
+        # ⚠️ **必须把 `Send()` 的返回值交出去。** 它会返回 False 并把原因写进
+        # `lastSendFailure`（掉线、socket 不可写、非远程控制等）。旧写法把它丢掉，
+        # 于是调用方只能"假设成功"——而工具数字输出是**物理动作**（夹爪、气阀），
+        # 报成功但实际没置位是最不该发生的一类谎报。
+        return self.robotConnector.RealTimeClient.Send(
             'set_tool_digital_out({n}, {value})\n'.format(n=n, value=value))
 
     def set_tool_voltage(self, voltage):
