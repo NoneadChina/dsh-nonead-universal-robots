@@ -2,11 +2,22 @@
 
 **一个让 DSH 用自然语言直接控制 Universal Robots（UR）机械臂的插件，由拓德科技（Nonead）基于自研的 nUR MCP Server 同源逻辑开发。**（[Suzhou Nonead Robot Technology Co., Ltd.](https://www.nonead.com)）
 
-本插件与该公司的 `Nonead-Universal-Robots-MCP`（见「参考实现」一节）同源，把「用 AI 控制 UR 机器人」的能力以**原生 DSH 工具**的形式接入：插件启动一个常驻的 Python worker（内部复用 vendored 的 `URBasic` 库），工具通过该 worker 与机器人通信，`connect` 一次后即可在同一 IP 上持续发指令。
+插件启动一个常驻的 Python worker（内部复用 vendored 的 `URBasic` 库），把机器人控制以**原生 DSH 工具**的形式接入：工具经由该 worker 与机器人通信，因此 `connect` 一次后即可在同一 IP 上持续发指令。仓库：<https://github.com/NoneadChina/dsh-nonead-universal-robots>
 
-> ⚠️ **安全提示**：本插件会直接驱动真实机械臂。使用时务必保证机器人可见、急停按钮在触手可及处、工作区无障碍物/人员。把它当作授予 bash 工具一样慎重对待。你（或模型）对任何运动指令负全责。
+> ⚠️ **安全提示**：本插件会直接驱动真实机械臂。使用时务必保证机器人可见、急停按钮触手可及、工作区无障碍物与人员。请把它当作授予模型 `bash` 工具一样慎重对待。你（或模型）对任何运动指令负全责。
 
-> 🛡️ **运动审批门禁**：`ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_optimized` / `ur_move_x|y|z` / `ur_move_tool_x|y|z` / `ur_draw_*` / `ur_load_program` / `ur_run_program` / `ur_send_script` / `ur_reset_error`；0.5.0 新增的 `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` / `ur_zero_ftsensor` / `ur_set_conveyor_tracking`；0.6.0 新增的 `ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings` / `ur_speedj` / `ur_speedl` / `ur_stopj` / `ur_stopl` / `ur_set_payload_inertia`，以及 `ur_motion_version`、`ur_set_payload`、`ur_set_gravity` —— 这些会驱动机器人运动、执行程序、**或让机械臂脱离程序控制 / 失去刚性支撑**的指令，在真正下发到机器人前会**暂停等待人工确认**。交互式部署（审批策略为 `ask`）会在界面上弹出确认框；未组合审批服务、无代理、或应答不是 `allowed-once` 的调用都会**以拒绝方式安全关闭**（fail-closed），绝不会在未获批准时运动。默认值写在**代码**里（`config.requireApprovalForMotion ?? true`），因此"调用方跳过 schema 解析"这种情形也不会把门禁关掉。可用配置 `requireApprovalForMotion: false` 显式关闭此门禁。`test/approval-gate.test.mjs` 驱动真实工具注册表逐条验证上述行为，包括"多传一个 `op` 参数无法把调用改派到别的指令"。
+> 🛡️ **运动审批门禁**：**40** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**的指令，在真正下发前会**暂停等待人工确认**：
+>
+> | 分组 | 工具 |
+> |---|---|
+> | 运动 | `ur_movej` `ur_movel` `ur_movep` `ur_movec` `ur_servoj` `ur_move_optimized` `ur_move_x` `ur_move_y` `ur_move_z` `ur_move_tool_x` `ur_move_tool_y` `ur_move_tool_z` |
+> | 绘图 | `ur_draw_circle` `ur_draw_square` `ur_draw_rectangle` `ur_draw_star` |
+> | 程序与脚本 | `ur_load_program` `ur_run_program` `ur_send_script` `ur_reset_error` |
+> | 控制模式 / 电源 / 安全 | `ur_set_freedrive` `ur_set_teach_mode` `ur_power_on` `ur_power_off` `ur_brake_release` `ur_unlock_protective_stop` `ur_shutdown` |
+> | 力控与速度 | `ur_force_mode` `ur_end_force_mode` `ur_force_mode_settings` `ur_speedj` `ur_speedl` `ur_stopj` `ur_stopl` |
+> | 物理状态变更 | `ur_set_payload` `ur_set_payload_inertia` `ur_set_gravity` `ur_zero_ftsensor` `ur_motion_version` `ur_set_conveyor_tracking` |
+>
+> 交互式部署（审批策略为 `ask`）会在界面上弹出确认框。未组合审批服务、无代理、或应答不是 `allowed-once` 的调用都会**以拒绝方式安全关闭**（fail-closed）—— 指令被拒绝，绝不会到达机器人。默认值写在**代码**里（`config.requireApprovalForMotion ?? true`），因此"调用方跳过 schema 解析"也不会把门禁关掉；可用配置 `requireApprovalForMotion: false` 显式关闭。`test/approval-gate.test.mjs` 驱动真实工具注册表逐条验证上述行为，包括"多传一个 `op` 参数无法把调用改派到别的指令"。
 
 ---
 
@@ -17,36 +28,36 @@
 | 类别 | 工具（`ur_*`） | 说明 |
 |---|---|---|
 | 连接 | `ur_connect` / `ur_disconnect` | 按 IP 连接 / 断开一台 UR 机器人 |
-| 状态 | `ur_get_status` | 一次性读取 TCP、关节、型号、序列号、版本、安全模式、运行/程序状态、电压、电流、温度、开机时长、关节电流/电压/角速度、TCP 速度与受力、速度倍率 |
+| 状态 | `ur_get_status` | 一次性读取 TCP、关节、型号、序列号、版本、安全模式、运行/程序状态、电压、电流、温度、开机时长、关节电流/电压/角速度、TCP 速度与受力、速度倍率，以及 `rtde_resync_bytes`（RTDE 接收端为重新同步而丢弃的字节数；`0` 表示链路干净） |
 | 位姿 | `ur_get_tcp_pose` / `ur_get_joint_pose` | 读取当前 TCP 位置 / 关节角度 |
-| 目标值 | `ur_get_target_values` | 读取「**控制器打算去哪**」：目标关节角/角速度/角加速度、目标 TCP 位姿与速度（外加实际值便于对比）。来自 RTDE 的 `target_*` 字段（0.6.0 加入接收配方），读取零代价——这是判断「指令已下发但还没执行 / 正在交融 / 被安全限速拉住」的直接依据 |
-| 设备信息 | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_safety_status` / `ur_get_robot_mode` | 型号（含 `remote_control` 字段）/ 序列号 / 开机时长 / 软件版本 / 安全模式 / **安全与机器人状态位**（哪一类安全功能被触发，含 violation / fault；限值数值需去 PolyScope 安全页读）/ 运行状态 |
-| 程序 | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` | 程序状态、加载、运行、停止、暂停、SSH 列表（`list_programs` 兼容真机 `/programs` 与 URSim `~/URSim_Linux-*/programs.*`；`load/run` 支持完整路径/URSim 路径与 `programs_dir`）。**运行/停止/暂停都会检查控制器应答并回带运行状态**，不再把 "could not understand" 一类拒绝当作成功 |
+| 目标值 | `ur_get_target_values` | 读取「**控制器打算去哪**」：目标关节角/角速度/角加速度、目标 TCP 位姿与速度（外加实际值便于对比）。来自 RTDE 的 `target_*` 字段，读取零代价 —— 这是判断「指令已下发但还没执行 / 正在交融 / 被安全限速拉住」的直接依据 |
+| 设备信息 | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_safety_status` / `ur_get_robot_mode` | 型号（含 `remote_control` 字段）/ 序列号 / 开机时长 / 软件版本 / 安全模式 / **安全与机器人状态位**（哪一类安全功能被触发，含 violation / fault；**限值数值本身**不经 RTDE/dashboard 暴露，需去 PolyScope 安全页读）/ 运行状态 |
+| 程序 | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` | 程序状态、加载、运行、停止、暂停、SSH 列表。`ur_list_programs` 扫描真机 `/programs` 或 URSim 的 `~/URSim_Linux-*/programs.*` 布局（可用 `programs_dir` 覆盖）；不传口令时会回报 `used_default_password`，并给出当前生效的 `host_key_policy`，可选 `known_hosts` 文件会让 SSH 切到 **`RejectPolicy` 严格校验主机指纹**（文件不存在直接报错，绝不静默退回）。运行/停止/暂停都会检查控制器应答并回带运行状态 |
 | 寄存器 | `ur_get_int_register` / `ur_get_double_register` / `ur_get_bit_register` | 读取 Int / Double / Bool 寄存器 |
-| 健康检查 | `ur_ping` | 无需连接机器人，检测 worker/Python/URBasic 就绪 |
-| I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` / `ur_get_tool_analog_in` | 数字输入/输出（含**批量读位**、`which="tool"` 的工具端数字 I/O）、标准模拟输入/输出（**按工程单位收值**：URScript 的 `set_analog_out` 收的是相对电平 [0,1]，旧实现把 5 当成满量程；`full_scale` 可指定电流域 20）、工具端模拟输入（函数名已对照仓库内官方手册确认，参数语义未经真机验证） |
-| 工具配置 | `ur_set_tool_voltage` / `ur_set_tcp` / `ur_set_payload` / `ur_set_payload_inertia` / `ur_set_gravity` / `ur_zero_ftsensor` / `ur_set_tool_output_mode` / `ur_set_tool_communication` | 工具电压（**0/12/24，旧实现调用的是 NotImplementedError 桩，从未成功过**）、TCP、负载质量/重心、**质量+重心+惯性矩阵一次设全**（`set_target_payload`，5.10+；避免 `set_payload` 重置惯性矩阵导致三者不一致）、重力方向（非水平安装用）、力/力矩传感器归零、**工具输出模式**（普通 / power 双针供电）、**工具串口（TCI/RS-485，⚠️ 启用会禁用工具模拟输入）** |
-| 控制模式 / 电源 / 安全 | `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` | 自由驱动 / 示教模式（可手动拖动机械臂）、上电 / 下电 / **释放刹车**（⚠️ 可能因重力掉落）、**只解保护性停止**（不上电、不释放刹车，与 `ur_reset_error` 的区别）、关闭控制器 |
-| 力控 | `ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings` | **力控（Force Mode）**：沿/绕选定轴柔性贴合环境并持续施加指定力/力矩。参数与手册逐条对齐：`task_frame` / `selection_vector`（1=柔性）/ `wrench` / `type`（1-3）/ `limits`（柔性轴=最大速度，刚性轴=最大偏差）/ `damping` / `gain_scaling`。脚本里按手册建议先 `sleep(0.02)` 再进力控；退出用 `ur_end_force_mode`。⚠️ `damping`/`gain_scaling` **控制器侧无法回读**，工具只回报本次设置值，不假装读到当前值 |
-| 速度控制 | `ur_speedj` / `ur_speedl` / `ur_stopj` / `ur_stopl` / `ur_wait_steady` | 关节/TCP **速度指令**（`speedj` / `speedl`）与对应的减速停止（`stopj` / `stopl`）。⚠️ 速度指令是**开放式**的：`t=0`（默认）时"达速即返回"但机械臂**仍在运动**，必须用 stop* 或 `ur_wait_steady` 收尾。`ur_wait_steady` 轮询 RTDE 已有速度量判断是否真的停住（**没有**用 URScript 的 `is_steady()`——那个在力控/示教模式下恒为 false） |
+| 健康检查 | `ur_ping` | 无需连接机器人，检测 worker / Python / URBasic 就绪 |
+| I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` / `ur_get_tool_analog_in` | 数字输入/输出（含批量读位、`which="tool"` 的工具端 I/O）与标准模拟输入/输出（**按工程单位收值**：URScript 的 `set_analog_out` 收的是相对电平 [0,1]；电流域端口可用 `full_scale: 20`）。读工具端数字输入是**哨兵校验**的：控制器若始终没回报脚本执行完毕，工具会拒绝给值，而不是报一个无法担保的数字 |
+| 工具配置 | `ur_set_tool_voltage` / `ur_set_tcp` / `ur_set_payload` / `ur_set_payload_inertia` / `ur_set_gravity` / `ur_zero_ftsensor` / `ur_set_tool_output_mode` / `ur_set_tool_communication` | 工具电压（0/12/24 V）、TCP、负载质量/重心、**质量+重心+惯性矩阵一次设全**（`set_target_payload`，PolyScope 5.10+；与 `set_payload` 不同，它不会重置惯性矩阵而让三者互相矛盾）、重力方向（非水平安装用）、力/力矩传感器归零、**工具输出模式**（普通 / power 双针供电）、**工具串口**（TCI/RS-485 —— ⚠️ 启用会禁用工具模拟输入）。⚠️ 这类设置**没有回读通道**：成功的回执写明「已下发（未校验）」并带 `verified: false` —— 插件能证明的只是脚本已送达控制器，而 UR 只在远程控制模式下接受 URScript，其余情况会被静默丢弃 |
+| 控制模式 / 电源 / 安全 | `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` | 自由驱动 / 示教模式（可手动拖动机械臂）、上电 / 下电 / **释放刹车**（⚠️ 可能因重力掉落）、**只解保护性停止**（不上电、不释放刹车，这就是它与 `ur_reset_error` 的区别）、关闭控制器 |
+| 力控 | `ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings` | **力控（Force Mode）**：沿/绕选定轴柔性贴合环境并持续施加指定力/力矩。参数与手册逐条对齐：`task_frame` / `selection_vector`（1=柔性）/ `wrench` / `type`（1–3）/ `limits`（柔性轴=最大 TCP 速度，刚性轴=最大位置偏差）/ `damping` / `gain_scaling`。脚本按手册建议先 `sleep(0.02)` 再进力控；退出用 `ur_end_force_mode`。⚠️ `damping`/`gain_scaling` **控制器侧无法回读**，工具只回报本次设置值，不假装读到当前值 |
+| 速度控制 | `ur_speedj` / `ur_speedl` / `ur_stopj` / `ur_stopl` / `ur_wait_steady` | 关节/TCP **速度指令**（`speedj` / `speedl`）与对应的减速停止（`stopj` / `stopl`）。⚠️ 速度指令是**开放式**的：`t=0`（默认）时"达速即返回"而机械臂**仍在运动**，必须用 `stop*` 或 `ur_wait_steady` 收尾。`ur_wait_steady` 轮询 RTDE 已有的速度量判断是否真的停住（**没有**用 URScript 的 `is_steady()` —— 那个在力控/示教模式下恒为 false） |
 | 实时遥测 | `ur_get_runtime_telemetry` / `ur_get_robot_voltage` / `ur_get_robot_current` / `ur_get_joint_temperatures` / `ur_get_speed_scaling` / `ur_get_tcp_force` / `ur_get_tool_telemetry` | 关节电流/电压/角速度、TCP 线速度与受力/力矩、工具加速度计、速度倍率、整机电压电流、关节温度、工具电流/电压、I/O 电流。**这些字段本来就在 500 Hz 的 RTDE 数据流里**，读取零代价、无需改配置。单点读取（整机电压/电流、关节温度）与一次性汇总（`ur_get_runtime_telemetry`）并存：轮询某一项时用单点，诊断时用汇总 |
-| 传送带 | `ur_get_conveyor` / `ur_set_conveyor_tick` / `ur_set_conveyor_tracking` | 传送带 tick 读取 / 设置、**线性或圆盘跟踪的开启与停止** |
-| 运动 | `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_optimized` / `ur_move_x` / `ur_move_y` / `ur_move_z` / `ur_move_tool_x` / `ur_move_tool_y` / `ur_move_tool_z` | 关节空间 / 直线 / 路径 / **真正的圆弧**（旧实现内部把 `movetype` 写死成 `'p'`，实际发的是 `movep` 且丢弃途经点；0.6.0 起补上手册的 `mode` 参数：0 插补姿态 / 1 固定姿态）/ 连续流 / **OptiMove 平滑运动**（`optimovej`/`optimovel`，jerk 受限、振动更小；⚠️ 它的 `a`/`v` 是**能力比例** (0,1] 而不是 rad/s 或 m/s）/ 沿轴直线运动 —— `_move_*` 沿**基座**轴，`_move_tool_*` 沿**当前工具**轴（worker 侧用旋转矩阵换算，不依赖 URScript 的 `pose_trans`）。**默认 a/v 已改回官方手册值**（`movej` 1.4 / 1.05，`movel` 1.2 / 0.25；旧代码默认 `movel` v=1 m/s，是手册默认的 4 倍） |
-| 运动规划 | `ur_motion_version` / `ur_get_freedrive_status` | 设置 **Motion Version**（手册第 14 章）与 **jerk 增益**（0.01-1.0，只作用于 jerk 受限的剖面：版本 2 的 movej/movel 与 optimovej/optimovel）：版本 2 规划时把速度/加速度**钳到硬件上限**、交融半径重叠时**动态收缩**，而不是像版本 1 那样跳过整段运动并给 "Overlapping Blends" 警告。⚠️ 新机型与 PolyScope X **只支持版本 2**；CB3 没有这个设置。⚠️ 这两个设置**没有回读通道**，只报告本次设置值。`ur_get_freedrive_status` 读取当前姿态在 freedrive 下离**奇异点**的距离（0 正常 / 1 接近 / 2 太接近——**不是** freedrive 的开关状态），据此提示操作员换路径 |
-| 绘图 | `ur_draw_circle` / `ur_draw_square` / `ur_draw_rectangle` / `ur_draw_star` | 画圆 / 正方形 / 长方形 / 五角星。**必须先观察到脚本真的在运行**才回报「执行完成」——旧实现发完立刻探测，必然看到"没在跑"，于是无论脚本是否执行都报成功 |
+| 传送带 | `ur_get_conveyor` / `ur_set_conveyor_tick` / `ur_set_conveyor_tracking` | 传送带 tick 读取 / 设置，以及**线性或圆盘跟踪的开启与停止**。`ur_get_conveyor` 对它依赖的那段脚本自证：只有观察到控制器把脚本执行完毕才给出 tick。⚠️ `ur_set_conveyor_tracking` **未经真机验证** —— 签名与量纲逐条对照官方手册，但跟踪行为需要真带编码器的传送带才能确认，请先在 URSim 上试 |
+| 运动 | `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_optimized` / `ur_move_x` / `ur_move_y` / `ur_move_z` / `ur_move_tool_x` / `ur_move_tool_y` / `ur_move_tool_z` | 关节空间 / 直线 / 路径 / **圆弧**（`mode` 0 插补姿态、1 固定姿态）/ 连续流 / **OptiMove 平滑运动**（`optimovej`/`optimovel`，jerk 受限、振动更小；⚠️ 它的 `a`/`v` 是**能力比例** (0,1] 而非 rad/s 或 m/s）/ 沿轴直线运动：`_move_*` 沿**基座**轴、`_move_tool_*` 沿**当前工具**轴（worker 侧用旋转矩阵换算，不依赖 URScript 的 `pose_trans`）。默认值取手册值（`movej` 1.4 / 1.05，`movel` 1.2 / 0.25）；给了 `t > 0` 时时长优先于 `a`/`v` |
+| 运动规划 | `ur_motion_version` / `ur_get_freedrive_status` | 设置 **Motion Version**（手册第 14 章）与 **jerk 增益**（0.01–1.0，只作用于 jerk 受限的剖面：版本 2 的 movej/movel 与 optimovej/optimovel）。版本 2 规划时把速度/加速度**钳到硬件上限**、交融半径重叠时**动态收缩**，而不是像版本 1 那样跳过整段运动并给 "Overlapping Blends" 警告。⚠️ 新机型与 PolyScope X **只支持版本 2**；CB3 没有这个设置。⚠️ 这两个设置**没有回读通道**。`ur_get_freedrive_status` 读取当前姿态在 freedrive 下离**奇异点**的距离（0 正常 / 1 接近 / 2 太接近 —— **不是** freedrive 的开关状态），据此提示操作员换路径 |
+| 绘图 | `ur_draw_circle` / `ur_draw_square` / `ur_draw_rectangle` / `ur_draw_star` | 画圆 / 正方形 / 长方形 / 五角星。只有**观察到脚本真的在运行**之后才回报「执行完成」 |
 | 脚本 / 紧急 | `ur_send_script` / `ur_reset_error` | 发送 URScript（**校验执行**：哨兵注入到函数体内部/顶层语句之间并回读，「已发送」不再冒充「已执行」；含多个函数且看不出调用哪个时拒绝校验并给 `verified: null`）/ 复位错误 |
 
 除「连接」外，所有工具都接受 `ip` 参数，且都要求**先连接**该 IP。
 
-> 📚 **0.6.0 的手册对齐**：本版本逐条对照仓库内三本官方手册（URSoftware 3.15.4 / PolyScope 5 / PolyScope X）核对了签名、默认值、参数范围与已废弃函数，分析结果见 [`docs/urscript-manual-analysis.md`](./docs/urscript-manual-analysis.md)。其中三处与旧实现不同的**实质修正**：① `movel`/`movej` 默认速度改回手册值；② `ur_force_mode` 的 `damping`/`gain_scaling` 明确标注"无法回读"而不是假装能读；③ `set_target_payload` 只有在给出 `inertia` 时才使用（旧固件上自动退回 `set_payload_mass`+`set_payload_cog`）。
+---
 
-### 只读 3D 数字孪生
+## 只读 3D 数字孪生
 
-插件还内置机器人的**只读 3D 数字孪生**（three.js 渲染）：入口是**右侧栏**「开始」面板里的一张卡片，位置在「工作区文件 / 新建终端 / 浏览器」三张卡片下面；点击后 3D 视图占满右侧栏的内容区。视图订阅宿主的 **SSE 实时流**（`/twin/stream`，100 ms 一帧），始终与真机同步显示**关节姿态、TCP 坐标系与近期运动轨迹**。数字孪生**严格只读，绝不下发任何机器人指令**——它只订阅 host 的只读路由并渲染收到的数据。工具栏提供「重置视角」与等轴测/前视/侧视/俯视四个预设，且相机与基座网格按模型包围盒取景 —— UR3 与 UR20 都能正确入画。数值面板还会显示 dashboard 侧状态（安全模式、机器人模式、程序状态、速度倍率、关节温度、母线电压电流），同样走这条路由、按较慢的节拍取。
+插件还内置机器人的**只读 3D 数字孪生**（three.js 渲染）：入口是**右侧栏**「开始」面板里的一张卡片，位置在「工作区文件 / 新建终端 / 浏览器」三张卡片下面；点击后 3D 视图占满右侧栏的内容区。视图订阅宿主的 **SSE 实时流**（`/twin/stream`，100 ms 一帧），始终与真机同步显示**关节姿态、TCP 坐标系与近期运动轨迹**。数字孪生**严格只读，绝不下发任何机器人指令** —— 它只订阅 host 的只读路由并渲染收到的数据。工具栏提供「重置视角」与等轴测/前视/侧视/俯视四个预设，且相机与基座网格按模型包围盒取景 —— UR3 与 UR20 都能正确入画。数值面板还会显示 dashboard 侧状态（安全模式、机器人模式、程序状态、速度倍率、关节温度、母线电压电流），同样走这条路由、按较慢的节拍取。
 
-**运动期间也不再停更（0.6.7 起）**：遥测改由 worker **主动推送**（20 Hz），孪生的每一帧优先读这份推送缓存、**不经过那条单线程命令队列** —— 机器人运动时，运动确认循环（`_movej_confirm` 之类）占住的是命令队列，而 RTDE 缓存由 URBasic 自己的接收线程持续更新，推送因此照常到达（协议上是一条不带 `id` 的 JSON 行，旧宿主只会把它当成匹配不上的响应，向后兼容）。缓存过期（>300 ms）或缺失时才回退到显式读；孪生的读仍只带 **2.5 s 的专用预算且超时不杀 worker**：一条只读可视化读**绝不能**把整条机器人会话（RTDE/Dashboard）带走。万一真的停滞，流里仍会推 `stale` 事件、面板写出「数据已停止更新 Ns · 正在重试」，绝不静静冻住。断线后无限重连（指数退避封顶 30 s），窗口重新可见或停滞过久时立即重试。诊断时可用 `DSH_UR_TWIN_PUSH=0` 关掉推送做对照。
+运动期间也不会停更：遥测由 worker **主动推送**（20 Hz），孪生的每一帧优先读这份推送缓存、**不经过那条单线程命令队列** —— 机器人运动时，运动确认循环占住的是命令队列，而 RTDE 缓存由 URBasic 自己的接收线程持续更新，推送因此照常到达（协议上是一条不带 `id` 的 JSON 行，旧宿主只会把它当成匹配不上的响应，向后兼容）。缓存过期（>300 ms）或缺失时才回退到显式读；孪生的读仍只带 **2.5 s 的专用预算且超时不杀 worker**：一条只读可视化读**绝不能**把整条机器人会话（RTDE/Dashboard）带走。万一真的停滞，流里仍会推 `stale` 事件、面板写出「数据已停止更新 Ns · 正在重试」，绝不静静冻住。断线后无限重连（指数退避封顶 30 s），窗口重新可见或停滞过久时立即重试。诊断时可用 `DSH_UR_TWIN_PUSH=0` 关掉推送做对照。
 
-**跟随桌面程序的颜色主题**：面板的 DOM 部分用宿主设计 token（`--dsw-alias-*`）着色 —— 工具栏、HUD 与状态行会随「设置 → 外观」里选的主题（以及第三方主题）自动翻转，**不需要 JS**。3D 画布里的基座网格线与回退臂材质色由 `src/client/theme.js` 监听 `body[data-ds-dark-theme]`、在主题切换时重刷（CSS 够不到 WebGL 里的数值）。主题判定**只认该属性**，不退回系统偏好，因此「浅色主题 + 深色系统」不会被判反。
+**跟随桌面程序的颜色主题**：面板的 DOM 部分用宿主设计 token（`--dsw-alias-*`）着色 —— 工具栏、HUD 与状态行会随「设置 → 外观」里选的主题（以及第三方主题）自动翻转，**不需要 JS**。3D 画布里的基座网格线与回退臂材质色由 `src/client/theme.js` 监听 `body[data-ds-dark-theme]`、在主题切换时重刷（CSS 够不到 WebGL 里的数值）。主题判定只认该属性，不退回系统偏好。
 
 host 侧路由（均限定 loopback 调用方）：
 
@@ -57,21 +68,46 @@ host 侧路由（均限定 loopback 调用方）：
 | `GET /dsh-nonead-ur/twin/asset?model=<urXX>` | GLB 网格，带内容哈希 `ETag` + `immutable`，支持 `If-None-Match` → 304 |
 | `GET /dsh-nonead-ur/twin/models` | 本地实际存在的模型清单 |
 
-失败响应带**机器可读的 `code`**（`no_robot` / `robot_not_connected` / `ambiguous_robot` / `worker_unavailable` / `robot_error`）并回显本次解析到的 `ip`，界面据此给出不同的提示与处置建议（以前四种完全不同的故障都渲染成同一句「未连接机器人」）。读**暂时**拿不到（worker 正忙着执行运动指令是最常见的原因）时不会报 `robot_error`：宿主回放最后一笔已知读数并标记 `stale:true`（最多 30 s），孪生保留画面并显示停滞提示。
+失败响应带**机器可读的 `code`**（`no_robot` / `robot_not_connected` / `ambiguous_robot` / `worker_unavailable` / `robot_error`）并回显本次解析到的 `ip`，界面据此给出不同的提示与处置建议。读**暂时**拿不到（worker 正忙着执行运动指令是最常见的原因）时不会报 `robot_error`：宿主回放最后一笔已知读数并标记 `stale:true`（最多 30 s），孪生保留画面并显示停滞提示。回放的帧**从不带审批状态**：`pending_motion` 是现场重读的，因此一个早已结束的审批不会被画成幽灵目标。
 
 ---
 
 ## 安装到 DSH profile
 
-### 方式一：作为 bundle 手动安装
+> 📦 **尚未发布到 npm**，因此没有可写进 `dependencies` 的版本号。请从插件市场/插件页安装，或从本仓库安装（本地检出目录或它的 GitHub 地址）。
+
+### 方式一：插件市场 / 插件页（GUI）
+
+插件已在 DSH 插件市场中登记为 `dsh-nonead-universal-robots`。打开**设置 → 插件市场**（或侧边栏**插件**页），找到并安装。
+
+两点须知：
+
+- 市场在**有 agent 正在运行**时会拒绝安装（"安装会修改插件文件，正在工作的 agent 可能中途报错"）。请先结束或取消当前回合。
+- 市场按目录条目里的 GitHub 地址安装，而 pnpm 对 `github:` 规格是从 `codeload.github.com` 下 tarball。网络慢或被过滤时这次下载会超时；下面的 CLI 方式可完全绕开它。
+
+### 方式二：CLI，从本地检出安装（开发时推荐）
+
+```sh
+# DSH Desktop 会为每个 profile 生成一个 CLI 包装器：
+#   %APPDATA%\<app>\host-commands\<profile>\generations\<hash>\bin\dsh.cmd
+dsh.cmd plugin add "file:D:/path/to/dsh-nonead-universal-robots"
+# （该包装器会自己补上 --profile <profile>；其他环境用 `dsh plugin --profile <profile> add <spec>`）
+```
+
+这与插件页走的是同一条路径：它会写入依赖**和** `dsh.profile.bundles` 条目，并把插件**热加载**进正在运行的会话（无需重启 —— `ur_*` 工具会立刻出现在工具表里）。
+
+⚠️ `file:` 安装进来的是**副本**而非软链：**改检出目录不会影响已装的插件** —— 改了源码要重新执行这条命令。
+
+### 方式三：作为 bundle 手动安装
 
 1. 在目标 profile 的 `package.json` 中把本插件加入依赖：
 
    ```jsonc
-   // C:\Users\<you>\.dsh\profiles\web\package.json
+   // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.7.0"
+       "dsh-nonead-universal-robots": "file:D:/path/to/dsh-nonead-universal-robots"
+       // 或（GitHub 可达时）："github:NoneadChina/dsh-nonead-universal-robots"
      },
      "dsh": {
        "profile": {
@@ -87,42 +123,28 @@ host 侧路由（均限定 loopback 调用方）：
 2. 通过 `dsh plugin`（等价于在 profile 目录内跑 pnpm）安装依赖：
 
    ```sh
-   dsh plugin --profile web install
-   # 或 cd "$DSH_HOME/profiles/web" && pnpm install
+   dsh plugin --profile <profile> install
+   # 或：cd "$DSH_HOME/profiles/<profile>" && pnpm install
    ```
 
-3. 重启 DSH。插件的 `cordis.patch.yml` 会自动把插件行插入配置树，工具以 `ur_*` 形式出现在模型工具列表中。
-
-### 方式二：本地路径（开发时）
-
-把仓库路径加入 profile 依赖（pnpm 支持 `file:`），便于在本仓库迭代：
-
-```jsonc
-"dependencies": {
-  "dsh-nonead-universal-robots": "file:D:/MyProgram/GitLab/dsh-Nonead-Universal-Robots/dsh-nonead-universal-robots"
-}
-```
+3. 重启 DSH。插件的 `cordis.patch.yml` 会把插件行插入配置树，工具以 `ur_*` 形式出现在模型工具列表中。
 
 ---
 
 ## Python 运行时
 
-插件需要一个可用的 Python 与若干依赖（`numpy`、`paramiko`）来启动 worker。可用 `pythonBin` 配置指向解释器：
+插件需要一个可用的 Python 以及 `numpy`、`paramiko` 才能启动 worker：
 
 ```sh
 pip install -r requirements.txt
 ```
 
-`cordis.patch.yml` 中的 `pythonBin`（默认 `python`）、`commandTimeoutMs`（运动/脚本超时，默认 60000）、`connectTimeoutMs`（首次连接超时，默认 30000）都可按部署覆盖。若 `python` 不在 PATH，改成绝对路径，例如 `"C:\\Python312\\python.exe"` 或 `"/usr/bin/python3"`。
+> ⚠️ **依赖必须装在 worker 真正使用的那个解释器里。** `lib/worker.js` 会把 `PYTHONPATH`
+> 指向插件的 `python/` 目录，而 CPython 启动时会 import 该目录下的 `sitecustomize.py`（如果存在）
+> —— 于是一个把本机用户级 `site-packages` 塞进 `sys.path` 的 `sitecustomize.py` 会"本机能跑、
+> 换台机器就全挂"。请把 `pythonBin` 指向已装好依赖的解释器（或一个 venv）。
 
-> ⚠️ **依赖必须装在 worker 用的那个解释器里（一个真实的坑）**
-> `lib/worker.js` 会把 `PYTHONPATH` 指向插件的 `python/` 目录，而 CPython 启动时会 import 该目录下的
-> `sitecustomize.py`（如果存在）。本仓库里曾有一个**本机私货** `python/sitecustomize.py`，它把本机
-> 用户级 `site-packages` 硬编码进 `sys.path` —— 于是"本机能跑"，而换一台机器、或安装发布版
-> （该文件**不在** `files` 清单里）之后，`import numpy` 直接失败，所有工具调用都会死。
-> 正确做法：**给 `pythonBin` 指向的解释器装好依赖**（或指向一个 venv）。`ur_ping` /
-> `npm run test:python` 就是这条链路的自检入口；`npm run verify:host` 则用宿主真实的
-> schema DSL 校验工具注册（应报告 83/83）。
+`cordis.patch.yml` 中的 `pythonBin`（默认 `python`）、`commandTimeoutMs`（运动/脚本超时，默认 60000）、`connectTimeoutMs`（首次连接超时，默认 30000）都可按部署覆盖。若 `python` 不在 PATH，改成绝对路径，例如 `"C:\\Python312\\python.exe"` 或 `"/usr/bin/python3"`。`ur_ping` / `npm run test:python` 就是这条链路的自检入口。
 
 ---
 
@@ -132,7 +154,7 @@ pip install -r requirements.txt
 
 ```sh
 npm run test:python   # python ur_worker.py --selfcheck：校验 Python/numpy/paramiko/URBasic/RTDE 配置
-npm test              # 跑全部 36 个测试文件 **以及全部门禁脚本**，最后汇总
+npm test              # 51 项：37 个测试文件 + 9 条门禁 + 5 个离线探针，最后汇总
 npm run test:node     # 只跑 Node 侧：跳过需要 Python 的测试文件**与门禁**
 npm run check         # 只跑静态 + 跨语言门禁，不跑测试文件
 npm run verify:host   # 用宿主真实的 schema DSL 校验全部工具注册与 peer 版本
@@ -141,41 +163,28 @@ npm run verify:models # 校验 14 个 GLB 的结构契约
 
 `npm test` 跑两类东西，两类都必须过：
 
-- **36 个测试文件**（端到端协议自检、审批门禁、孪生路由、客户端状态机、FK、vendored 库回归）。
-  名单来自 `test/test-manifest.json`，并由 `check:manifest` 保证"会调用 Python 的用例"不会被漏登记。
-- **10 个门禁脚本**：`check-test-manifest` / `check-package-metadata` / `check-client-bundle` /
-  `check-doc-tools`（Node），以及 `check-worker-ops` / `check-tool-params` / `check-rtde-recipe` /
-  `check-approval-gate` / `check-new-ops`（Python）。解释器没有 `numpy` 时，依赖 Python 的项会以
-  **SKIP + 原因**出现，绝不会显示成通过。
+- **37 个测试文件**（端到端协议自检、审批门禁、孪生路由、客户端状态机、FK、vendored 库回归）。名单来自 `test/test-manifest.json`，并由 `check:manifest` 保证"会调用 Python 的用例"不会被漏登记。
+- **9 条门禁** 加上 **5 个离线探针**：`check-test-manifest` / `check-package-metadata` / `check-client-bundle` / `check-doc-tools`（Node），`check-worker-ops` / `check-tool-params` / `check-rtde-recipe` / `check-approval-gate` / `check-new-ops`（Python），随后是 `scripts/probe-*.mjs` 那几个孪生/SSE 探针。
 
-> 0.6.0 新增 `scripts/pdf-extract2.py`：**只用标准库**从 `ScriptManual/*.pdf` 抽文本到
-> `ScriptManual/txt/*.txt`（两个 PolyScope 手册的字符码是 glyph id，必须走字体自带的
-> `ToUnicode` CMap 才能解出文字）。它是本版所有签名/默认值/范围的可复核来源：
-> 有疑问时重新抽取一次，直接查手册原文。
+**被跳过不等于通过。** 只要有项目被跳过，整轮就以非零退出 —— 想接受跳过必须显式要求（`--allow-skip`，或 Node-only 的 `--skip-python`），而**全部被跳过时无论如何都算失败**。两个探针需要全局 `EventSource`，用 `--experimental-eventsource` 运行（Node ≥22.3）；再加上 `module.registerHooks`（Node ≥22.15），真实的开发下限记录在 `devEngines` 里。
 
-> `check-client-bundle.mjs` 会把 `src/client/**` 重新构建到临时文件并与提交的 `lib/client.js`
-> **逐字节**比对：产物落后于源码（改了界面但没重建）会直接让检查失败，而不是静默发布。
-> 它绝不覆盖提交产物 —— `scripts/build-client.mjs` 为此支持 `BUILD_CLIENT_OUT`。
-
-> 0.5.0 之前 `npm test` **只跑一次 worker ping**，仓库里另外 20 多个 `*.test.mjs` 一个都不跑 ——
-> 所以"npm test 绿了"完全不能说明插件是好的。现在统一由 `scripts/run-tests.mjs` 枚举执行并汇总。
-
-`npm test` 会返回 `selftest passed.` 或非零退出。若 `python` 不在 PATH，用环境变量指定：
+`npm test` 会打印逐项汇总。若 `python` 不在 PATH，用环境变量指定：
 
 ```sh
 UR_PYTHON=C:\\Python312\\python.exe npm test
 ```
 
-发布前、以及每次升级 DSH 内核后，都应跑一遍**宿主兼容自检**——它拿**已安装的宿主**校验本插件，而不是校验一份抄下来的关键字清单：
+发布前、以及每次升级 DSH 内核后，都应跑一遍**宿主兼容自检** —— 它拿**已安装的宿主**校验本插件，而不是校验一份抄下来的关键字清单：
 
 ```sh
-node scripts/check-host-compat.mjs                 # 缺省宿主 = ../dsh-plugin-desktop/node_modules
+npm run verify:host                                # 严格模式：找不到已装宿主时 exit 2
+npm run check:host                                 # 同一检查，但缺宿主时给一条响亮的 SKIP
 node scripts/check-host-compat.mjs <node_modules>  # 也可显式指定宿主
 ```
 
-它会用宿主实装版本核对 peer 范围、用宿主**真实**的 value-schema DSL 编译**每一个**工具参数 schema（被拒的 schema 会让该工具静默消失）、驱动宿主路由注册，并校验 `dsh.client` 声明与客户端 bundle 的 `__ModuleLoader__` 注册 id。退出码 `0` 表示与该宿主兼容。
+它会用宿主实装版本核对 peer 范围、用宿主**真实**的 value-schema DSL 编译**每一个**工具参数 schema（被拒的 schema 会让该工具静默消失）、驱动宿主路由注册，并校验 `dsh.client` 声明与客户端 bundle 的 `__ModuleLoader__` 注册 id。退出码 `0` 表示与该宿主兼容；报告里会写清"声明了多少个、注册成功多少个"（例如 `83/83`）。
 
-> 首次连接到某机器人时，`ur_connect` 有约 20s 的 RTDE 就绪等待，超时会返回清晰错误而非卡死。
+> 首次连接到某机器人时，`ur_connect` 有约 20 s 的 RTDE 就绪等待，超时会返回清晰错误而非卡死。
 
 ---
 
@@ -209,14 +218,14 @@ ur_connect(ip="192.168.1.199")
 ur_get_tcp_pose(ip="192.168.1.199")
 ```
 
-> 让 192.168.1.199 的 TCP 沿 Z 轴下降 20mm。
+> 让 192.168.1.199 的 TCP 沿 Z 轴下降 20 mm。
 
 ```
 ur_get_tcp_pose(ip="192.168.1.199")
 ur_move_z(ip="192.168.1.199", distance=-0.02)
 ```
 
-> 绘制一个半径 50mm 的圆（竖直平面）。
+> 绘制一个半径 50 mm 的圆（竖直平面）。
 
 ```
 ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
@@ -224,25 +233,23 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 
 ---
 
-## 参考实现
-
-- 本插件仓库：<https://github.com/NoneadChina/dsh-nonead-universal-robots>
-
-本插件与拓德科技的 [`Nonead-Universal-Robots-MCP`](https://gitee.com/nonead/Nonead-Universal-Robots-MCP)（GitHub: <https://github.com/nonead/Nonead-Universal-Robots-MCP>）同源，复用其中的 `URBasic` 库与机器人控制逻辑，由同一团队面向 DeepSeek Harness 重新封装为本插件的 `ur_*` 工具与 stdio worker 协议。`URBasic` 为 MIT（© Tony Ke & Anthony Zhuang / Universal Robots，2009-2025）。
-
----
-
 ## 注意事项 / 限制
 
 - **连接持久性**：worker 进程在插件生命周期内常驻，机器人连接按 IP 保留；worker 崩溃或 DSH 重启后需重新 `connect`。
-- **远程控制模式**：部分 UR 机器人需处于「远程控制」才能执行运动/程序指令，`ur_connect` 会报告该状态。**URSoftware 3.1–3.20 之间的 CB3 机器人默认就允许远程控制（设置层面无需额外开启）**；但 `remote_control: false` 仍说明控制器**当前**不在远程模式——本地/示教模式下 URScript 与运动指令会被静默丢弃，需在示教器上切到远程控制。其他固件（e-Series，或不在该区间的 CB3）则需先在 PolyScope 中开启 Remote Control。`ur_status` 另给出 `remote_control_raw`，状态读不到时按"未知"处理而不是假装是 `false`。
-- **工具端数字 I/O**：`ur_get_digital_in` / `ur_set_digital_out` 的 `which="tool"` 用于工具端（法兰侧）数字 I/O。工具端数字信号**不经 RTDE**：读取工具输入会经 `SendProgram` 发送一段短的 URScript 程序，**可能打断正在运行的程序**；写入工具输出则发送 URScript `write_tool_digital_out` 命令。**工具端数字输出的读回不支持**（无可靠的 `read_tool_digital_out` 表达式）。
-- **关节电流**：当前 RTDE 配方未直接暴露单关节电流，故未提供 `ur_get_joint_current`（参考实现中的该工具存在取值错误，本实现未沿用）。
+- **远程控制模式**：部分 UR 机器人需处于「远程控制」才能执行运动/程序指令，`ur_connect` 会报告该状态。**URSoftware 3.1–3.20 之间的 CB3 机器人默认就允许远程控制**；但 `remote_control: false` 仍说明控制器**当前**不在远程模式 —— 本地/示教模式下 URScript 与运动指令会被静默丢弃，需在示教器上切到远程控制。其他固件（e-Series，或不在该区间的 CB3）则需先在 PolyScope 中开启 Remote Control。状态读不到时按"未知"处理，而不是假装是 `false`。
+- **读不到就不假装读到**：没有回读通道的设置型指令只回报 `verified: false`；控制器拒绝 RTDE 会话时报"未运行"而不是"已连接"；孪生某一帧刷新不出来会标 `stale`。
+- **工具端数字 I/O**：`ur_get_digital_in` / `ur_set_digital_out` 的 `which="tool"` 用于工具端（法兰侧）数字 I/O。工具端数字信号**不经 RTDE**，因此读取工具输入会发送一段短的 URScript 程序，**可能打断正在运行的程序**。**工具端数字输出的读回不支持**（没有可靠的 `read_tool_digital_out` 表达式）。
+- **关节电流**：当前 RTDE 配方未直接暴露单关节电流，故未提供 `ur_get_joint_current`。
 - **线程/取消**：运动指令为阻塞到位的轮询，`commandTimeoutMs` 内完成；对长时间轨迹，请在描述中提醒模型设置合理超时或分步执行。
 - **非安全边界**：此插件与 bash 工具同级，可驱动物理设备，务必在真实机器人上充分测试后再用于生产。
-- **包体积**：发布包约 **21 MB**，几乎全部来自 **14 个 `assets/models/*.glb`** 网格；插件自身代码只有数百 KB。网格从转换脚本的原始 35.11 MB 经两步可复现瘦身（`node scripts/compress-models.mjs`；`npm run analyze:models` 可看体积构成）：先**无损**降到 28.27 MB（索引 `uint32` → `uint16` —— 这 14 个型号最大索引值仅 24228 —— 并删掉没有任何材质读取的非标准属性 `_color`；顶点位置、UV、贴图与索引序列**逐字节/逐值不变**，脚本在写盘前自证），再经一次**明确决策的有损**处理降到 20.86 MB：5 个新型号里**共 8 张** 2048×2048 底色 PNG（ur15 ×1、ur18 ×2、ur20 ×1、ur30 ×2、ur8long ×2）用块平均降到 1024×1024（`--texture-size 1024`）。孪生面板实际只有几百像素宽，同区域 1:1 对比看不出差别。几何精度未动（Ruling 24）；`test/model-contract.test.mjs` 守住体积区间。若只想砍掉整个型号，可用 `python scripts/convert-meshes.py --only <型号…>` 重新生成子集。
 - **未知型号回退**：若某机器人没有内置网格（未知或定制型号字符串），会**回退到近似几何体渲染而不报错**，数字孪生不会因未知型号失败。
-- **资产管线**：网格由 `python scripts/convert-meshes.py` 生成，其结构契约（每个 GLB 含 7 个固定命名节点、贴图内嵌）由 `python scripts/verify-models.py` 校验（也暴露为 `npm run verify:models`）。
+- **资产**：14 个 `assets/models/*.glb` 网格（约 21 MB，几乎就是整个发布包）由 `python scripts/convert-meshes.py` 生成，其结构契约由 `python scripts/verify-models.py` 校验（即 `npm run verify:models`）。它们的体积构成与许可来源见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)；`npm run analyze:models` 可看字节都花在哪里。
+
+---
+
+## 参考实现
+
+本插件与拓德科技的 [`Nonead-Universal-Robots-MCP`](https://gitee.com/nonead/Nonead-Universal-Robots-MCP)（GitHub: <https://github.com/nonead/Nonead-Universal-Robots-MCP>）同源，复用其中的 `URBasic` 库与机器人控制逻辑，由同一团队面向 DeepSeek Harness 重新封装为本插件的 `ur_*` 工具与 stdio worker 协议。`URBasic` 为 MIT（© Tony Ke & Anthony Zhuang / Universal Robots，2009-2025）。
 
 ---
 
@@ -252,8 +259,8 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 
 许可按型号分为两类，同一型号内不会混用：
 
-- **BSD-3-Clause**（9 款）：`ur3`、`ur5`、`ur10`、`ur3e`、`ur5e`、`ur7e`、`ur10e`、`ur12e`、`ur16e`——同时涵盖 `assets/kinematics.json` 所派生的运动学与关节限位配置。
-- **UR「Graphical Documentation」条款**（5 款）：`ur8long`、`ur15`、`ur18`、`ur20`、`ur30`。这 5 款的网格**不是** BSD-3-Clause，而属于 UR 的「Graphical Documentation」，其使用受 UR 的 *Terms and Conditions for use of Graphical Documentation* 约束——该条款不符合 OSI 开源定义，但**允许**在若干限制下使用、修改与分享。相关疑问请联系 <legal@universal-robots.com>。
+- **BSD-3-Clause**（9 款）：`ur3`、`ur5`、`ur10`、`ur3e`、`ur5e`、`ur7e`、`ur10e`、`ur12e`、`ur16e` —— 同时涵盖 `assets/kinematics.json` 所派生的运动学与关节限位配置。
+- **UR「Graphical Documentation」条款**（5 款）：`ur8long`、`ur15`、`ur18`、`ur20`、`ur30`。这 5 款的网格**不是** BSD-3-Clause，而属于 UR 的「Graphical Documentation」，其使用受 UR 的 *Terms and Conditions for use of Graphical Documentation* 约束 —— 该条款不符合 OSI 开源定义，但**允许**在若干限制下使用、修改与分享。相关疑问请联系 <legal@universal-robots.com>。
 
 客户端 3D 渲染基于 [three.js](https://threejs.org/)（MIT）；[esbuild](https://esbuild.github.io/)（MIT）仅用于构建期。
 
@@ -265,8 +272,8 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 
 本项目采用**区分用户的双重许可 (User-Segmented Dual Licensing)** 模式：
 
-- **AGPLv3**：适用于**个人用户**及**10人及以下企业/组织**（开源；详见 <https://www.gnu.org/licenses/agpl-3.0.html>）。
-- **商业许可证（必须）**：适用于**超过10人**的组织，或任何需要规避 AGPLv3 源代码公开义务（如 SaaS / 闭源分发）的用户。
+- **AGPLv3**：适用于**个人用户**及**10 人及以下企业/组织**（开源；详见 <https://www.gnu.org/licenses/agpl-3.0.html>）。
+- **商业许可证（必须）**：适用于**超过 10 人**的组织，或任何需要规避 AGPLv3 源代码公开义务（如 SaaS / 闭源分发）的用户。
 
 完整条款见 [LICENSE](./LICENSE)。商业授权请联系 [service@nonead.com](mailto:service@nonead.com)。
 
