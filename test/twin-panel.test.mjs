@@ -1402,3 +1402,75 @@ test('重连中：面板如实显示"数据通道重连中…"（而不是留着
   assert.equal(feed.textContent, '')
   ctx.panel.dispose()
 })
+
+/* ------------------------------------------------------------------ *
+ * 两个"看着在工作、实际永不触发"的死功能（0.6.10 修复）
+ *
+ * 共同点：数据源与消费点对不上，而且**互斥的分支永远不可能同时成立** ——
+ * 纯函数测试全绿，因为它们只测了函数本身，没人从"快照 → HUD"走一遍。
+ * ------------------------------------------------------------------ */
+
+test('关节超限告警必须真的出现在 HUD 上（限位来自 kinematics.json，不是 fkChain 的返回值）', async () => {
+  // ur3 的 J3 限位是 [-π, π]（assets/kinematics.json）。拧到 4 rad 就是明确超限。
+  // 旧实现传的是 `fkResult?.jointLimits`，而 `fkChain()` 只返回 {links, tool0}
+  // ⇒ 每次都在 `limits == null` 那一行返回空数组，告警永不触发。
+  const q = [0, 0, 4, 0, 0, 0]
+  const ctx = boot({ initial: { connected: true, model: 'ur3', q, tcp: TCP0, ts: 1000 } })
+  await tick()
+  ctx.clock.flush(0)
+  ctx.clock.flush(HUD_INTERVAL_MS + 1)
+
+  const joints = jointsEl(ctx)
+  assert.equal(
+    joints.getAttribute('data-ur-twin-overlimit'),
+    'true',
+    `J3=4rad 已超出 ur3 的 [-π,π]，HUD 必须标成超限（实测读数行：${joints.textContent}）`,
+  )
+  assert.notEqual(
+    joints.textContent,
+    formatJoints(q),
+    '超限提示必须被追加到读数行上，而不是只改一个属性',
+  )
+  assert.match(joints.textContent, /J3/, '必须点名是哪一路关节超限')
+
+  // 反例：放回限位内必须立刻撤销告警 —— 否则就成了"永远为真"的假告警。
+  ctx.state.set({ q: [0, 0, 1, 0, 0, 0], ts: 2000 })
+  ctx.clock.flush(HUD_INTERVAL_MS + 1)
+  assert.equal(jointsEl(ctx).getAttribute('data-ur-twin-overlimit'), 'false')
+  ctx.panel.dispose()
+})
+
+test('多机器人歧义时必须能点：未连接也要渲染候选按钮，且不能被整体藏掉', async () => {
+  // host 在"有歧义"时回 400 + ips（lib/twin-routes.js 的 ambiguous 分支），而那一刻
+  // connected 必然是 false。旧实现把按钮建在 writeHud() 里，writeHud() 又只在 connected
+  // 分支被调用 ⇒ 选择器永远建不出来，用户只能读到一句"请指定 ?ip="却无处可点。
+  const ctx = boot({
+    initial: {
+      connected: false,
+      code: 'ambiguous_robot',
+      error: 'multiple robots connected; pass ?ip=<ip>',
+      ips: ['10.0.0.2', '10.0.0.1'],
+    },
+  })
+  await tick()
+  ctx.clock.flush(0)
+
+  const row = byAttr(ctx.container, 'data-ur-twin-robots')[0]
+  assert.ok(row, '选择行必须存在')
+  assert.equal(row.children.length, 2, `未连接时必须把候选渲染成按钮（实测 ${row.children.length} 个）`)
+  assert.deepEqual(row.children.map((b) => b.textContent), ['10.0.0.2', '10.0.0.1'])
+
+  // 父容器被 display:none 就等于没建 —— 候选必须在断连时也看得见。
+  const hud = byAttr(ctx.container, 'data-ur-twin-hud')[0]
+  assert.notEqual(hud.style.display, 'none', '有候选时 HUD 不得被整体藏掉，否则按钮点不到')
+  // 反例：没有候选时，数值区仍然该收起来（不能因为这次修复就让断连态露出空读数行）。
+  assert.equal(byAttr(ctx.container, 'data-ur-twin-joints')[0].style.display, 'none')
+
+  // 点一下必须真的把目标交给状态源。
+  const picked = []
+  ctx.state.setIp = (ip) => picked.push(ip)
+  row.children[0].listeners.click[0]()
+  assert.deepEqual(picked, ['10.0.0.2'], '点击候选必须调用 state.setIp(ip)')
+
+  ctx.panel.dispose()
+})

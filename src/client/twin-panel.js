@@ -713,6 +713,14 @@ export function mountTwinPanel({
   hud.appendChild(hudTcp)
   hud.appendChild(hudDetail)
   hud.appendChild(hudPower)
+  /**
+   * 只在**连接态**才有内容的数值行。
+   *
+   * 未连接时它们本来就是空的（`applyConnection` 会把内容清掉），显式收起而不是留一排
+   * 空行。`hudFeed` 刻意不在这个名单里：未连接时它正需要显示「数据通道重连中…」。
+   * `hudRobots` 也不在：多机器人候选只在未连接时出现，见 `syncHudVisibility()`。
+   */
+  const METRIC_ROWS = [hudPending, hudIdentity, hudLayers, hudJoints, hudTcp, hudDetail, hudPower]
 
   /*
    * 视角工具栏。
@@ -1047,12 +1055,63 @@ export function mountTwinPanel({
   }
 
   /* ---------------- 连接态切换 ---------------- */
+
+  /**
+   * 数值行的显隐。
+   *
+   * 未连接时没有读数可显示，数值行收起是对的；但**多机器人候选必须留在屏幕上** ——
+   * 歧义恰恰只在"未连接"时出现，跟着一起藏掉等于用户永远点不到那个选择器
+   * （这是它此前"看着在工作、实际永不触发"的第二个原因）。
+   */
+  function syncHudVisibility() {
+    // 用 `children.length` 而不是 `childElementCount`：两者语义相同（都只数元素子节点），
+    // 但宿主注入的最小 DOM / 测试里的假 DOM 只保证前者。
+    const hasChoices = hudRobots.children.length > 0
+    hud.style.display = wasConnected || hasChoices ? '' : 'none'
+    for (const row of METRIC_ROWS) row.style.display = wasConnected ? '' : 'none'
+  }
+
+  /**
+   * 多机器人选择行（清单第 19 条）。
+   *
+   * ⚠️ **必须独立于连接态运行。** 候选 IP 只在宿主回「有歧义」时才有值，而那一刻
+   * `connected` 必然是 false；旧实现把这段放在 `writeHud()` 里，`writeHud()` 又只在
+   * connected 分支被调用 ⇒ 按钮永远建不出来，用户只能读状态行里那句
+   * 「当前有 N 台机器人已连接，请指定 ?ip=」，却没有任何可点的东西 —— 而源码注释
+   * 自称要解决的正是"歧义会永远白轮询"。
+   *
+   * 候选或当前目标变了才重建 DOM：这不是热路径，但每帧重建按钮会让点击落空
+   * （手指还没抬起来按钮就被换掉了）。
+   */
+  function updateRobotChoices(snap) {
+    const candidates = Array.isArray(snap?.ips)
+      ? snap.ips.filter((value) => typeof value === 'string' && value !== '')
+      : []
+    const resolvedIp = typeof snap?.ip === 'string' ? snap.ip : ''
+    const signature = `${resolvedIp}|${candidates.join(',')}`
+    if (signature !== lastRobotsSignature) {
+      lastRobotsSignature = signature
+      hudRobots.textContent = ''
+      for (const candidate of candidates) {
+        const button = makeEl(doc, 'button', 'ur-twin-layer-toggle', 'data-ur-twin-robot')
+        button.type = 'button'
+        button.textContent = candidate
+        button.setAttribute('aria-pressed', candidate === resolvedIp ? 'true' : 'false')
+        button.addEventListener('click', () => { state?.setIp?.(candidate) })
+        hudRobots.appendChild(button)
+      }
+      // 只在**候选/目标变化**时动显隐：每帧写 style 与"数值面板节流到 10Hz"的取向相悖。
+      // 连接态翻转那一路由 `applyConnection()` 负责。
+      syncHudVisibility()
+    }
+  }
+
   function applyConnection(connected) {
     if (connected !== wasConnected) {
       wasConnected = connected
       root.setAttribute('data-ur-twin-connected', connected ? 'true' : 'false')
       view.style.display = connected ? '' : 'none'
-      hud.style.display = connected ? '' : 'none'
+      syncHudVisibility()
       toolbar.style.display = connected ? '' : 'none'
       if (!connected) {
         // 断连：丢弃插值对与轨迹，避免重连后画出跨越断层的直线/错误插值。
@@ -1218,38 +1277,24 @@ export function mountTwinPanel({
    * `joints` 必须是**测量值**（host 报出的那一笔），不是插值值 —— 插值只服务于网格的观感，
    * 工程读数不能是"算出来的中间态"。
    */
-  function writeHud(nowMs, snap, joints, fkResult) {
+  function writeHud(nowMs, snap, joints, fkResult, limits) {
     if (!(nowMs - lastHudMs >= HUD_INTERVAL_MS)) return
     lastHudMs = nowMs
     // 身份行：机型 + 机器人 IP。IP 以前只落在属性上，界面上看不到。
     const identity = [snap?.model ?? loadedModelId, snap?.ip].filter(v => typeof v === 'string' && v !== '')
     hudIdentity.textContent = identity.length === 0 ? '' : S.identity(snap?.model ?? loadedModelId, snap?.ip)
     hudIdentity.setAttribute('title', hudIdentity.textContent)
-    // 多机器人选择（清单第 19 条）：候选或当前目标变了才重建 DOM（这不是热路径，
-    // 但每帧重建按钮会让点击落空 —— 手指还没抬起来按钮就被换掉了）。
-    const candidates = Array.isArray(snap?.ips)
-      ? snap.ips.filter((value) => typeof value === 'string' && value !== '')
-      : []
-    const resolvedIp = typeof snap?.ip === 'string' ? snap.ip : ''
-    const robotsSignature = `${resolvedIp}|${candidates.join(',')}`
-    if (robotsSignature !== lastRobotsSignature) {
-      lastRobotsSignature = robotsSignature
-      hudRobots.textContent = ''
-      for (const candidate of candidates) {
-        const button = makeEl(doc, 'button', 'ur-twin-layer-toggle', 'data-ur-twin-robot')
-        button.type = 'button'
-        button.textContent = candidate
-        button.setAttribute('aria-pressed', candidate === resolvedIp ? 'true' : 'false')
-        button.addEventListener('click', () => { state?.setIp?.(candidate) })
-        hudRobots.appendChild(button)
-      }
-    }
+    // 多机器人选择行**不在这里**构建：它必须独立于连接态运行，见 `updateRobotChoices()`。
     // 待审批目标：审批进行中才有内容，结束后 host 不再返回该字段、这里自然清空。
     const pendingSummary = typeof snap?.pendingMotion?.summary === 'string' ? snap.pendingMotion.summary : ''
     hudPending.textContent = pendingSummary === '' ? '' : `${S.pendingPrefix}  ${pendingSummary}`
     hudPending.setAttribute('title', hudPending.textContent)
-    // 关节角：同时标出**超出限位**的关节（限位表来自 kinematics.json，此前从未被用过）。
-    const over = overLimitJoints(joints, fkResult?.jointLimits)
+    // 关节角：同时标出**超出限位**的关节。限位表来自 `assets/kinematics.json`
+    // （`kin.jointLimits`），**不是** `fkChain()` 的返回值 —— `fkChain` 只返回
+    // `{links, tool0}`。旧写法传的是 `fkResult?.jointLimits`（永远是 undefined），
+    // 于是 `overLimitJoints` 每次都在第一行返回空数组：超限告警是**死功能**，
+    // 而操作员会把"没有告警"读成"没有超限"。
+    const over = overLimitJoints(joints, limits)
     hudJoints.textContent = over.length === 0
       ? formatJoints(joints)
       : `${formatJoints(joints)}  ${S.overLimit(`J${over.join('/J')}`)}`
@@ -1282,6 +1327,8 @@ export function mountTwinPanel({
     applyConnection(connected)
     // 数据通道健康度要**连未连接时也更新**：此时最该看到的正是"正在重连"。
     updateFeed(nowMs, snap, connected)
+    // 多机器人选择行同理，而且更要紧：候选只在**未连接**（宿主报"有歧义"）时存在。
+    updateRobotChoices(snap)
     if (!connected) return
     if (wasDegraded !== snapDegraded) refreshStatus()
 
@@ -1387,7 +1434,7 @@ export function mountTwinPanel({
       drawTrajectory()
       // HUD 用**测量值**而不是插值值：插值是为了让网格看起来连续，而工程读数必须是
       // 控制器真实报出的那一笔（两者可能相差一个采样周期 + 渲染滞后）。
-      writeHud(nowMs, snap, joints, fkResult)
+      writeHud(nowMs, snap, joints, fkResult, kin?.jointLimits)
     }
 
     // 画布尺寸：面板刚展开时 flex 高度可能还没算出来（量到 0×0），必须每帧重试，
