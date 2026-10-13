@@ -2,6 +2,147 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-10-14
+
+> **The suite printed "0 failures" on a machine where 16 of its 46 items had never run.** The same
+> day, `movej`/`movel` accepted a `t=` duration, echoed it back in the reply, and never sent it to the
+> controller. Those are the same bug in two places: a green light that nothing stands behind.
+
+### Fixed — `t=` on movej/movel never reached the controller
+
+- **Root cause** (`python/URBasic/urScript.py`): the duration was read into `t_val` while the script
+  template interpolated `tval`. The result was a *silently dropped* parameter: `ur_movej`/`ur_movel`
+  accepted `t`, reported it in the reply, and executed a speed-governed move instead of a timed one.
+- **Fix**: one renamed identifier. `t > 0` now really takes precedence over `a`/`v` (the manual's rule)
+  and the returned script contains the `t=` you asked for.
+- **Pinned by**: `motion_t_param` in the Python harness asserts the emitted script contains the
+  requested duration and that `t` really wins over `a`/`v`.
+
+### Fixed — the worker survived the host, and the orphan kept the RTDE session
+
+- **Root cause** (`lib/index.js`): `ctx.effect`'s disposer returned `undefined`. Cordis only awaits a
+  disposer's result when it is a thenable (`if (isObject(result) && "then" in result)`), so the
+  graceful `worker.shutdown()` was never awaited, and `lib/worker.js` never disposed the child. On a
+  UR controller, RTDE is an **exclusive** session: the leftover Python process kept it claimed, and
+  the next host run failed to start RTDE until the orphan died.
+- **Fix**: the disposer returns the cleanup promise (`Promise.resolve(...).catch(() => {}).finally(...)`).
+  In addition the respawn backoff timer is now cancellable and rejected on `dispose()`, `_spawnOnce()`
+  re-checks `_disposed` after its await (no spawn after teardown), and the child's `stdin` gets exactly
+  one `error` listener instead of one per call.
+- **Also**: the spawned Python gets `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`, and the worker forces
+  UTF-8 on its own stdio — a non-UTF-8 console locale used to turn one CJK byte into a
+  `UnicodeDecodeError` that killed the loop.
+
+### Fixed — Dashboard replies could land on the next command
+
+- **Root cause** (`python/URBasic/dashboard.py`): `run()` notified its condition variable even when
+  `__receive()` returned `None` (nothing read), and `sendCommand()` returned whatever
+  `self.__last_respond` happened to hold. The reply to command *N* could therefore be handed to
+  command *N+1* — a robot that is **not** in remote-control mode was reported as
+  `remote_control: true`, and the model then sent URScript the controller silently discards.
+- **Fix**: notification happens only inside `if msg is not None:`; a monotonic `respond_seq` plus
+  `__await_respond(since_seq, timeout)` makes "wait for *this* reply" explicit; `sendCommand()`
+  verifies the sequence actually advanced and otherwise returns `(False, '')` instead of a stale answer.
+- **Also**: receive buffering went from `recv(1024)` with no accumulation to `RECV_CHUNK = 4096` plus a
+  line-splitting instance buffer, so a multi-chunk reply can no longer bleed into the next command.
+
+### Fixed — commands that could not be verified claimed success
+
+- **Root cause**: for a class of state-setting ops, the only provable fact was "bytes reached the
+  socket", yet the reply said "已设置/已生效". UR only accepts URScript in **remote-control mode**;
+  in local/teach-pendant mode the controller **discards it silently** and reports nothing.
+- **Fix**: a single `ok_unverified(result)` wrapper demotes those replies and adds `verified: false`
+  to `data` — applied to **12** ops (`set_tcp`, `set_payload`, `set_payload_inertia`, `set_gravity`,
+  `set_tool_voltage`, `tool_communication`, `set_tool_output_mode`, `motion_version`,
+  `force_mode_settings`, `zero_ftsensor`, `set_conveyor_tick`, `conveyor_tracking`).
+- **Tool digital I/O** had the same shape with a worse outcome: `set_tool_digital_out()` ignored the
+  `Send()` result entirely, so a failed write was reported as success. It now returns the send result
+  and the worker turns a failure into `SEND_FAILED`. Reading a tool digital input is now
+  **sentinel-verified** (channel probe + start/finish tokens); with no finish token read back the
+  worker refuses to give a value rather than reporting a number nobody can vouch for.
+
+### Fixed — a refused RTDE session still reported `isRunning() === true`
+
+- **Root cause** (`python/URBasic/rtde.py`): the `RTDE_CONTROL_PACKAGE_START` branch called
+  `__decodePayload()` and then ignored the decoded `accepted` boolean, setting `STARTED`
+  unconditionally. When the controller refuses (most often because the previous session has not been
+  released) `isRunning()` lied, `ensure_connected()`'s `if not RTDE.isRunning()` guard was defeated,
+  and every subsequent pose read burned the full 5 s `sync()` timeout before reporting the misleading
+  "timed out waiting for new RTDE data".
+- **Fix**: `STARTED` only when `accepted is True`; otherwise `ERROR` plus a recorded
+  `__start_refused` and a one-line explanation. `__sendStart()` now pumps `__receive()` itself and
+  answers from the resulting state, so `run()`'s "re-setup after reconnect" branch can finally see a
+  refusal (it previously could not, because the old `__sendStart()` returned `True` as soon as the
+  bytes were written).
+- **Also**: RTDE packets that straddle a `recv()` boundary used to be **dropped whole** (`byte_buffer`
+  was a local, and the incomplete tail was discarded with a misleading "unexpected packet_size" log).
+  Dropping the `timestamp` packet that refreshes the watchdog made `run()` rebuild a perfectly healthy
+  session. The buffer is now an instance field that accumulates across calls, a half packet is kept for
+  the next read, and a malformed length resynchronises by dropping **one** byte (counted, and surfaced
+  as `rtde_resync_bytes` in `ur_get_status`) instead of throwing the rest of the stream away.
+
+### Fixed — two client features that could never trigger
+
+- **Joint-limit warning** (`src/client/twin-panel.js`): the limits were read from
+  `fkResult?.jointLimits`, a field the kinematics object never had, so the out-of-range highlight was
+  dead code. Source corrected to `kin.jointLimits`.
+- **Multi-robot selector**: `updateRobotChoices()` ran *after* the `if (!connected) return` early exit,
+  so the list could only be populated once something was already connected — i.e. never, for the one
+  case it exists for (picking the robot to connect to). It now runs unconditionally, before that
+  guard, and `syncHudVisibility()` relies on `children.length` (the previous `childElementCount`
+  test is not part of the minimal DOM the panel runs against).
+
+### Fixed — smaller honesty gaps
+
+- **Stale twin frames** (`lib/twin-routes.js`): the replay returned the whole cached body, including a
+  `pending_motion` preview up to 30 s old. An approval that had already ended kept being drawn on the
+  panel. That field is host-side state and is now **re-read live** (and omitted when there is none).
+- **Log size cap** (`python/ur_worker.py`): `_CappedLog` counted characters while the file is opened as
+  UTF-8, so a CJK log could reach ~3× the declared limit (8 MB → ~24 MB). Accounting is now in bytes;
+  the `write()` return value stays a character count (file-like semantics).
+- **`ur_list_programs`**: the built-in default password (`easybot`) and the `AutoAddPolicy()` host-key
+  stance are now reported (`used_default_password`, `host_key_policy`) instead of being silent, and an
+  optional `known_hosts` parameter switches to `RejectPolicy` for real verification. A missing
+  `known_hosts` file is an error — never a silent fall back to auto-add.
+- **`realTimeClient.Send()`** never waited for the previous program's watchdog thread, so a state-setting
+  write could race that thread on the same 30003 socket (and lose to the `prgRest` it sends on the way
+  out) while reporting merely "sent". It now shares `__quiesce()` with `SendProgram()`.
+
+### Changed — the gates can no longer pass by skipping
+
+- `scripts/run-tests.mjs` exited 0 when everything was skipped. On a machine without the Python
+  dependencies it printed "失败 0" while 11 test files and 5 gates had never run. Skips now fail the
+  run unless you explicitly ask for them (`--allow-skip` / `--skip-python`), and an all-skipped run
+  **always** fails.
+- The Python probe is now two-tier (`interpreter` vs `deps`), and the declared-but-unread `needsDeps`
+  flag is actually honoured — the four AST/regex-only Python gates no longer get skipped just because
+  `numpy` is missing. Every `spawnSync` is anchored with `cwd: root`.
+- `scripts/check-host-compat.mjs` hardcoded `C:\Program Files\DSH Desktop\...`, so on any other
+  install name (e.g. `Nonead DSH Desktop`) it could not find the host and **had never actually run**.
+  It now enumerates `Program Files\*\resources\app\node_modules`, and `--allow-missing-host` lets it
+  join `npm run check` while still failing loudly by default. First real run: peers satisfied,
+  **83/83 tools registered through the host's own DSL**, all four twin routes present.
+- `package.json`: `prepublishOnly` now runs the full `check`; `check` includes the new `check:host`;
+  `devEngines` records the real Node floor (≥22.15 — two test files use `module.registerHooks`, so the
+  declared `engines: >=20` was never the truth for the test suite).
+- **Tool counting has one source of truth** (`scripts/tool-registry.mjs`). It used to be computed
+  dynamically in one gate and hardcoded as `83` in two others; a tool added without updating all three
+  would make the gates contradict each other.
+
+### Changed — published package
+
+- `lib/client.js.map` (3.5 MB, larger than the bundle itself) no longer ships: `files: ["lib"]` is an
+  allow-list that wins over `.npmignore`, so the exclusion has to be the negated entry
+  `"!lib/client.js.map"`.
+
+### Added — regression tests (19 new)
+
+Every fix above is pinned by a test that would fail on the old code, including a real TCP socket pair
+driving `__receive()` (START refusal, and a frame split across two `recv()` calls), a fake waiting
+thread proving `Send()` quiesces, a CJK write proving the log cap counts bytes, a live `pendingMotion`
+store proving stale frames drop a finished approval, and a real TCP fake Dashboard that never answers
+(proving `sendCommand()` reports failure instead of a stale `true`).
+
 ## [0.6.9] - 2026-10-12
 
 > **Every model drew the same reach envelope, because the reach was never computed.** The link-length

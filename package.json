@@ -1,6 +1,6 @@
 {
   "name": "dsh-nonead-universal-robots",
-  "version": "0.6.9",
+  "version": "0.7.0",
   "description": "一个让 DSH 用自然语言直接控制 Universal Robots（UR）机械臂的插件，由拓德科技（Nonead）基于自研的 nUR MCP Server 同源逻辑开发。",
   "type": "module",
   "main": "lib/index.js",
@@ -12,6 +12,7 @@
   },
   "files": [
     "lib",
+    "!lib/client.js.map",
     "assets",
     "cordis.patch.yml",
     "README.md",
@@ -27,12 +28,13 @@
     "python/URBasic/rtdeConfigurationDefault.xml"
   ],
   "scripts": {
-    "prepublishOnly": "npm run check:static && npm run check:ops && npm run check:docs",
-    "check": "npm run check:static && npm run check:ops && npm run check:docs && npm run check:manifest",
+    "prepublishOnly": "npm run check",
+    "check": "npm run check:static && npm run check:ops && npm run check:docs && npm run check:manifest && npm run check:host",
     "check:static": "node --check lib/index.js && node --check lib/worker.js && node scripts/check-package-metadata.mjs && node scripts/check-client-bundle.mjs",
     "check:ops": "python scripts/check-worker-ops.py && python scripts/check-new-ops.py && python scripts/check-approval-gate.py && python scripts/check-tool-params.py && python scripts/check-rtde-recipe.py",
     "check:docs": "node scripts/check-doc-tools.mjs",
     "check:manifest": "node scripts/check-test-manifest.mjs",
+    "check:host": "node scripts/check-host-compat.mjs --allow-missing-host",
     "test": "node scripts/run-tests.mjs",
     "test:node": "node scripts/run-tests.mjs --skip-python",
     "test:python": "python python/ur_worker.py --selfcheck",
@@ -92,6 +94,13 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=22.15",
+      "onFail": "warn"
+    }
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

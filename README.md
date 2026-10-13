@@ -77,7 +77,7 @@ Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_c
    // C:\Users\<you>\.dsh\profiles\web\package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.6.9"
+       "dsh-nonead-universal-robots": "^0.7.0"
      },
      "dsh": {
        "profile": {

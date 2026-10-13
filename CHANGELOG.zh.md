@@ -2,6 +2,124 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.0] - 2026-10-14
+
+> **在一台机器上"失败 0"，而那 46 项里有 16 项从来没跑过。** 同一天还发现 `movej`/`movel` 接受
+> `t=` 时长、把它写进回执，却从未下发给控制器。两件事是同一个毛病：一盏背后没有东西的绿灯。
+
+### 修复 — movej/movel 的 `t=` 从未下发给控制器
+
+- **根因**（`python/URBasic/urScript.py`）：时长被读进了 `t_val`，而脚本模板里插的是 `tval`。
+  结果是一个被**静默丢弃**的参数：`ur_movej`/`ur_movel` 收下 `t`、在回执里带上它，实际执行的却是
+  按速度规划的移动。
+- **修复**：改一个标识符。`t > 0` 现在真的优先于 `a`/`v`（手册的规定），返回的脚本里也真的包含
+  你要的 `t=`。
+- **守护**：Python 探针 `motion_t_param` 断言下发的脚本含有请求的时长，且 `t` 确实压过 `a`/`v`。
+
+### 修复 — worker 活得比宿主久，孤儿进程占着 RTDE 会话
+
+- **根因**（`lib/index.js`）：`ctx.effect` 的 disposer 返回 `undefined`。Cordis 只在返回值是 thenable
+  时才 await 它（`if (isObject(result) && "then" in result)`），于是优雅的 `worker.shutdown()` 从未被
+  等待，`lib/worker.js` 也从未真正 dispose 子进程。UR 控制器上的 RTDE 是**独占**会话：残留的
+  Python 进程继续占着它，下一次启动宿主会连不上，直到孤儿进程自己死掉。
+- **修复**：disposer 返回清理 promise；退避重连定时器可取消并在 `dispose()` 时拒绝；`_spawnOnce()`
+  在 await 之后重查 `_disposed`（teardown 后不得凭空 spawn）；子进程 `stdin` 只挂一个 `error` 监听器。
+- **另外**：spawn 时注入 `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`，worker 也强制自己的 stdio 为
+  UTF-8 —— 非 UTF-8 的控制台区域设置以前会把一个中文字节变成 `UnicodeDecodeError`，直接打死循环。
+
+### 修复 — Dashboard 的应答会落到下一条命令上
+
+- **根因**（`python/URBasic/dashboard.py`）：`run()` 在 `__receive()` 返回 `None`（什么都没读到）时
+  也通知条件变量，而 `sendCommand()` 直接把 `self.__last_respond` 交出去。于是第 *N* 条命令的应答
+  可能被当成第 *N+1* 条的结果 —— 一台**没有**处于远程控制模式的机器人被报成 `remote_control: true`，
+  模型据此下发 URScript，被控制器静默丢弃。
+- **修复**：通知只在 `if msg is not None:` 内触发；单调递增的 `respond_seq` 配 `__await_respond(since_seq,
+  timeout)`，把"等**这一条**的应答"写明确；`sendCommand()` 核对序号确实前进，否则返回 `(False, '')`
+  而不是一个陈旧的答案。
+- **另外**：收包从 `recv(1024)` 且完全不累积，改为 `RECV_CHUNK = 4096` + 按换行累积的实例缓冲，
+  分片应答不再串进下一条命令。
+
+### 修复 — 无法证实的命令不再声称成功
+
+- **根因**：对一类状态设置型 op，唯一能证明的事实是"字节写进了 socket"，回执却说"已设置/已生效"。
+  UR 只在**远程控制模式**下接受 URScript；本地/示教器模式下控制器**静默丢弃**且什么都不报。
+- **修复**：统一的 `ok_unverified(result)` 包装把这类回执降级并在 `data` 里带 `verified: false`，
+  覆盖 **12** 个 op（`set_tcp`、`set_payload`、`set_payload_inertia`、`set_gravity`、`set_tool_voltage`、
+  `tool_communication`、`set_tool_output_mode`、`motion_version`、`force_mode_settings`、`zero_ftsensor`、
+  `set_conveyor_tick`、`conveyor_tracking`）。
+- **工具数字 I/O** 是同一形状但后果更糟：`set_tool_digital_out()` 完全忽略 `Send()` 的结果，写失败
+  也报成功。现在它返回发送结果，worker 把失败转成 `SEND_FAILED`；读工具数字输入改为**哨兵校验**
+  （通道探测 + 首尾哨兵），回读不到结束哨兵时拒绝给值，而不是报一个没人能担保的数字。
+
+### 修复 — RTDE 会话被拒绝时 `isRunning()` 仍然为 true
+
+- **根因**（`python/URBasic/rtde.py`）：`RTDE_CONTROL_PACKAGE_START` 分支调了 `__decodePayload()`，
+  却**无视**解出的 `accepted` 布尔，无条件置 `STARTED`。控制器拒绝时（最常见的原因是上一次会话还没
+  释放）`isRunning()` 说谎、`ensure_connected()` 的 `if not RTDE.isRunning()` 守卫失效，之后每一次
+  读姿态都要耗尽 5 s 的 `sync()` 超时，最后报出误导性的"等待新的 RTDE 数据超时"。
+- **修复**：只有 `accepted is True` 才置 `STARTED`，否则置 `ERROR` 并记下 `__start_refused` 与一行原因。
+  `__sendStart()` 改为自己泵一次 `__receive()` 并按结果状态回答 —— 这样 `run()` 里"重连后重新 setup"
+  的分支终于能看到拒绝（旧实现一写出字节就返回 `True`，那个分支永远进不去）。
+- **另外**：跨 `recv()` 边界的 RTDE 包以前会被**整帧丢弃**（`byte_buffer` 是局部变量，残缺的尾巴
+  连同一句误导性的 "unexpected packet_size" 一起丢掉）。丢掉的是刷新看门狗的 `timestamp` 包时，
+  `run()` 会去重建一条本来健康的会话。现在缓冲是实例字段、跨调用累积，半个包留到下一次读，
+  畸形长度只丢**一个**字节重新对齐（并计数，通过 `ur_get_status` 的 `rtde_resync_bytes` 暴露），
+  而不是把后面整条流扔掉。
+
+### 修复 — 客户端两个永远不会触发的功能
+
+- **关节超限告警**（`src/client/twin-panel.js`）：限位取自 `fkResult?.jointLimits` —— 运动学对象上
+  从来没有这个字段，于是超限高亮是死代码。来源改为 `kin.jointLimits`。
+- **多机器人选择器**：`updateRobotChoices()` 在 `if (!connected) return` 之后才运行，于是列表只能在
+  "已经连上"之后才被填充 —— 而它存在的意义恰恰是"连之前先选机器人"，等于永远用不上。现在它在
+  该守卫之前无条件运行；`syncHudVisibility()` 也改用 `children.length`（原先的 `childElementCount`
+  在面板运行的最小 DOM 上并不存在）。
+
+### 修复 — 其余几处诚实性缺口
+
+- **孪生陈旧帧**（`lib/twin-routes.js`）：回放会把整块缓存原样交出去，其中包括最多 30 s 前的
+  `pending_motion` 预览 —— 审批早已结束，面板却继续把它画出来。该字段属于宿主侧状态，现在**现场
+  重读**（没有就不带这个字段）。
+- **日志大小上限**（`python/ur_worker.py`）：`_CappedLog` 按**字符**计数，而文件以 UTF-8 打开，中文
+  日志能写到声明上限的约 3 倍（8 MB → 约 24 MB）。改为按字节计账；`write()` 的返回值仍是字符数
+  （保持 file-like 语义）。
+- **`ur_list_programs`**：内置默认口令（`easybot`）与 `AutoAddPolicy()` 的主机密钥立场不再沉默，
+  以 `used_default_password` / `host_key_policy` 如实回报；新增可选 `known_hosts` 参数会切到
+  `RejectPolicy` 做**真正的**校验。文件不存在直接报错 —— 绝不静默退回 auto-add。
+- **`realTimeClient.Send()`** 从不等待上一段程序的看门狗线程，于是一次状态写入可能与那个线程在同一个
+  30003 socket 上并发（还会输给它收尾时发的 `prgRest`），而它只回报"已发送"。现在与
+  `SendProgram()` 共用 `__quiesce()`。
+
+### 变更 — 门禁不能再靠"跳过"通过
+
+- `scripts/run-tests.mjs` 在全部项目被跳过时也 exit 0。在一台没有 Python 依赖的机器上，它会打印
+  "失败 0"，而 11 个测试文件与 5 条门禁从未运行。现在**有跳过即失败**，除非你显式要求
+  （`--allow-skip` / `--skip-python`）；全部被跳过则**总是**失败。
+- Python 探测改为两级（`interpreter` / `deps`），并把"声明了却从没被读过"的 `needsDeps` 真正用起来
+  —— 4 条只做 AST/正则的 Python 门禁不再因为缺 `numpy` 被连带跳过。所有 `spawnSync` 补上 `cwd: root`。
+- `scripts/check-host-compat.mjs` 写死了 `C:\Program Files\DSH Desktop\...`，于是在任何别的安装名
+  （例如本机的 `Nonead DSH Desktop`）下都找不到宿主，**从未真正执行过**。现在它枚举
+  `Program Files\*\resources\app\node_modules`，并可用 `--allow-missing-host` 接入 `npm run check`
+  （默认仍然响亮地失败）。首次真跑结果：peer 全部满足、**83/83 工具经宿主的真实 DSL 注册成功**、
+  4 条孪生路由齐全。
+- `package.json`：`prepublishOnly` 改为跑完整的 `check`；`check` 纳入新的 `check:host`；`devEngines`
+  记录真实的 Node 下限（≥22.15 —— 两个测试文件用了 `module.registerHooks`，所以给测试套件声明的
+  `engines: >=20` 从来就不是事实）。
+- **工具计数只有一个来源**（`scripts/tool-registry.mjs`）。此前一处动态计算、另两处硬编码 `83`：
+  加一个工具而漏改其中一处，门禁之间就会自相矛盾。
+
+### 变更 — 发布包
+
+- `lib/client.js.map`（3.5 MB，比 bundle 本身还大）不再随包发布：`files: ["lib"]` 是白名单、优先于
+  `.npmignore`，所以排除必须写成取反项 `"!lib/client.js.map"`。
+
+### 新增 — 回归测试（19 条）
+
+上述每一项修复都有会在旧代码上失败的用例守着，包括：用**真 TCP socket 对**驱动 `__receive()`
+（START 被拒绝、以及一帧被拆成两次 `recv()`）、用假等待线程证明 `Send()` 会静默、用中文写入证明
+日志上限按字节算、用真实的 `pendingMotion` 存储证明陈旧帧会丢掉已结束的审批，以及一个**永不回答的
+真 TCP 假 Dashboard**（证明 `sendCommand()` 会如实报失败而不是交出陈旧的 `true`）。
+
 ## [0.6.9] - 2026-10-12
 
 > **每个型号画出来的可达范围都一样大，因为那个范围从来没被真正算出来。** 读连杆长度的函数只认
