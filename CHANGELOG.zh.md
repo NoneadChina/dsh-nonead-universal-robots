@@ -4,6 +4,51 @@
 
 ## [未发布]
 
+## [0.7.2] - 2026-10-15
+
+> **机器人在动、数字孪生却一直说"数据已停止更新"；运动前的位姿预检，把机械臂"此刻正站着"的位姿报成
+> 不可达；而一次传送带 tick 写入，说不清自己到底生效没有。** 三处是同一个毛病：一个辅助函数给出了它
+> **其实从未拿到过**的确定答案。
+
+### 修复 — `ur_set_conveyor_tick` 说不清自己生效没有
+
+它下发 `set_conveyor_tick_count()` 之后就 `ok_unverified`，而同族的读取器 `ur_get_conveyor` 早就有完整的
+三哨兵回读（probe → start → 载荷 → finish）。真机实测：写入 `tick_count=1234` 后回读仍是 **0**，而调用方
+只得到一句"已设置（未校验）"—— 分不清"控制器没配传送带"还是"其实成功了"。
+
+现在复用同一个读取器，并把三种结局如实分开：回读一致 ⇒ `verified: true`；回读不一致 ⇒ **明说没有生效**，
+并指向最常见原因（PolyScope 里没配编码器/传送带，URSim 默认如此）；回读本身失败 ⇒ 把 `error`/`code` 交给
+调用方。有了回读通道，它也就从"只能声称已下发"的清单里**毕业**（那条契约要求清单内的 op 不得出现
+`return ok({...})`）——`UNVERIFIED_OPS` 由 12 项减为 11 项。
+
+### 修复 — 用 `.get("ok")` 检查别的 handler 的结果，恒为假
+
+`python/ur_worker.py` 里的 `ok(data)` 是**恒等函数**（`return data`），`ok: true` 是 `main()` 序列化响应时
+才加上去的。所以 handler 之间传阅的字典里**根本没有 `"ok"` 键** —— 任何用 `.get("ok")` 判断"我的回读成功
+了吗"的代码都会读到 `None`，于是**每次都走失败分支**。上面那个传送带修复的第一版正是这样写的（会把一个
+能自证的写入变成永远"未校验"）；这个错误只是因为"复用了另一个 handler 的返回值"才暴露出来。判据现已改为
+`result.get("error") is not None`，两条性质都由探针断言钉住（`discriminates_by_error_key`、
+`does_not_inspect_ok_key`），陷阱不会复发。全仓扫描另有一处 `.get("ok")`（`op_pose_list`），读的是它自己
+构造的键，因此是正确的。
+
+### 修复 — `ur_check_pose` 报假阴性
+
+这个工具向控制器问两个只读问题（`is_within_safety_limits`、`get_inverse_kin`），并把答案写在首尾哨兵
+之间的输出寄存器里。它把**布尔**的安全答案**直接写进了整数寄存器** —— URScript 是强类型的，控制器
+**就在那一行抛错中止**：什么都没写下去、`get_inverse_kin` 从未被调用、整数寄存器回读是 `0`，于是工具
+对"机械臂此刻正站着的位姿"报出"不在安全限值内 + IK 解不出"，而模型会因此**拒绝完全可达的位姿**。
+
+这是**真机实测**查出来的，不是读代码看出来的：把工具那条原句单独复刻成一段脚本，它的"走到哪一步"标记
+停在起始值；而同一个脚本把布尔先赋给 `local`、再用 `if/else` 写下去，就一路跑完。
+
+- 布尔值现在先落 `local`，再由 `if/else` 归一成 `1`/`0`；
+- 新增**阶段标记寄存器**记录脚本走到了哪一步，"死在限值那步"与"死在 `get_inverse_kin`"不再被报成同一件事；
+- **只有**阶段标记证明限值那步确实跑完，才相信限值寄存器的值；否则报 `NOT_EXECUTED`，**不给**可达性结论。
+  原来的守卫（`limits_raw is not None`）恒为真 —— 整数寄存器没被写过时读到的是 `0` 而**不是** `None`，
+  这正是"脚本中止"被翻译成一句斩钉截铁的"不可达"的路径；
+- 守护：`check_pose_script_types` 对**生成的 URScript 做类型检查**（每个
+  `write_output_integer_register` 的第 2 个实参必须是整数字面量），外加 11 项断言。
+
 ### 新增 — 预飞安全闸（`lib/safety-gate.js`）
 
 与审批门禁**独立**的第二层：限制"**单条指令最多能要求多少**"，让"人点了头"永远不等于"什么都可以"。上限项：`safetyMaxStepM`（0.5 m）、`safetyMaxLinearSpeed`（0.5 m/s）、`safetyMaxJointSpeed`（1.05 rad/s）、`safetyMaxDurationS`（60 s）、力控的 `safetyMaxForceN` / `safetyMaxTorqueNm`（40 N / 10 N·m），以及针对显式笛卡尔目标的可选包围盒 `safetyWorkspace`。它在**审批之前**判定，与 `requireApprovalForMotion` **解耦**（关掉人工确认不该顺手把物理上限一起关掉），并在 `safetyWorkspace` 写错时 **fail closed** 而不是静默不检查。刻意不覆盖 `ur_send_script`（任意 URScript，不解析）。

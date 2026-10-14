@@ -4,6 +4,62 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-15
+
+> **The digital twin kept saying "data stalled" while the robot was moving, the pre-flight pose check
+> told the model that a pose the arm was *standing in* was unreachable, and a conveyor-tick write
+> could not say whether it had taken effect.** Those are the same failure in three places: a helper
+> reporting a confident answer it never actually had.
+
+### Fixed — `ur_set_conveyor_tick` could not say whether it took effect
+
+It dispatched `set_conveyor_tick_count()` and returned `ok_unverified`, while its sibling reader
+`ur_get_conveyor` had had a full three-sentinel read-back (probe → start → payload → finish) all along.
+Live test: writing `tick_count=1234` left the read-back at **0**, and the caller was told only
+"已设置（未校验）" — with no way to tell "the conveyor is not configured" from "it worked".
+
+It now reuses that same verified reader and separates the three outcomes honestly: read-back matches ⇒
+`verified: true`; read-back differs ⇒ it **says plainly that the write did not take effect** and points
+at the usual cause (no encoder/conveyor configured in PolyScope — the URSim default); read-back itself
+fails ⇒ the `error`/`code` is handed to the caller. Having a read-back channel, it **graduates** out of
+the "can only claim it was dispatched" list (that contract requires those ops to have no plain
+`ok({...})` success path), so `UNVERIFIED_OPS` went 12 → 11.
+
+### Fixed — inspecting another handler's result with `.get("ok")` is always false
+
+`ok(data)` in `python/ur_worker.py` is the **identity function** (`return data`); the `ok: true` field is
+added by `main()` when the response is serialised. So the dicts handlers pass to one another carry **no
+`"ok"` key at all** — any code deciding "did my read-back succeed?" with `.get("ok")` reads `None` and
+takes the failure branch **every single time**. The first version of the conveyor fix above did exactly
+that (it would have turned a self-verifying write into a permanently "unverified" one); the mistake
+surfaced only because that fix reuses another handler's return value. The check is now
+`result.get("error") is not None`, and both properties are pinned by probe assertions
+(`discriminates_by_error_key`, `does_not_inspect_ok_key`) so the trap cannot return. A repo-wide scan
+found one other `.get("ok")` (in `op_pose_list`), which reads a key it builds itself and is correct.
+
+### Fixed — `ur_check_pose` reported a false negative
+
+The tool asks the controller two read-only questions (`is_within_safety_limits`, `get_inverse_kin`) and
+writes the answers into output registers between sentinels. It wrote the **boolean** safety answer
+straight into an **integer** register. URScript is strongly typed, so the controller aborted the script
+**on that line**: nothing was written, `get_inverse_kin` was never reached, and the integer register read
+back as `0` — so the tool reported "not within safety limits + IK unsolvable" for a pose the robot was
+**standing in at that very moment**, and the model would refuse perfectly reachable poses.
+
+Found by live testing on the robot rather than by reading the code: a script repeating the tool's own
+line left its "how far did we get" marker at the start value, while the same script with the boolean
+assigned to a `local` first and written through `if/else` ran to completion.
+
+- the boolean now lands in a `local` first and is normalised to `1`/`0` by `if/else`;
+- a **stage-marker register** records how far the script got, so "aborted in the limits step" and
+  "aborted in `get_inverse_kin`" are no longer reported as the same thing;
+- the limits register is believed **only** when the stage marker proves that step finished; otherwise
+  the tool reports `NOT_EXECUTED` and gives **no** reachability verdict. The previous guard
+  (`limits_raw is not None`) was always true, because an unwritten integer register reads `0`, never
+  `None` — which is exactly how an aborted script turned into a confident "unreachable";
+- pinned by `check_pose_script_types` — a **type check on the generated URScript** (every
+  `write_output_integer_register` argument must be an integer literal) — plus 11 assertions.
+
 ### Added — pre-flight safety gate (`lib/safety-gate.js`)
 
 An independent second layer that caps what a *single* command may ask for, so "the human said yes"

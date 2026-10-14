@@ -603,7 +603,7 @@ out['dashboard_contract'] = probe_dashboard_contract()
 UNVERIFIED_OPS = [
     'op_set_tool_voltage', 'op_set_tcp', 'op_set_payload', 'op_set_payload_inertia',
     'op_force_mode_settings', 'op_tool_communication', 'op_set_tool_output_mode',
-    'op_motion_version', 'op_set_conveyor_tick', 'op_set_gravity', 'op_zero_ftsensor',
+    'op_motion_version', 'op_set_gravity', 'op_zero_ftsensor',
     'op_conveyor_tracking',
 ]
 
@@ -821,12 +821,20 @@ out['list_programs_contract'] = probe_list_programs_contract()
 # ---------------------------------------------------------------------------
 
 def probe_new_ops_contract():
-    """源码级契约：两条新 op 必须走"能回读/能自证"的路径，而不是"发出去就算成功"。"""
+    """源码级契约：两条新 op 必须走"能回读/能自证"的路径，而不是"发出去就算成功"。
+
+    ⚠️ `check_pose` 的 URScript 生成已抽成纯函数 `check_pose_script()`（为了能离线单测
+    "布尔值不得写整数寄存器"这条类型约束），所以"实现"要看**两段**：
+    脚本生成 + 判定逻辑 —— 少看一段，断言就会指着空气说话。
+    """
     src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
-    start = src.index('def op_check_pose(')
-    check_body = src[start:src.index('\ndef ', start + 1)]
-    start = src.index('def op_set_speed_scaling(')
-    speed_body = src[start:src.index('\ndef ', start + 1)]
+
+    def body_of(name):
+        start = src.index('def %s(' % name)
+        return src[start:src.index('\ndef ', start + 1)]
+
+    check_body = body_of('check_pose_script') + body_of('op_check_pose')
+    speed_body = body_of('op_set_speed_scaling')
     return {
         'check_pose_dispatched': '"check_pose": op_check_pose' in src,
         'speed_dispatched': '"set_speed_scaling": op_set_speed_scaling' in src,
@@ -1171,6 +1179,86 @@ def probe_pose_ops_contract():
 
 
 out['pose_ops_contract'] = probe_pose_ops_contract()
+
+
+# ---------------------------------------------------------------------------
+# 22. `check_pose_script`：URScript 是**强类型**的 —— 布尔值不得直接写整数寄存器
+#
+# 真机踩出来的 bug：`write_output_integer_register(19, is_within_safety_limits(p))` 会让控制器
+# **在该行抛错中止** ⇒ 限值答案没被写下、`get_inverse_kin` 也没被调用；而整数寄存器回读到的是
+# 0（**不是** None），工具于是把"机器人此刻正站着的位姿"报成"不在安全限值内 + IK 解不出"（假阴性，
+# 会让模型拒绝完全可达的位姿）。修复后：布尔值先落 `local`，再 `if/else` 写 1/0，并加阶段标记。
+#
+# 这里对**生成的脚本文本**做类型检查：所有 `write_output_integer_register` 的第 2 个实参
+# 都必须是整数字面量 —— 这条断言直接等价于"不再有布尔值写整数寄存器"。
+# ---------------------------------------------------------------------------
+
+def probe_check_pose_script_types():
+    import re
+    pose = [-0.2199266, -0.7992707, 0.4120088, -0.0006115, 3.1113093, 0.0415924]
+    qnear = [-1.6, -1.73, -2.2, -0.81, 1.6, -0.03]
+    # token 用大而互不相同的数，避免"11 恰好出现在浮点字面量里"这类误判。
+    tok = dict(start_token=111111, stage1_token=222222, stage2_token=333333, finish_token=444444)
+    plain = ur_worker.check_pose_script(pose, None, **tok)
+    with_near = ur_worker.check_pose_script(pose, qnear, **tok)
+    calls = re.findall(r'write_output_integer_register\((\d+),\s*([^)]*)\)', plain)
+    limits = ur_worker.CHECK_POSE_LIMITS_REGISTER
+    stage = ur_worker.CHECK_POSE_STAGE_REGISTER
+    return {
+        'int_register_args_are_literals': bool(calls) and all(v.strip().isdigit() for _, v in calls),
+        'no_bool_into_int_register': 'is_within_safety_limits' not in ''.join(
+            v for _, v in calls),
+        'bool_lands_in_local_first': 'local within = is_within_safety_limits(p_target)' in plain,
+        'writes_both_branches': ('  if within:' in plain and '  else:' in plain
+                                 and '  end' in plain
+                                 and ('write_output_integer_register(%d, 1)' % limits) in plain
+                                 and ('write_output_integer_register(%d, 0)' % limits) in plain),
+        'stage_register_distinct_from_limits': limits != stage,
+        'stage1_before_ik': plain.index(str(tok['stage1_token'])) < plain.index('get_inverse_kin'),
+        'stage2_after_ik_result': (plain.index('get_inverse_kin') < plain.index(str(tok['stage2_token']))
+                                   and plain.index('write_output_float_register') < plain.index(str(tok['stage2_token']))),
+        'sentinels_bracket_script': (plain.index(str(tok['start_token'])) < plain.index('local p_target')
+                                     and plain.index(str(tok['finish_token'])) > plain.index(str(tok['stage2_token']))),
+        'qnear_optional': ('get_inverse_kin(p_target)' in plain
+                           and 'get_inverse_kin(p_target, [' in with_near),
+        'one_script_per_call': plain.startswith('def dsh_check_pose():') and plain.rstrip().endswith('dsh_check_pose()'),
+    }
+
+
+out['check_pose_script_types'] = probe_check_pose_script_types()
+
+
+# ---------------------------------------------------------------------------
+# 23. `op_set_conveyor_tick` 必须**自己回读确认**（它已从"只能声称已下发"的清单里毕业）
+#
+# 真机实测：写入 tick=1234 后回读仍是 0，而旧实现只回报"已设置（未校验）" —— 调用方既不知道生效没生效，
+# 也不知道该查什么。同族的 `op_get_conveyor` 早就有完整三哨兵回读，所以修法是复用同一个读取器。
+# ---------------------------------------------------------------------------
+
+def probe_conveyor_set_contract():
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+    start = src.index('def op_set_conveyor_tick(')
+    text = src[start:src.index('\ndef ', start + 1)]
+    # ★ 只看**代码**：这个函数的 docstring 里逐字写着那条反面写法（`.get("ok")`）当教训，
+    #   拿整段文本去匹配就会把"讲过的错"当成"犯着的错"（第一版探针就是这么误报的，
+    #   被全量套件当场抓住）。与 `probe_pose_ops_contract` 的 `code_of()` 同一套办法。
+    body = text[text.index('"""', text.index('"""') + 3) + 3:]
+    return {
+        'still_dispatches': 'set_conveyor_tick_count(' in body,
+        'reuses_verified_reader': 'op_get_conveyor(' in body,
+        'reports_verified_only_after_readback': ('op_get_conveyor(' in body and 'verified=True' in body
+                                                and body.index('op_get_conveyor(') < body.index('verified=True')),
+        'honest_on_mismatch': ('ok_unverified({' in body and '没有生效' in body),
+        'honest_when_read_fails': 'read_back_error' in body,
+        # ★ `ok(data)` 是恒等函数（信封的 ok:true 由 main() 序列化时加），所以 handler 之间传阅的结果
+        #   字典里没有 "ok" 键 —— 判"成功与否"只能看 "error" 键。第一版写成 `.get("ok")` 就恒为假。
+        'discriminates_by_error_key': 'read_back.get("error") is not None' in body,
+        'does_not_inspect_ok_key': '.get("ok")' not in body,
+        'graduates_from_unverified_list': 'op_set_conveyor_tick' not in UNVERIFIED_OPS,
+    }
+
+
+out['conveyor_set_contract'] = probe_conveyor_set_contract()
 
 
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + '\n')

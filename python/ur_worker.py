@@ -1557,6 +1557,12 @@ SCRIPT_START_CHECK_TIMEOUT_S = 1.5
 # 21=freedrive 状态、22=工具模拟输入回读；double 0=传送带载荷、22=工具模拟输入回读。
 CHECK_POSE_LIMITS_REGISTER = 19
 CHECK_POSE_IK_REGISTERS = (12, 13, 14, 15, 16, 17)
+# 阶段标记寄存器：记录"限值那一步做完了吗 / IK 那一步做完了吗"。
+# 为什么必须有它：脚本半途中止时，光看"结束哨兵不在"无法区分**死在哪一步** ——
+# 而整数寄存器在没被写过时读到的是 0（不是 None），据此推断会把"第一步就报错"
+# 误判成"死在后一步"（真机踩过：布尔值写整数寄存器 ⇒ 脚本在第一句就中止，
+# 却被归因到 get_inverse_kin，于是完全可达的位姿被报成"不可达"）。
+CHECK_POSE_STAGE_REGISTER = 18
 CHECK_POSE_TIMEOUT_S = 2.0
 # `set_speed_slider` 之后回读 `target_speed_fraction` 的窗口与容差。
 SPEED_READBACK_TIMEOUT_S = 2.0
@@ -3335,13 +3341,44 @@ def op_get_conveyor(p):
 
 
 def op_set_conveyor_tick(p):
+    """设置传送带编码器 tick —— **并且自己回读确认**。
+
+    为什么不能只发不验（真机实测）：同族的 `op_get_conveyor` 早就有完整的三哨兵回读（probe → start →
+    载荷 → finish），而这里以前只 `set_conveyor_tick_count()` 然后 `ok_unverified`。实测写入
+    `tick_count=1234` 之后回读仍然是 **0**，而调用方只拿到一句"已设置传送带 tick=1234（未校验）" ——
+    既不知道有没有生效，也不知道该去查什么（真正的原因通常是控制器没配置编码器/传送带）。
+
+    所以这里复用**同一个**读取器自证：回读一致才 `verified: true`；不一致就明说**没有生效**并给出最可能
+    的排查方向；连回读都失败时，把失败原因一起交出去，而不是含糊其辞。
+
+    ★ 判据必须是 `"error"` 键，**不能**是 `"ok"`：`ok(data)` 是**恒等函数**（`return data`），信封里的
+    `ok: true` 是 `main()` 序列化时才加上的 —— 所以 handler 之间传阅的结果字典里**根本没有 `"ok"` 键**，
+    用 `.get("ok")` 判断"成功与否"会恒为假（本函数第一版就是这么写的，被"回读"这条路径自己抓出来了）。
+    """
     ip = str(p["ip"])
     tick = int(p["tick_count"])
     res = int(p.get("absolute_encoder_resolution", 0))
     robot, _ = ensure_connected(ip)
     robot.set_conveyor_tick_count(tick, res)
-    return ok_unverified({"message": "已设置传送带 tick=%s" % tick,
-               "data": {"tick_count": tick, "ip": ip}})
+
+    read_back = op_get_conveyor({"ip": ip})
+    data = {"tick_count": tick, "ip": ip}
+    if read_back.get("error") is not None:
+        return ok_unverified({
+            "message": "已下发传送带 tick=%s，但**回读失败**（%s）⇒ 无法确认是否生效"
+                       % (tick, read_back.get("error") or read_back.get("code") or "未知原因"),
+            "data": dict(data, read_back=None, read_back_error=read_back.get("error"),
+                         read_back_code=read_back.get("code"))})
+    observed = (read_back.get("data") or {}).get("tick_count")
+    if observed == tick:
+        return ok({
+            "message": "已设置传送带 tick=%s，且**回读一致**（%s）" % (tick, observed),
+            "data": dict(data, read_back=observed, verified=True)})
+    return ok_unverified({
+        "message": "已下发传送带 tick=%s，但**回读是 %s（不一致）⇒ 没有生效**。最常见原因：控制器未配置"
+                   "编码器/传送带（URSim 默认如此），或该固件不接受 set_conveyor_tick —— 请先在 "
+                   "PolyScope 的「安装 → 传送带跟踪」里配置编码器。" % (tick, observed),
+        "data": dict(data, read_back=observed)})
 
 
 # ---------------------------------------------------------------------------
@@ -3573,6 +3610,49 @@ def _pose6(value, name):
     return numbers
 
 
+def check_pose_script(pose, qnear, *, start_token, stage1_token, stage2_token, finish_token):
+    """生成"位姿预检"用的 URScript（**纯函数**，离线可单测）。
+
+    ★ 为什么必须把布尔值先落到 `local`：URScript 强类型，`write_output_integer_register(n, <bool>)`
+    会让控制器**在该行抛错中止**（真机实测：起始哨兵已回读、结束哨兵永不到来、整数寄存器留下 0）。
+    于是 `is_within_safety_limits` 的答案既没被写下、`get_inverse_kin` 也没被调用，而工具把那个 0
+    读成"不在安全限值内"、把"没有结束哨兵"推断成"IK 解不出" ⇒ 对**机器人此刻正站着的位姿**报假阴性。
+    改成先 `local within = …` 再 `if/else` 写 1/0 之后，同一台控制器上完全正常。
+
+    阶段标记（`CHECK_POSE_STAGE_REGISTER`）让"半途中止"可以归因：写完限值答案打 `stage1`、
+    IK 解完并写完关节角打 `stage2`。标记值由 `start_token` 链式派生（每个都把前一个喂进去），
+    所以上一次运行留下的残值不会冒充本次的标记。
+    """
+    index = DEFAULT_SENTINEL_REGISTER
+    pose_literal = "p[%s]" % ", ".join("%.10g" % x for x in pose)
+    qnear_arg = "" if qnear is None else ", [%s]" % ", ".join("%.10g" % x for x in qnear)
+    ik_writes = "\n".join(
+        "  write_output_float_register(%d, q_sol[%d])" % (register, axis)
+        for axis, register in enumerate(CHECK_POSE_IK_REGISTERS)
+    )
+    return ("def dsh_check_pose():\n"
+            "  write_output_integer_register(%d, %d)\n"
+            "  local p_target = %s\n"
+            "  local within = is_within_safety_limits(p_target)\n"
+            "  if within:\n"
+            "    write_output_integer_register(%d, 1)\n"
+            "  else:\n"
+            "    write_output_integer_register(%d, 0)\n"
+            "  end\n"
+            "  write_output_integer_register(%d, %d)\n"
+            "  local q_sol = get_inverse_kin(p_target%s)\n"
+            "%s\n"
+            "  write_output_integer_register(%d, %d)\n"
+            "  write_output_integer_register(%d, %d)\n"
+            "end\ndsh_check_pose()\n"
+            % (index, start_token, pose_literal,
+               CHECK_POSE_LIMITS_REGISTER, CHECK_POSE_LIMITS_REGISTER,
+               CHECK_POSE_STAGE_REGISTER, stage1_token,
+               qnear_arg, ik_writes,
+               CHECK_POSE_STAGE_REGISTER, stage2_token,
+               index, finish_token))
+
+
 def op_check_pose(p):
     """**动之前先问**：这个位姿在安全限值内吗？逆运动学解得出吗？
 
@@ -3587,10 +3667,17 @@ def op_check_pose(p):
 
     三种结局如实分开（与 `op_get_conveyor` 同一套判据）：
       - 回读到**结束**哨兵 ⇒ 两个答案都有；
-      - 只回读到**起始**哨兵、而限值寄存器已被写 ⇒ 控制器在执行 `get_inverse_kin` 时抛了
-        （通常就是不可达/超关节限位）⇒ `reachable = False`（这条推论的依据写在返回值里）；
-      - **连起始哨兵都没有** ⇒ 控制器根本没执行（本地/示教器模式会静默丢弃 URScript，或该固件
-        没有 `is_within_safety_limits`）⇒ 按 NOT_EXECUTED 报错，两个答案都不给，绝不猜。
+      - 回读到**阶段标记 = stage1**（限值那步做完了）而没到结束哨兵 ⇒ 控制器在执行
+        `get_inverse_kin` 时抛了（通常就是不可达/超关节限位）⇒ `reachable = False`；
+      - **连阶段标记 stage1 都没看到** ⇒ 脚本在"限值"这一步就没走完（该固件不接受该表达式，
+        或本地/示教器模式下 URScript 被静默丢弃）⇒ 按 NOT_EXECUTED 报错，**不给**可达性结论；
+      - **连起始哨兵都没有** ⇒ 通道根本没执行 ⇒ NOT_EXECUTED。
+
+    ★ 真机教训（本工具曾经因此报**假阴性**）：URScript 是**强类型**的，
+    `write_output_integer_register(n, is_within_safety_limits(p))` 这种"布尔值直接写整数寄存器"
+    会让控制器**在该行抛错中止**；脚本既没写下限值答案、也走不到 IK，而回读到的整数寄存器是 0，
+    于是"机器人此刻正站着的位姿"被报成"不在安全限值内 + IK 解不出"。
+    所以布尔值必须先落到 `local`，再用 `if/else` 写成整数（见 `check_pose_script()`）。
     """
     ip = str(p["ip"])
     robot, model = ensure_connected(ip)
@@ -3618,25 +3705,14 @@ def op_check_pose(p):
                    "也不会拿寄存器里的陈旧值冒充它。" % (index, probe_token),
                    "NOT_EXECUTED", {"register": index, "token": probe_token, "ip": ip})
 
-    # 第二步：限值 + IK + 首尾哨兵。三个 token 互不相同是这套判定成立的前提。
+    # 第二步：限值 + IK + 阶段标记 + 首尾哨兵。四个 token 按链式派生（每个都把前一个喂进去），
+    # 因此互不相同 —— 这是整套判定成立的前提。
     start_token = _sentinel_token(probe_token)
-    finish_token = _sentinel_token(start_token, probe_token)
-    pose_literal = "p[%s]" % ", ".join("%.10g" % x for x in pose)
-    qnear_arg = "" if qnear is None else ", [%s]" % ", ".join("%.10g" % x for x in qnear)
-    ik_writes = "\n".join(
-        "  write_output_float_register(%d, q_sol[%d])" % (register, axis)
-        for axis, register in enumerate(CHECK_POSE_IK_REGISTERS)
-    )
-    script = ("def dsh_check_pose():\n"
-              "  write_output_integer_register(%d, %d)\n"
-              "  local p_target = %s\n"
-              "  write_output_integer_register(%d, is_within_safety_limits(p_target))\n"
-              "  local q_sol = get_inverse_kin(p_target%s)\n"
-              "%s\n"
-              "  write_output_integer_register(%d, %d)\n"
-              "end\ndsh_check_pose()\n"
-              % (index, start_token, pose_literal, CHECK_POSE_LIMITS_REGISTER, qnear_arg,
-                 ik_writes, index, finish_token))
+    stage1_token = _sentinel_token(start_token, index)
+    stage2_token = _sentinel_token(stage1_token, index)
+    finish_token = _sentinel_token(stage2_token, index)
+    script = check_pose_script(pose, qnear, start_token=start_token, stage1_token=stage1_token,
+                               stage2_token=stage2_token, finish_token=finish_token)
     if not _send_program(robot, script):
         return err("位姿预检脚本未能送达控制器：%s" % _last_send_failure(robot),
                    "SEND_FAILED", {"ip": ip})
@@ -3650,9 +3726,13 @@ def op_check_pose(p):
         time.sleep(0.05)
 
     limits_raw = _read_int_register(model, CHECK_POSE_LIMITS_REGISTER)
-    within = None if limits_raw is None else bool(limits_raw)
+    stage_raw = _read_int_register(model, CHECK_POSE_STAGE_REGISTER)
     solved = [_read_double_register(model, register) for register in CHECK_POSE_IK_REGISTERS]
     ik_solution = solved if all(value is not None for value in solved) else None
+    # ★ 阶段标记是"限值答案可信"的**前提**：脚本在第一句就中止时该寄存器读到的是 0，
+    #   把 0 当答案就是假阴性（这正是本工具曾经的 bug）。没有标记就不给结论。
+    limits_known = stage_raw in (stage1_token, stage2_token)
+    within = bool(limits_raw) if limits_known else None
 
     if observed == finish_token:
         return ok({
@@ -3661,28 +3741,33 @@ def op_check_pose(p):
             "data": {"ip": ip, "within_safety_limits": within, "reachable": ik_solution is not None,
                      "joint_solution": ik_solution, "pose": pose,
                      "registers": {"sentinel": index, "limits": CHECK_POSE_LIMITS_REGISTER,
+                                   "stage": CHECK_POSE_STAGE_REGISTER,
                                    "ik": list(CHECK_POSE_IK_REGISTERS)}},
         })
 
-    if observed == start_token and limits_raw is not None:
-        # 起始哨兵在、结束哨兵不在 ⇒ 脚本在 `get_inverse_kin` 那一句中止了。
+    if stage_raw == stage1_token:
+        # 阶段标记证明"限值那步确实跑完了"（因此 within 有效），而结束哨兵缺失
+        # ⇒ 中止点就在其后的 get_inverse_kin。这条推论现在有证据，不再是猜。
         return ok({
             "message": ("位姿预检：在安全限值内 = %s；但**逆运动学解不出**（控制器在执行 "
-                        "get_inverse_kin 时中止，脚本没能跑到结束哨兵）⇒ 该位姿通常不可达或超出关节限位。"
-                        % within),
+                        "get_inverse_kin 时中止，脚本停在阶段标记 1 与结束哨兵之间）⇒ "
+                        "该位姿通常不可达或超出关节限位。" % within),
             "data": {"ip": ip, "within_safety_limits": within, "reachable": False,
                      "joint_solution": None, "pose": pose,
-                     "note": "依据：起始哨兵已回读（脚本确实在控制器上跑过）而结束哨兵缺失，"
-                             "且限值寄存器已被写 —— 脚本正是在其后的 get_inverse_kin 处停止的。",
+                     "note": "依据：阶段标记寄存器已读到 stage1（说明 is_within_safety_limits 那一步"
+                             "跑完了、限值答案有效），而结束哨兵缺失 ⇒ 中止点在 get_inverse_kin。",
                      "registers": {"sentinel": index, "limits": CHECK_POSE_LIMITS_REGISTER,
+                                   "stage": CHECK_POSE_STAGE_REGISTER,
                                    "ik": list(CHECK_POSE_IK_REGISTERS)}},
         })
 
-    return err("位姿预检脚本已送出，但在 %.1fs 内既没看到结束哨兵也没看到起始哨兵（寄存器仍是 %s）"
-               "⇒ 无法判定可达性。请确认控制器处于远程控制模式后重试。"
-               % (CHECK_POSE_TIMEOUT_S, observed),
-               "NOT_EXECUTED", {"register": index, "observed": observed,
-                                "start": start_token, "finish": finish_token, "ip": ip})
+    return err("位姿预检：脚本**在「安全限值」这一步就没走完**（阶段标记寄存器 = %s，既不是 %s 也不是 %s）"
+               "⇒ 无法给出可达性结论。可能是该固件不接受 is_within_safety_limits，或控制器未处于"
+               "远程控制模式（URScript 被静默丢弃）。寄存器里读到的 0 **不会**被当成「不在安全限值内」。"
+               % (stage_raw, stage1_token, stage2_token),
+               "NOT_EXECUTED", {"register": index, "observed": observed, "stage": stage_raw,
+                                "start": start_token, "stage1": stage1_token,
+                                "finish": finish_token, "ip": ip})
 
 
 def op_set_speed_scaling(p):

@@ -276,7 +276,11 @@ test('Dashboard 契约：notify 只能由"真的收到消息"触发，收包要�
 test('状态型命令一律"未校验"：12 个设置类 op 必须走 ok_unverified', () => {
   const r = probe.unverified_ops
   const names = Object.keys(r)
-  assert.equal(names.length, 12, `受检 op 数量应固定为 12（实测 ${names.length}）`)
+  assert.equal(
+    names.length,
+    11,
+    `受检 op 数量应固定为 11（实测 ${names.length}）—— 原为 12：set_conveyor_tick 有了回读通道后已毕业`,
+  )
   for (const name of names) {
     assert.equal(
       r[name].uses_ok_unverified,
@@ -500,4 +504,54 @@ test('★ 命名位姿表四个 op 的契约：原子写、回读、区分缺失
     true,
     '★ 宿主 MAX_POSE_FILE_BYTES 与 worker POSE_FILE_MAX_BYTES 必须同一个数（跨语言常量会漂）',
   )
+})
+
+test('★ check_pose 生成的 URScript 必须类型正确：布尔值不得直接写整数寄存器', () => {
+  const s = probe.check_pose_script_types
+  assert.equal(
+    s.int_register_args_are_literals,
+    true,
+    '★ 所有 write_output_integer_register 的第 2 个实参都必须是整数字面量 —— 布尔表达式会让控制器在该行抛错中止（真机实测：机器人此刻正站着的位姿被报成"不在安全限值内 + IK 解不出"）',
+  )
+  assert.equal(
+    s.no_bool_into_int_register,
+    true,
+    '整数寄存器的实参里不得出现 is_within_safety_limits 这类布尔表达式',
+  )
+  assert.equal(s.bool_lands_in_local_first, true, '布尔值必须先落到 local，再由 if/else 归一成 1/0')
+  assert.equal(s.writes_both_branches, true, '两个分支都必须各自写整数（只写 true 分支等于没给答案）')
+  assert.equal(s.stage_register_distinct_from_limits, true, '阶段标记寄存器不得与限值答案寄存器复用')
+  assert.equal(s.stage1_before_ik, true, 'stage1 必须打在限值那步之后、get_inverse_kin 之前')
+  assert.equal(
+    s.stage2_after_ik_result,
+    true,
+    '★ stage2 必须打在 IK 解出并写完关节角之后 —— 有它才能把"死在限值那步"与"死在 IK"分开，否则又会得出无依据的"不可达"',
+  )
+  assert.equal(s.sentinels_bracket_script, true, '首尾哨兵必须把整段围起来（起始在前、结束在最后）')
+  assert.equal(s.qnear_optional, true, 'qnear 可给可不给：不给时 get_inverse_kin 只带位姿一个参数')
+  assert.equal(s.one_script_per_call, true, '必须是一段完整的 def…end + 调用，不能是裸语句片段')
+})
+
+test('★ 传送带 tick 写入必须自证（它已从"只能声称已下发"的清单里毕业）', () => {
+  const c = probe.conveyor_set_contract
+  assert.equal(c.still_dispatches, true, '仍然要真的下发 set_conveyor_tick_count')
+  assert.equal(c.reuses_verified_reader, true, '必须复用同族已有的三哨兵读取器 op_get_conveyor')
+  assert.equal(
+    c.reports_verified_only_after_readback,
+    true,
+    '★ 只有回读之后才允许报 verified —— 否则又是"报告一个它从未核实过的答案"',
+  )
+  assert.equal(
+    c.honest_on_mismatch,
+    true,
+    '★ 回读不一致必须明说"没有生效"（真机实测：写 1234 回读 0 时，旧实现只会说"已设置（未校验）"）',
+  )
+  assert.equal(c.honest_when_read_fails, true, '连回读都失败时也要把原因交出去，而不是含糊其辞')
+  assert.equal(
+    c.discriminates_by_error_key,
+    true,
+    '★ 判断"回读成功与否"必须看 "error" 键：ok(data) 是恒等函数，结果字典里没有 "ok" 键',
+  )
+  assert.equal(c.does_not_inspect_ok_key, true, '★ 不得用 .get("ok") 判断成功 —— 那是恒为假的写法')
+  assert.equal(c.graduates_from_unverified_list, true, '它已不是"只能声称已下发"的 op，必须从该清单移除')
 })
