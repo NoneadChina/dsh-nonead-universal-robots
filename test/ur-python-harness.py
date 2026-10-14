@@ -1050,5 +1050,60 @@ def probe_modbus_validators():
 out['modbus_validators'] = probe_modbus_validators()
 
 
+# ---------------------------------------------------------------------------
+# 25. 力控引导运动（move_force）：脚本形状 + 绝不碰 RTDE 输入 + 门禁归属
+# ---------------------------------------------------------------------------
+
+def probe_move_force_contract():
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+    start = src.index('def op_move_force(')
+    body = src[start:src.index('\ndef ', start + 1)]
+    # 只看代码、不看 docstring —— docstring 里**必须**写清"为什么不用 move_force_2stop"，
+    # 那个名字与 input_double_register 都会出现在注释里，不能据此判定它写了输入寄存器。
+    code = body[body.index('"""', body.index('"""') + 3) + 3:]
+    host = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib', 'index.js'),
+                encoding='utf-8').read()
+    approval = host[host.index('const APPROVAL_OPS = new Set(['):]
+    approval = approval[:approval.index(']);')]
+    return {
+        'dispatched': '"move_force": op_move_force' in src,
+        # 脚本形状与 urScriptExt.move_force（:510-535）一致：进力控 → 直线运动 → 减速 → 退力控
+        'script_shape': all(token in code for token in (
+            'force_mode(', 'movel(', 'stopl(', 'end_force_mode()')),
+        # ★ 绝不写 RTDE 输入寄存器：本插件没有 send 配方，claim 输入字段会让控制器抛异常
+        'no_rtde_input_write': ('input_double_register' not in code
+                                and 'setData(' not in code
+                                and 'set_force_remote' not in code),
+        'reads_pose_before_after': ('tcp_pose_before' in code and 'tcp_pose_after' in code
+                                    and '_simple_pose(' in code),
+        'uses_sentinel_runner': '_run_sentinel_script(' in code,
+        'reports_shortfall': 'shortfall_m' in code and 'reached_target' in code,
+        'declares_safety_flag': 'stopped_due_to_safety' in code,
+        'gated': "'move_force'" in approval,
+    }
+
+
+out['move_force_contract'] = probe_move_force_contract()
+
+
+def probe_selection_vector_guard():
+    """力控选择向量只接受 6 个 0/1（布尔按 0/1 归一化，否则会渲染成 True/False 下发）。"""
+    results = {
+        'accepts_valid': ur_worker._selection6([0, 0, 1, 0, 0, 0]) == [0, 0, 1, 0, 0, 0],
+        'accepts_bool_as_int': ur_worker._selection6([False, False, True, False, False, False]) == [0, 0, 1, 0, 0, 0],
+    }
+    for name, bad in {'short': [0, 0, 1], 'two': [0, 0, 2, 0, 0, 0],
+                      'string': [0, 0, '1', 0, 0, 0], 'not_a_list': 1}.items():
+        try:
+            ur_worker._selection6(bad)
+            results['rejects_' + name] = False
+        except ValueError:
+            results['rejects_' + name] = True
+    return results
+
+
+out['selection_vector_guard'] = probe_selection_vector_guard()
+
+
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + '\n')
 ur_worker._PROTOCOL_OUT.flush()

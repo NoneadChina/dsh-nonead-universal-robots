@@ -135,6 +135,24 @@ test('★ 工作空间：声明了就把显式笛卡尔目标关在盒子里', (
   assert.equal(checkMotionSafety('movec', { pose_via: [0, 0, 5, 0, 0, 0], pose_to: POSE }, limits)?.code, 'SAFETY_WORKSPACE');
 });
 
+test('★ move_force 与 force_mode 同受"力/力矩上限 + 工作空间 + 线速度"约束', () => {
+  const limits = { ...DEFAULT_LIMITS, workspace: { x: [-0.5, 0.5], y: [-0.5, 0.5], z: [0, 1] } };
+  const args = { pose: POSE, selection_vector: [0, 0, 1, 0, 0, 0], wrench: [0, 0, 20, 0, 0, 0], v: 0.25 };
+  assert.equal(checkMotionSafety('move_force', args, limits), null, '合法的力控引导运动应放行');
+  assert.equal(
+    checkMotionSafety('move_force', { ...args, wrench: [0, 0, 100, 0, 0, 0] }, limits)?.code,
+    'SAFETY_FORCE',
+    '★ 力控引导运动的力必须与 force_mode 受同一条上限（它同样持续压在工件上）',
+  );
+  assert.equal(
+    checkMotionSafety('move_force', { ...args, pose: [2, 0, 0.4, 0, 0, 0] }, limits)?.code,
+    'SAFETY_WORKSPACE',
+    '目标位姿也要关在工作空间里',
+  );
+  assert.equal(checkMotionSafety('move_force', { ...args, v: 1 }, limits)?.code, 'SAFETY_SPEED');
+  assert.equal(checkMotionSafety('move_force', { ...args, pose: [1, 2] }, limits)?.code, 'SAFETY_ARGS');
+});
+
 test('★ 配置坏了就 fail closed：workspaceProblem 非空时拒绝一切运动', () => {
   const broken = { ...DEFAULT_LIMITS, workspaceProblem: '无法解析的片段 “nonsense”' };
   const out = checkMotionSafety('move_z', { distance: -0.01 }, broken);

@@ -453,3 +453,29 @@ test('★ Modbus 参数防线：信号名注入与越界都必须被拒', () => 
     )
   }
 })
+
+test('★ 力控引导运动：脚本形状对，且绝不碰 RTDE 输入字段', () => {
+  const m = probe.move_force_contract
+  assert.equal(m.dispatched, true, 'HANDLERS 必须挂上 move_force')
+  assert.equal(m.script_shape, true, '必须是 force_mode → movel → stopl → end_force_mode 一段跑完')
+  assert.equal(
+    m.no_rtde_input_write,
+    true,
+    '★ 绝不写 RTDE 输入寄存器 —— 本插件没有 send 配方，claim 输入字段会让控制器抛异常并崩掉 RTDE 线程',
+  )
+  assert.equal(m.reads_pose_before_after, true, '必须用只读 RTDE 读运动前后的实际位姿')
+  assert.equal(m.uses_sentinel_runner, true, '必须用首尾哨兵证明脚本真的跑完了')
+  assert.equal(m.reports_shortfall, true, '必须给出是否到位 / 是否提前停下')
+  assert.equal(m.declares_safety_flag, true, '必须连安全停止标志一起回报，不替调用方下结论')
+  assert.equal(m.gated, true, 'move_force 必须入运动审批门禁')
+})
+
+test('★ 力控选择向量只接受 6 个 0/1', () => {
+  const v = probe.selection_vector_guard
+  assert.equal(v.accepts_valid, true, '合法 6 个 0/1 必须放行')
+  assert.equal(v.accepts_bool_as_int, true, '布尔应按 0/1 归一化，否则会渲染成 True/False 下发')
+  for (const key of Object.keys(v)) {
+    if (key.startsWith('accepts_')) continue
+    assert.equal(v[key], true, `${key} 必须被拒绝`)
+  }
+})

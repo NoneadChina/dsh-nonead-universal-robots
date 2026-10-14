@@ -6,11 +6,11 @@
 
 > ⚠️ **安全提示**：本插件会直接驱动真实机械臂。使用时务必保证机器人可见、急停按钮触手可及、工作区无障碍物与人员。请把它当作授予模型 `bash` 工具一样慎重对待。你（或模型）对任何运动指令负全责。
 
-> 🛡️ **运动审批门禁**：**48** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**、**改写/删除机器人上已存程序**，以及**通过 Modbus 驱动现场总线设备**的指令，在真正下发前会**暂停等待人工确认**：
+> 🛡️ **运动审批门禁**：**49** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**、**改写/删除机器人上已存程序**、**通过 Modbus 驱动现场总线设备**，以及**在力控下顶住工件**的指令，在真正下发前会**暂停等待人工确认**：
 >
 > | 分组 | 工具 |
 > |---|---|
-> | 运动 | `ur_movej` `ur_movel` `ur_movep` `ur_movec` `ur_servoj` `ur_move_optimized` `ur_move_x` `ur_move_y` `ur_move_z` `ur_move_tool_x` `ur_move_tool_y` `ur_move_tool_z` |
+> | 运动 | `ur_movej` `ur_movel` `ur_movep` `ur_movec` `ur_servoj` `ur_move_optimized` `ur_move_x` `ur_move_y` `ur_move_z` `ur_move_tool_x` `ur_move_tool_y` `ur_move_tool_z` `ur_move_force` |
 > | 绘图 | `ur_draw_circle` `ur_draw_square` `ur_draw_rectangle` `ur_draw_star` |
 > | 程序与脚本 | `ur_load_program` `ur_run_program` `ur_send_script` `ur_reset_error` |
 > | 控制模式 / 电源 / 安全 | `ur_set_freedrive` `ur_set_teach_mode` `ur_power_on` `ur_power_off` `ur_brake_release` `ur_unlock_protective_stop` `ur_shutdown` |
@@ -29,7 +29,7 @@
 
 ## 功能一览
 
-共 **99** 个工具（`ur_*`）。
+共 **100** 个工具（`ur_*`）。
 
 | 类别 | 工具（`ur_*`） | 说明 |
 |---|---|---|
@@ -46,7 +46,7 @@
 | I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` / `ur_get_tool_analog_in` | 数字输入/输出（含批量读位、`which="tool"` 的工具端 I/O）与标准模拟输入/输出（**按工程单位收值**：URScript 的 `set_analog_out` 收的是相对电平 [0,1]；电流域端口可用 `full_scale: 20`）。读工具端数字输入是**哨兵校验**的：控制器若始终没回报脚本执行完毕，工具会拒绝给值，而不是报一个无法担保的数字 |
 | 工具配置 | `ur_set_tool_voltage` / `ur_set_tcp` / `ur_set_payload` / `ur_set_payload_inertia` / `ur_set_gravity` / `ur_zero_ftsensor` / `ur_set_tool_output_mode` / `ur_set_tool_communication` | 工具电压（0/12/24 V）、TCP、负载质量/重心、**质量+重心+惯性矩阵一次设全**（`set_target_payload`，PolyScope 5.10+；与 `set_payload` 不同，它不会重置惯性矩阵而让三者互相矛盾）、重力方向（非水平安装用）、力/力矩传感器归零、**工具输出模式**（普通 / power 双针供电）、**工具串口**（TCI/RS-485 —— ⚠️ 启用会禁用工具模拟输入）。⚠️ 这类设置**没有回读通道**：成功的回执写明「已下发（未校验）」并带 `verified: false` —— 插件能证明的只是脚本已送达控制器，而 UR 只在远程控制模式下接受 URScript，其余情况会被静默丢弃 |
 | 控制模式 / 电源 / 安全 | `ur_set_freedrive` / `ur_set_teach_mode` / `ur_power_on` / `ur_power_off` / `ur_brake_release` / `ur_unlock_protective_stop` / `ur_shutdown` | 自由驱动 / 示教模式（可手动拖动机械臂）、上电 / 下电 / **释放刹车**（⚠️ 可能因重力掉落）、**只解保护性停止**（不上电、不释放刹车，这就是它与 `ur_reset_error` 的区别）、关闭控制器 |
-| 力控 | `ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings` | **力控（Force Mode）**：沿/绕选定轴柔性贴合环境并持续施加指定力/力矩。参数与手册逐条对齐：`task_frame` / `selection_vector`（1=柔性）/ `wrench` / `type`（1–3）/ `limits`（柔性轴=最大 TCP 速度，刚性轴=最大位置偏差）/ `damping` / `gain_scaling`。脚本按手册建议先 `sleep(0.02)` 再进力控；退出用 `ur_end_force_mode`。⚠️ `damping`/`gain_scaling` **控制器侧无法回读**，工具只回报本次设置值，不假装读到当前值 |
+| 力控 | `ur_force_mode` / `ur_end_force_mode` / `ur_force_mode_settings` / `ur_move_force` | **力控（Force Mode）**：沿/绕选定轴柔性贴合环境并持续施加指定力/力矩。参数与手册逐条对齐：`task_frame` / `selection_vector`（1=柔性）/ `wrench` / `type`（1–3）/ `limits`（柔性轴=最大 TCP 速度，刚性轴=最大位置偏差）/ `damping` / `gain_scaling`。脚本按手册建议先 `sleep(0.02)` 再进力控；退出用 `ur_end_force_mode`。⚠️ `damping`/`gain_scaling` **控制器侧无法回读**，工具只回报本次设置值，不假装读到当前值。**`ur_move_force`** 是架在它上面的**装配动作**：一段 URScript 把 `force_mode(...)` → `movel(...)` → `stopl(...)` → `end_force_mode()` 一次跑完，于是机械臂朝目标推进、到工件处停住。⚠️ 它**不是** vendored 的 `move_force_2stop` —— 那个靠 RTDE **输入**寄存器每 8 ms 推 wrench，而本插件刻意没有 send 配方，那些字段在这里 claim 不了（claim 会让控制器抛异常并崩掉 RTDE 线程）。本工具的做法是：整段运动交给控制器跑，用首尾哨兵证明它真的跑了，再用**只读** RTDE 读运动前后的实际位姿 —— 于是"停在目标之前"表示控制器无法再沿轨迹前进（正是力控装配要的效果），但**不**证明力真的压到了工件上；回报里同时给出 `stopped_due_to_safety`，把「被力限止住」与「被安全停止」的区分留给你 |
 | 速度控制 | `ur_speedj` / `ur_speedl` / `ur_stopj` / `ur_stopl` / `ur_wait_steady` | 关节/TCP **速度指令**（`speedj` / `speedl`）与对应的减速停止（`stopj` / `stopl`）。⚠️ 速度指令是**开放式**的：`t=0`（默认）时"达速即返回"而机械臂**仍在运动**，必须用 `stop*` 或 `ur_wait_steady` 收尾。`ur_wait_steady` 轮询 RTDE 已有的速度量判断是否真的停住（**没有**用 URScript 的 `is_steady()` —— 那个在力控/示教模式下恒为 false） |
 | 实时遥测 | `ur_get_runtime_telemetry` / `ur_get_robot_voltage` / `ur_get_robot_current` / `ur_get_joint_temperatures` / `ur_get_speed_scaling` / `ur_get_tcp_force` / `ur_get_tool_telemetry` | 关节电流/电压/角速度、TCP 线速度与受力/力矩、工具加速度计、速度倍率、整机电压电流、关节温度、工具电流/电压、I/O 电流。**这些字段本来就在 500 Hz 的 RTDE 数据流里**，读取零代价、无需改配置。单点读取（整机电压/电流、关节温度）与一次性汇总（`ur_get_runtime_telemetry`）并存：轮询某一项时用单点，诊断时用汇总 |
 | 传送带 | `ur_get_conveyor` / `ur_set_conveyor_tick` / `ur_set_conveyor_tracking` | 传送带 tick 读取 / 设置，以及**线性或圆盘跟踪的开启与停止**。`ur_get_conveyor` 对它依赖的那段脚本自证：只有观察到控制器把脚本执行完毕才给出 tick。⚠️ `ur_set_conveyor_tracking` **未经真机验证** —— 签名与量纲逐条对照官方手册，但跟踪行为需要真带编码器的传送带才能确认，请先在 URSim 上试 |

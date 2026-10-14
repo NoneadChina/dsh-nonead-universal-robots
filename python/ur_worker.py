@@ -4066,6 +4066,129 @@ def op_modbus_set_signal_update_frequency(p):
                            executed_note="刷新频率已设置（首尾哨兵确认脚本执行完毕）")
 
 
+def _selection6(value):
+    """力控选择向量：6 个 0/1（1 = 该轴柔性，0 = 刚性）。"""
+    if not isinstance(value, (list, tuple)) or len(value) != 6:
+        raise ValueError("selection_vector 必须是 6 个数（1 = 该轴柔性，0 = 刚性）")
+    out = []
+    for index, item in enumerate(value):
+        if isinstance(item, bool):
+            out.append(int(item))
+            continue
+        if not isinstance(item, int) or item not in (0, 1):
+            raise ValueError("selection_vector[%d] 必须是 0 或 1（实得 %r）" % (index, item))
+        out.append(item)
+    return out
+
+
+def _simple_pose(model):
+    """读实际 TCP 位姿；读不到返回 None（**绝不**拿上一次的值冒充）。"""
+    try:
+        pose = model.ActualTCPPose()
+        values = [float(x) for x in pose]
+    except Exception:
+        return None
+    return values if len(values) == 6 else None
+
+
+def op_move_force(p):
+    """**力控引导运动**：在力控模式下朝目标位姿走，碰到工件就停 —— 力控装配的核心动作。
+
+    与 vendored `urScriptExt.move_force`（:510-535）是**同一段 URScript 形状**：
+    `force_mode(...)` → `movel(...)` → `stopl(...)` → `end_force_mode()`，一次交给控制器跑完。
+
+    ⚠️ **不复用** `urScriptExt.move_force_2stop`：它靠 `set_force_remote()` 每 8 ms 把 wrench 写进
+    **RTDE 输入寄存器**（`input_double_register_0..17`）来持续施力，而本插件刻意没有 send 配方 ——
+    那些输入字段在这里 claim 不了（claim 一个不存在的 send 字段会让控制器抛异常、崩掉 RTDE 接收线程）。
+    本工具改把"持续施力 + 沿轨迹前进"整段交给控制器的 `force_mode` 自己完成，用**首尾哨兵**证明脚本
+    真的跑完了，再拿只读 RTDE 读运动前后的实际位姿，据此判断"是否提前停下"。全程不需要 PC 侧推流。
+
+    ⚠️ 力/力矩受安全闸的 `safetyMaxForceN` / `safetyMaxTorqueNm` 限制，且本 op 受运动审批门禁。
+    """
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    pose = _pose6(p.get("pose"), "pose")
+    task_frame = _pose6(p.get("task_frame", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), "task_frame")
+    selection = _selection6(p.get("selection_vector"))
+    wrench = _pose6(p.get("wrench"), "wrench")
+    limits = _pose6(p.get("limits", [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]), "limits")
+    f_type = p.get("f_type", 2)
+    if f_type not in (1, 2, 3):
+        raise ValueError("f_type 只能是 1 / 2 / 3（手册：其它值无效）；实得 %r" % (f_type,))
+    try:
+        acc = float(p.get("a", 1.2))
+        vel = float(p.get("v", 0.25))
+        blend = float(p.get("r", 0.0))
+    except (TypeError, ValueError):
+        raise ValueError("a / v / r 必须是数值")
+    if not acc > 0:
+        raise ValueError("a 必须 > 0（实得 %r）" % (p.get("a"),))
+    if not vel > 0:
+        raise ValueError("v 必须 > 0（实得 %r）" % (p.get("v"),))
+    if blend < 0:
+        raise ValueError("r 必须 ≥ 0（实得 %r）" % (p.get("r"),))
+
+    before = _simple_pose(model)
+    lines = [
+        "force_mode(p[%s], [%s], [%s], %d, [%s])" % (
+            ", ".join("%.10g" % x for x in task_frame),
+            ", ".join(str(x) for x in selection),
+            ", ".join("%.10g" % x for x in wrench),
+            int(f_type),
+            ", ".join("%.10g" % x for x in limits)),
+        "movel(p[%s], a=%.10g, v=%.10g, r=%.10g)" % (
+            ", ".join("%.10g" % x for x in pose), acc, vel, blend),
+        "stopl(%.10g)" % acc,
+        "end_force_mode()",
+    ]
+    # 哨兵预算按"要走的距离 / 速度"估：力控模式下被挡住时 movel 会一直尝试到目标，可能很久。
+    span = 0.0
+    if before is not None:
+        span = sum((pose[i] - before[i]) ** 2 for i in range(3)) ** 0.5
+    budget = min(120.0, max(5.0, 2.0 * span / max(vel, 1e-6) + 5.0))
+    outcome, info = _run_sentinel_script(robot, model, lines, "dsh_move_force", timeout=budget)
+    after = _simple_pose(model)
+    try:
+        stopped_safety = bool(model.SafetyStatus().StoppedDueToSafety)
+    except Exception:
+        stopped_safety = None
+
+    data = {"ip": ip, "target_pose": pose, "task_frame": task_frame, "selection_vector": selection,
+            "wrench": wrench, "limits": limits, "f_type": int(f_type), "a": acc, "v": vel, "r": blend,
+            "tcp_pose_before": before, "tcp_pose_after": after,
+            "stopped_due_to_safety": stopped_safety, "sentinel_budget_s": budget}
+    if outcome != "executed":
+        data["reached_target"] = None
+        data["stopped_short"] = None
+        if outcome == "partial":
+            return err("力控运动脚本在 %.1fs 预算内**没跑到结束哨兵**（只回读到起始哨兵）⇒ 它可能仍在执行"
+                       "（力控模式下被挡住时 movel 会一直尝试到目标），也可能在力控/运动那一句被控制器拒绝。"
+                       "**运动是否结束未知** —— 请先用 ur_get_program_state / ur_get_status 看现场，"
+                       "不要假设机械臂已停或已到位。" % budget, "NOT_EXECUTED", data)
+        return err("控制器没有执行这段 URScript（连起始哨兵都没回读到）⇒ 本次运动**是否发生未知**。%s"
+                   % info.get("reason", ""), "NOT_EXECUTED", data)
+
+    if after is None:
+        data["reached_target"] = None
+        data["stopped_short"] = None
+        return ok({"message": "力控运动脚本已在控制器上执行完毕（首尾哨兵确认），但**读不到**运动后的实际 TCP "
+                              "位姿，因此无法判断是否到位。", "data": data, "outcome": outcome})
+
+    shortfall = sum((after[i] - pose[i]) ** 2 for i in range(3)) ** 0.5
+    data["shortfall_m"] = shortfall
+    data["reached_target"] = shortfall <= 0.001
+    data["stopped_short"] = shortfall > 0.001
+    if data["reached_target"]:
+        message = ("力控运动执行完毕，实际 TCP 已到达目标位姿（位置差 %.4f m）。⚠️ 到位**不**等于过程中"
+                   "没有接触，也不等于施加的力真的压到了工件上。" % shortfall)
+    else:
+        message = ("力控运动执行完毕，但实际 TCP **停在目标之前**（位置差 %.4f m）。力控模式下被工件/环境"
+                   "挡住时控制器无法继续沿轨迹前进，就会停在这里 —— 这正是力控装配要的效果。"
+                   "⚠️ 本工具**无法区分**「被力/力矩限值止住」与「被安全停止或程序被停」："
+                   "安全停止标志=%s；请结合 tcp_pose_after 与现场确认。" % (shortfall, stopped_safety))
+    return ok({"message": message, "data": data, "outcome": outcome})
+
+
 def op_set_gravity(p):
     """设置重力方向向量的方向（单位向量），用于非水平安装。
 
@@ -4354,6 +4477,7 @@ HANDLERS = {
     "modbus_set_output_signal": op_modbus_set_output_signal,
     "modbus_set_runstate_dependent_choice": op_modbus_set_runstate_dependent_choice,
     "modbus_set_signal_update_frequency": op_modbus_set_signal_update_frequency,
+    "move_force": op_move_force,
     "send_script": op_send_script,
     "movej": op_movej,
     "movel": op_movel,
