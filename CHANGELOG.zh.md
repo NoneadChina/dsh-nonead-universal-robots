@@ -59,6 +59,23 @@
 
 `scripts/check-tool-params.py` 也改了：它的 docstring 一直写着"`_` 开头的键是协议内部字段"，而实现只排除了字面的 `{ip, _timeout_ms}`。现在实现与文档一致（宿主注入的 `_path` / `_dir` / `_pose_count` / `_max_poses` / `_capture` 被排除，且 `sanitizeArgs` 会把模型塞的同名字段丢掉），并**新增**一条规则：禁止把 `_` 开头的名字**声明**成参数 —— 否则模型就能设置一个宿主打算注入的字段。
 
+### 修复 — 长时间运动会让数字孪生冻结（`lib/motion-budget.js`）
+
+真机反馈：让机器人跑 60 秒，3D 孪生就不跟着动了。孪生唯一**不受** worker 单线程 stdin 队列影响的
+数据源，是 Python 侧那个遥测推送线程（`_twin_push_loop`）—— 而它与 RTDE、Dashboard 装在**同一个子进程**里。
+
+罪魁是调用预算：每次工具调用都用 `commandTimeoutMs`（默认 **60000 ms**），而 `UrWorker.call()`
+**超时即 kill 掉 Python 子进程**（作为通用策略这是对的：单线程 worker 卡死会让之后每个请求都排队）。
+于是"合法地跑过 60 秒"的运动把子进程**杀在运动中途**：机器人还在动，推送线程随子进程消失，孪生永久
+冻结（机器人连接也一并丢失）。
+
+两处改动，都在 `lib/motion-budget.js`：
+- 预算改为**按调用自身的参数推算** —— `t=`（秒）与 `ur_wait_steady` 的 `timeout_s` 各加一份余量，
+  `move_force` 因为时长取决于"走多远、被什么挡住"而给宽兜底；配置里的 `commandTimeoutMs` 仍是下限；
+  1 小时封顶，避免"很长"变成"永不超时"；
+- 运动指令一律以 **`killOnTimeout: false`** 调用：超出预算就**如实报超时**，而不是毁掉会话。这与本插件
+  一贯的诚实性纪律一致 ——「我没在预算内拿到确认」不是拆掉连接的许可。
+
 ### 修复 — 文档
 
 两份 README 都写「RTDE 配方未暴露单关节电流，故未提供 `ur_get_joint_current`」。实际配方里一直有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的**工具。

@@ -136,6 +136,28 @@ its documentation (host-injected `_path` / `_dir` / `_pose_count` / `_max_poses`
 excluded, and `sanitizeArgs` strips any same-named key the model sends), plus a **new** rule forbidding
 a *declared* `_`-prefixed parameter — otherwise a model could set a field the host intends to inject.
 
+### Fixed — a long motion could freeze the digital twin (`lib/motion-budget.js`)
+
+Reported from a real robot: run something for 60 seconds and the 3D twin stops following. The twin's
+only data source that does not stand in the worker's single-threaded stdin queue is the Python side's
+telemetry push thread (`_twin_push_loop`) — and that thread lives in the same child process as RTDE and
+the Dashboard.
+
+The kill switch was the call budget: every tool call used `commandTimeoutMs` (default **60000 ms**), and
+`UrWorker.call()` **kills the Python child on timeout** (correct as a general policy — a wedged
+single-threaded worker would otherwise stall every later request). So a motion that legitimately ran
+longer than 60 s had its child killed **mid-motion**: the robot kept moving, the push thread vanished
+with the child, and the twin froze permanently (and the robot connection went with it).
+
+Two changes, both in `lib/motion-budget.js`:
+- the budget is now **derived from the call's own parameters** — `t=` (seconds) and `ur_wait_steady`'s
+  `timeout_s` each extend it by a margin, `move_force` gets a wide fallback because its duration depends
+  on the distance travelled and on what blocks it, the configured `commandTimeoutMs` stays a floor, and a
+  1-hour cap keeps "long" from turning into "never times out";
+- motion ops are called with **`killOnTimeout: false`**, so exceeding the budget reports a timeout
+  honestly instead of destroying the session. That is the same honesty rule used everywhere else here:
+  "I could not confirm it within my budget" is not a licence to tear the connection down.
+
 ### Fixed — documentation
 
 The READMEs claimed the RTDE recipe does not expose per-joint current "so `ur_get_joint_current` is

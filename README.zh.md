@@ -250,6 +250,7 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 - **本地文件访问**：`ur_upload_program` 会**读**本地文件、`ur_download_program` 会**写**本地文件，因此两者都被锁在 `programDir`（默认 `<DSH_HOME>/nonead-ur/programs`，可用 `programDir` 配置改）内。路径必须在该目录内 —— 判据是 `realpath` **之后**的结果，所以软链也带不出去；只传输 `.urp`；`maxProgramBytes`（1 MiB）限大小。**未配置或目录不存在的 `programDir` 一律 fail closed**：不读也不写任何本地文件。这与"把 shell 交给模型"是同一类暴露面，所以这里是设围栏，而不是靠信任。
 - **程序传输不是"发出去就算完"**：上传与下载都比对另一侧的字节数，删除会在删完之后再 `stat` 一次。不一致就报失败（`VERIFY_FAILED`），绝不报成功 —— 因为调用方的下一步很可能就是去运行那个程序。
 - **命名位姿是本机数据，不是机器人状态**：`ur_save_pose` / `ur_get_pose` / `ur_list_poses` / `ur_delete_pose` 只在 `poseDir` 下按"一位姿一文件"读写 JSON，不碰控制器（除非让 `ur_save_pose` 捕获当前姿态，那需要 `ip`）。目录在首次保存时自动创建；未配置 `poseDir` 则 fail closed。真要走到某个保存过的位姿，请**分两步**（先 `ur_get_pose` 再 `ur_movel`），让门禁看到真实数字。
+- **长时间运动绝不能让孪生冻结**：孪生唯一不受命令队列影响的数据源是 worker 的遥测推送线程，而那个线程与 RTDE、Dashboard 装在**同一个 Python 子进程**里。因此单次工具调用**绝不能**因为"运动合法地超出了调用预算"就杀掉这个子进程：运动指令的预算现在**按参数推算**（`t=` / `timeout_s`，力控引导运动另给宽兜底），并且一律 `killOnTimeout: false` —— 超时仍会如实报超时，只是不再毁掉会话（以及孪生）。
 - **工具端数字 I/O**：`ur_get_digital_in` / `ur_set_digital_out` 的 `which="tool"` 用于工具端（法兰侧）数字 I/O。工具端数字信号**不经 RTDE**，因此读取工具输入会发送一段短的 URScript 程序，**可能打断正在运行的程序**。**工具端数字输出的读回不支持**（没有可靠的 `read_tool_digital_out` 表达式）。
 - **关节电流**：接收配方里本来就有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的** `ur_get_joint_current` 工具，而不是这个值本身。
 - **线程/取消**：运动指令为阻塞到位的轮询，`commandTimeoutMs` 内完成；对长时间轨迹，请在描述中提醒模型设置合理超时或分步执行。
