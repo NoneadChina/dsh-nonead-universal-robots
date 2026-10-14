@@ -2,6 +2,82 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added — pre-flight safety gate (`lib/safety-gate.js`)
+
+An independent second layer that caps what a *single* command may ask for, so "the human said yes"
+never means "anything goes": `safetyMaxStepM` (0.5 m), `safetyMaxLinearSpeed` (0.5 m/s),
+`safetyMaxJointSpeed` (1.05 rad/s), `safetyMaxDurationS` (60 s), force-mode
+`safetyMaxForceN`/`safetyMaxTorqueNm` (40 N / 10 N·m) and an optional `safetyWorkspace` box for
+explicit Cartesian targets. It runs **before** the approval prompt, is **decoupled** from
+`requireApprovalForMotion` (turning off human confirmation must not silently remove every physical
+cap), and **fails closed** on a malformed `safetyWorkspace` instead of silently not checking.
+Deliberately out of scope: `ur_send_script` (arbitrary URScript, not parsed).
+
+### Added — motion audit ledger (`lib/audit-log.js`)
+
+Every gated command appends one NDJSON line (`<DSH_HOME>/nonead-ur/audit.ndjson` by default) with
+`{ts, ip, op, tool_name, args, decision, reason}` and `decision ∈ {approved, denied, blocked,
+unchecked}`. Before this, the only trace of an approval was in-memory: "what did the model actually
+do to the robot" had no answer after the fact. A failing write is reported, never thrown — auditing
+must not be able to break the dispatch path.
+
+### Added — `ur_check_pose` and `ur_set_speed_scaling` (83 → 85 tools, 40 → 41 gated)
+
+`ur_check_pose` answers the question worth asking **before** anything moves: *is this TCP pose inside
+the controller's safety limits, and does inverse kinematics solve (is it reachable)?* The controller
+runs `is_within_safety_limits` + `get_inverse_kin`; the answers come back through output registers
+behind start/finish sentinels, so the three outcomes stay distinct — completed (both answers),
+half-run (limits written but the controller aborted at the IK call ⇒ `reachable: false`, with the
+inference stated in the reply), and never ran (verification off / firmware without those functions ⇒
+`NOT_EXECUTED`, no fabricated answer). It cannot use `urScript.py`'s `get_*` accessors for this: those
+depend on RTDE **input** fields, and this plugin deliberately has no send recipe.
+
+`ur_set_speed_scaling` sets the speed slider (`set_speed_slider`, 0 = stopped, 1 = full speed) — the
+most direct way to slow everything down before handing over a delicate motion. Unlike the other
+settings it **has** a read-back channel (`target_speed_fraction`), so it reports `verified: true` only
+when the read-back matches, and `hardware_verified: false` because "`set_speed_slider` ⇒
+`target_speed_fraction`" has never been confirmed on a real robot. It joins the approval gate (it
+changes the speed of *every later* motion).
+
+### Added — program file transfer over SFTP (85 → 88 tools, 41 → 43 gated)
+
+Deploying a program no longer requires walking to the teach pendant: `ur_upload_program`,
+`ur_download_program` and `ur_delete_program` move `.urp` files between `programDir` and the robot,
+and each one **verifies what it did** instead of trusting that a transfer was requested — upload
+reads the remote size back, download reads the local size back, and delete `stat`s the path again
+after `remove` (a mismatch is `VERIFY_FAILED`, never a success, because the caller's next step is
+usually to run that program). A download never silently overwrites: an existing target is renamed to
+`<path>.bak` first, and a failed backup refuses the download.
+
+The local half needed a fence (`lib/program-files.js`): upload **reads** a local file and download
+**writes** one, so without one the model could ship any local file (keys, credentials) to the robot,
+or write robot files to any local path — `sanitizeArgs` blocks parameter *keys*, not *values*. Local
+paths must resolve, after `realpath`, inside `programDir`, so `..` and symlinks out of the directory
+are both rejected; only `.urp`; `maxProgramBytes` caps the size; a missing `programDir` fails closed.
+`upload_program` and `delete_program` join the approval gate (clobbering or deleting a stored program
+is not lighter than a motion, and their sibling `load_program` was already gated);
+`download_program` does not, since it only reads the robot and what it writes is fenced.
+
+### Added — operator messaging (88 → 91 tools)
+
+`ur_popup`, `ur_close_popup` and `ur_add_log` let the model talk to the person standing at the robot:
+a modal popup on the teach pendant, and a line in the **controller's own log history** (which is what
+makes "who asked it to do what" answerable on the shop floor later). None of them moves the arm, so
+none joins the approval gate.
+
+The text is **injection-checked**: the dashboard parses its commands line by line
+(`dashboard.py` builds `'popup ' + text + '\n'`), so a newline inside the text would be executed as
+another dashboard command — `"x\nshutdown"` is a shutdown. A newline or CR is therefore **rejected**
+with a clear error instead of being quietly replaced, and the text is capped at 300 characters.
+
+### Fixed — documentation
+
+The READMEs claimed the RTDE recipe does not expose per-joint current "so `ur_get_joint_current` is
+not provided". The recipe has carried `actual_current` all along and `ur_get_runtime_telemetry`
+returns it as `joint_currents`; only a *dedicated* tool is absent.
+
 ## [0.7.0] - 2026-10-14
 
 > **The suite printed "0 failures" on a machine where 16 of its 46 items had never run.** The same

@@ -347,3 +347,68 @@ test('契约：list_programs 必须如实回报"用了内置默认口令"与主�
   assert.equal(c.supports_known_hosts, true, '必须提供 known_hosts 这条严格校验路径（RejectPolicy）')
   assert.equal(c.no_silent_fallback, true, 'known_hosts 文件不存在必须报错，不得静默退回 auto-add')
 })
+
+test('契约：ur_check_pose / ur_set_speed_scaling 必须走"能自证"的路径', () => {
+  const c = probe.new_ops_contract
+  assert.equal(c.check_pose_dispatched, true, 'HANDLERS 必须挂上 check_pose')
+  assert.equal(c.speed_dispatched, true, 'HANDLERS 必须挂上 set_speed_scaling')
+  assert.equal(c.check_uses_safety_limits, true, '预检必须真的问控制器的 is_within_safety_limits')
+  assert.equal(c.check_uses_inverse_kin, true, '可达性必须真的问 get_inverse_kin')
+  assert.equal(c.check_has_sentinels, true, '必须用首尾哨兵区分"跑完/跑到一半/没执行"')
+  assert.equal(c.check_reports_not_executed, true, '控制器没执行时必须报 NOT_EXECUTED，不能猜')
+  assert.equal(
+    c.check_writes_registers,
+    true,
+    '写 double 寄存器必须用 write_output_float_register（不能用 RTDE 字段名当函数名）',
+  )
+  assert.equal(c.speed_uses_slider, true, '速度倍率必须走 set_speed_slider')
+  assert.equal(c.speed_reads_back, true, '★ 必须回读 target_speed_fraction 才敢报 verified')
+  assert.equal(c.speed_marks_unverified_hw, true, '未经真机验证的映射必须如实标注')
+})
+
+test('★ _pose6 必须挡住畸形输入（BADARG 的来源，不能把垃圾拼进 URScript）', () => {
+  const v = probe.pose6_validation
+  assert.equal(v.accepts_valid, true, '合法 6 维输入必须通过')
+  for (const key of Object.keys(v)) {
+    if (key === 'accepts_valid') continue
+    assert.equal(v[key], true, `${key} 必须被拒绝（否则会把畸形值拼成 URScript 下发）`)
+  }
+})
+
+test('★ 程序文件传输必须"核对做成了没有"，而不是"请求已发出"', () => {
+  const p = probe.program_ops_contract
+  assert.equal(p.all_dispatched, true, 'HANDLERS 必须挂上三个传输 op')
+  assert.equal(p.upload_verifies_size, true, '上传必须回读远端大小，不一致报 VERIFY_FAILED')
+  assert.equal(p.download_verifies_size, true, '下载必须回读本地大小，不一致报 VERIFY_FAILED')
+  assert.equal(p.delete_rechecks, true, '删除必须在 remove 之后再 stat 确认真的没了')
+  assert.equal(p.download_backs_up, true, '★ 下载不得静默覆盖：目标已存在时先备份为 .bak')
+  assert.equal(
+    p.credentials_read_explicitly,
+    true,
+    '三个 op 都要显式读 username/password/known_hosts（check-tool-params 逐 op 对账）',
+  )
+})
+
+test('★ 示教器文本必须挡住换行注入（dashboard 按行解析命令）', () => {
+  const g = probe.dashboard_text_guard
+  assert.equal(g.accepts_normal, true, '正常单行文本必须放行')
+  assert.ok(g.max_chars > 0, '必须有长度上限')
+  for (const key of Object.keys(g)) {
+    if (key === 'accepts_normal' || key === 'max_chars') continue
+    assert.equal(
+      g[key],
+      true,
+      `${key} 必须被拒绝 —— 否则 'x\\nshutdown' 这类文本会被 dashboard 当成第二条命令执行`,
+    )
+  }
+})
+
+test('现场消息三个 op 必须走 dashboard 通道，并如实报"没得到应答"', () => {
+  const m = probe.messaging_ops_contract
+  assert.equal(m.all_dispatched, true, 'HANDLERS 必须挂上 popup/close/add_log')
+  assert.equal(m.popup_via_dashboard_args, true, '弹窗必须走带参 dashboard 通道')
+  assert.equal(m.close_via_dashboard, true, '关弹窗必须走 dashboard')
+  assert.equal(m.log_via_dashboard_args, true, '写日志必须走带参 dashboard 通道')
+  assert.equal(m.text_guard_applied, true, '两个吃文本的 op 都必须过注入防线')
+  assert.equal(m.honest_on_no_reply, true, '拿不到控制器应答时报 NOT_EXECUTED，不假装成功')
+})

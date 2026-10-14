@@ -1339,6 +1339,184 @@ def op_list_programs(p):
 
 
 # ---------------------------------------------------------------------------
+# 程序文件传输（SFTP）：上传 / 下载 / 删除
+#
+# ⚠️ **本地路径的安全边界不在这一层**：`worker` 拿不到 `programDir` 配置，而"把本机任意文件
+# 传到机器人上 / 把机器人文件写到本机任意路径"正是要防的事。所以本地路径由**宿主侧**的
+# `lib/program-files.js` 牢笼把关（realpath 后必须在 programDir 内），这里只做基本健全性检查
+# 与"做完了没"的核对。远端路径同理只做形状检查（绝对、无 ..、.urp）。
+#
+# ⚠️ 三个 op 里都**显式**读 username/password/known_hosts，没有抽成公共 helper：
+# `scripts/check-tool-params.py` 逐 op 对账"声明的参数"与"handler 真的读了哪些参数"，
+# 藏在 helper 里的读法它看不见，会直接判契约不一致。
+# ---------------------------------------------------------------------------
+
+
+def _ssh_client(ip, username, password, known_hosts):
+    """建一条 SSH 连接，供程序文件传输用。返回 `(ssh, host_key_policy)`。
+
+    与 `op_list_programs` 用**同一套**主机密钥策略（传了 `known_hosts` 就 `RejectPolicy` 严格
+    校验，否则 `auto-add` 并如实回报）；那边保持原样不动，以免碰到已经验证过的行为。
+    """
+    import paramiko
+    ssh = paramiko.SSHClient()
+    if known_hosts:
+        ssh.load_host_keys(known_hosts)
+        ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+        policy = "known-hosts:%s（严格校验主机指纹）" % known_hosts
+    else:
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        policy = "auto-add（接受任意主机密钥，无中间人防护）"
+    ssh.connect(hostname=ip, port=22, username=username, password=password, timeout=8)
+    return ssh, policy
+
+
+def op_upload_program(p):
+    """把本地的 `.urp` 上传到机器人，并**回读远端大小核对**后才报成功。"""
+    ip = str(p["ip"])
+    local = str(p["local_path"])
+    remote = str(p["remote_path"])
+    username = p.get("username", "root")
+    password = p.get("password", "easybot")
+    known_hosts = p.get("known_hosts")
+    if known_hosts is not None:
+        known_hosts = str(known_hosts)
+        if not os.path.isfile(known_hosts):
+            return err("known_hosts 指向的文件不存在：%s" % known_hosts, "BADARG")
+    if not os.path.isfile(local):
+        return err("本地文件不存在：%s" % local, "BADARG")
+    local_size = os.path.getsize(local)
+
+    try:
+        ssh, policy = _ssh_client(ip, username, password, known_hosts)
+    except Exception as e:
+        return err("SSH 连接 %s:22 失败（%s）。请确认机器人已启动 SSH 服务，或检查 username/password。"
+                   % (ip, e))
+    try:
+        sftp = ssh.open_sftp()
+        try:
+            sftp.put(local, remote)
+            observed = int(sftp.stat(remote).st_size)
+        finally:
+            sftp.close()
+    except Exception as e:
+        return err("上传 %s → %s 失败：%s" % (local, remote, e), "SEND_FAILED")
+    finally:
+        ssh.close()
+
+    if observed != local_size:
+        return err("上传后远端大小 %d 字节与本地 %d 字节**不一致** ⇒ 传输不完整，"
+                   "不要在机器人上运行这个文件。" % (observed, local_size),
+                   "VERIFY_FAILED",
+                   {"ip": ip, "local_path": local, "remote_path": remote,
+                    "local_bytes": local_size, "remote_bytes": observed})
+    return ok({"message": "程序已上传到 %s（%d 字节，远端回读一致）。" % (remote, observed),
+               "data": {"ip": ip, "local_path": local, "remote_path": remote,
+                        "bytes": observed, "verified": True, "host_key_policy": policy}})
+
+
+def op_download_program(p):
+    """把机器人上的 `.urp` 下载到本地，并**回读本地大小核对**。
+
+    目标文件已存在时**先备份成 `<path>.bak` 再写**，绝不静默覆盖（覆盖掉的是一个可能还有用的
+    程序文件）。备份失败就拒绝下载。
+    """
+    ip = str(p["ip"])
+    local = str(p["local_path"])
+    remote = str(p["remote_path"])
+    username = p.get("username", "root")
+    password = p.get("password", "easybot")
+    known_hosts = p.get("known_hosts")
+    if known_hosts is not None:
+        known_hosts = str(known_hosts)
+        if not os.path.isfile(known_hosts):
+            return err("known_hosts 指向的文件不存在：%s" % known_hosts, "BADARG")
+
+    backed_up = False
+    if os.path.exists(local):
+        try:
+            os.replace(local, local + ".bak")
+            backed_up = True
+        except Exception as e:
+            return err("目标文件已存在且无法备份为 %s.bak（%s）⇒ 拒绝下载以免覆盖丢数据。"
+                       % (local, e), "BADARG")
+
+    try:
+        ssh, policy = _ssh_client(ip, username, password, known_hosts)
+    except Exception as e:
+        return err("SSH 连接 %s:22 失败（%s）。请确认机器人已启动 SSH 服务，或检查 username/password。"
+                   % (ip, e))
+    try:
+        sftp = ssh.open_sftp()
+        try:
+            remote_size = int(sftp.stat(remote).st_size)
+            sftp.get(remote, local)
+        finally:
+            sftp.close()
+    except Exception as e:
+        return err("下载 %s → %s 失败：%s" % (remote, local, e), "SEND_FAILED")
+    finally:
+        ssh.close()
+
+    local_size = os.path.getsize(local) if os.path.exists(local) else -1
+    if local_size != remote_size:
+        return err("下载后本地大小 %d 字节与远端 %d 字节**不一致** ⇒ 传输不完整。"
+                   % (local_size, remote_size), "VERIFY_FAILED",
+                   {"ip": ip, "local_path": local, "remote_path": remote,
+                    "local_bytes": local_size, "remote_bytes": remote_size})
+    return ok({"message": "程序已下载到 %s（%d 字节，本地回读一致）%s"
+               % (local, local_size, "；原有同名文件已备份为 .bak" if backed_up else ""),
+               "data": {"ip": ip, "local_path": local, "remote_path": remote,
+                        "bytes": local_size, "verified": True, "backed_up": backed_up,
+                        "host_key_policy": policy}})
+
+
+def op_delete_program(p):
+    """删除机器人上的一个 `.urp`：**先确认存在、删除后再确认真的没了**。"""
+    ip = str(p["ip"])
+    remote = str(p["remote_path"])
+    username = p.get("username", "root")
+    password = p.get("password", "easybot")
+    known_hosts = p.get("known_hosts")
+    if known_hosts is not None:
+        known_hosts = str(known_hosts)
+        if not os.path.isfile(known_hosts):
+            return err("known_hosts 指向的文件不存在：%s" % known_hosts, "BADARG")
+
+    try:
+        ssh, policy = _ssh_client(ip, username, password, known_hosts)
+    except Exception as e:
+        return err("SSH 连接 %s:22 失败（%s）。请确认机器人已启动 SSH 服务，或检查 username/password。"
+                   % (ip, e))
+    try:
+        sftp = ssh.open_sftp()
+        try:
+            try:
+                sftp.stat(remote)
+            except IOError:
+                return err("远端文件不存在，未做任何删除：%s" % remote, "BADARG")
+            sftp.remove(remote)
+            try:
+                sftp.stat(remote)
+                still_there = True
+            except IOError:
+                still_there = False
+        finally:
+            sftp.close()
+    except Exception as e:
+        return err("删除 %s 失败：%s" % (remote, e), "SEND_FAILED")
+    finally:
+        ssh.close()
+
+    if still_there:
+        return err("删除后仍能 stat 到 %s ⇒ 没有真正删除，不要以为它没了。" % remote,
+                   "VERIFY_FAILED", {"ip": ip, "remote_path": remote})
+    return ok({"message": "已删除机器人上的 %s（删除后 stat 已确认不存在）。" % remote,
+               "data": {"ip": ip, "remote_path": remote, "verified": True,
+                        "host_key_policy": policy}})
+
+
+# ---------------------------------------------------------------------------
 # send_script 执行校验（哨兵寄存器）
 # ---------------------------------------------------------------------------
 
@@ -1362,6 +1540,14 @@ CONVEYOR_SENTINEL_REGISTER = 20
 CONVEYOR_PAYLOAD_REGISTER = 0
 # 脚本类运动（draw_* 等）"到底有没有被执行"的探测窗：足够短到能立刻给出结论。
 SCRIPT_START_CHECK_TIMEOUT_S = 1.5
+# `ur_check_pose` 的寄存器布局。刻意避开既有占用：int 23=send_script 默认哨兵、20=传送带哨兵、
+# 21=freedrive 状态、22=工具模拟输入回读；double 0=传送带载荷、22=工具模拟输入回读。
+CHECK_POSE_LIMITS_REGISTER = 19
+CHECK_POSE_IK_REGISTERS = (12, 13, 14, 15, 16, 17)
+CHECK_POSE_TIMEOUT_S = 2.0
+# `set_speed_slider` 之后回读 `target_speed_fraction` 的窗口与容差。
+SPEED_READBACK_TIMEOUT_S = 2.0
+SPEED_READBACK_TOLERANCE = 0.01
 
 
 def _read_int_register(model, index):
@@ -3358,6 +3544,255 @@ def op_get_speed_scaling(p):
                "data": {"speed_scaling": actual, "target_speed_fraction": target, "ip": ip}})
 
 
+def _pose6(value, name):
+    """校验 6 维数值（位姿或关节角）。不合法抛 `ValueError` —— main() 会把它映射成 BADARG。"""
+    if not isinstance(value, (list, tuple)) or len(value) != 6:
+        raise ValueError("%s 必须是 6 个数组成的数组（位姿 [x,y,z,rx,ry,rz] 或 6 个关节角）" % name)
+    numbers = []
+    for item in value:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            raise ValueError("%s 里有非数值元素：%r" % (name, item))
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ValueError("%s 里有非有限数：%r" % (name, item))
+        numbers.append(number)
+    return numbers
+
+
+def op_check_pose(p):
+    """**动之前先问**：这个位姿在安全限值内吗？逆运动学解得出吗？
+
+    为什么值得单独一个工具：模型很容易给出"看起来合理但够不到"的位姿（超出臂展、超出关节限位、
+    或落在控制器配置的安全限值之外）。此前唯一的反馈来自"指令下发之后控制器报错"—— 而运动指令
+    是**会真的动**的。事前问一句的成本，远低于事后撞一次。
+
+    实现走"发 URScript → 写输出寄存器 → 首尾哨兵回读"。**不能**用 `urScript.py` 的
+    `get_inverse_kin` 访问器：那些访问器依赖 RTDE **输入**字段，而本插件刻意没有 send 配方
+    （见 `rtdeConfiguration.xml` 的说明），它们在这里根本不可用。写 double 寄存器用的是仓库里
+    已被传送带路径验证过的 `write_output_float_register`。
+
+    三种结局如实分开（与 `op_get_conveyor` 同一套判据）：
+      - 回读到**结束**哨兵 ⇒ 两个答案都有；
+      - 只回读到**起始**哨兵、而限值寄存器已被写 ⇒ 控制器在执行 `get_inverse_kin` 时抛了
+        （通常就是不可达/超关节限位）⇒ `reachable = False`（这条推论的依据写在返回值里）；
+      - **连起始哨兵都没有** ⇒ 控制器根本没执行（本地/示教器模式会静默丢弃 URScript，或该固件
+        没有 `is_within_safety_limits`）⇒ 按 NOT_EXECUTED 报错，两个答案都不给，绝不猜。
+    """
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    pose = _pose6(p.get("pose"), "pose")
+    qnear = None if p.get("qnear") is None else _pose6(p.get("qnear"), "qnear")
+
+    index = DEFAULT_SENTINEL_REGISTER
+    # 第一步：通道探测。只有这一步成功，后面"脚本没执行"才能归因到脚本本身。
+    probe_token = _sentinel_token(_read_int_register(model, index))
+    probe = ("def dsh_check_pose_probe():\n"
+             "  write_output_integer_register(%d, %d)\n"
+             "end\ndsh_check_pose_probe()\n" % (index, probe_token))
+    if not _send_program(robot, probe):
+        return err("位姿预检的通道探测脚本未能送达控制器：%s" % _last_send_failure(robot),
+                   "SEND_FAILED", {"ip": ip})
+    deadline = time.time() + CHECK_POSE_TIMEOUT_S
+    while time.time() < deadline:
+        if _read_int_register(model, index) == probe_token:
+            break
+        time.sleep(0.1)
+    else:
+        return err("控制器没有执行探测脚本（output_int_register_%d 上一直看不到哨兵值 %d）⇒ "
+                   "它可能未处于远程控制模式（本地/示教器模式下 URScript 会被静默丢弃），"
+                   "或该固件不支持 is_within_safety_limits。此时**无法**给出可达性结论，"
+                   "也不会拿寄存器里的陈旧值冒充它。" % (index, probe_token),
+                   "NOT_EXECUTED", {"register": index, "token": probe_token, "ip": ip})
+
+    # 第二步：限值 + IK + 首尾哨兵。三个 token 互不相同是这套判定成立的前提。
+    start_token = _sentinel_token(probe_token)
+    finish_token = _sentinel_token(start_token, probe_token)
+    pose_literal = "p[%s]" % ", ".join("%.10g" % x for x in pose)
+    qnear_arg = "" if qnear is None else ", [%s]" % ", ".join("%.10g" % x for x in qnear)
+    ik_writes = "\n".join(
+        "  write_output_float_register(%d, q_sol[%d])" % (register, axis)
+        for axis, register in enumerate(CHECK_POSE_IK_REGISTERS)
+    )
+    script = ("def dsh_check_pose():\n"
+              "  write_output_integer_register(%d, %d)\n"
+              "  local p_target = %s\n"
+              "  write_output_integer_register(%d, is_within_safety_limits(p_target))\n"
+              "  local q_sol = get_inverse_kin(p_target%s)\n"
+              "%s\n"
+              "  write_output_integer_register(%d, %d)\n"
+              "end\ndsh_check_pose()\n"
+              % (index, start_token, pose_literal, CHECK_POSE_LIMITS_REGISTER, qnear_arg,
+                 ik_writes, index, finish_token))
+    if not _send_program(robot, script):
+        return err("位姿预检脚本未能送达控制器：%s" % _last_send_failure(robot),
+                   "SEND_FAILED", {"ip": ip})
+
+    deadline = time.time() + CHECK_POSE_TIMEOUT_S
+    observed = probe_token
+    while time.time() < deadline:
+        observed = _read_int_register(model, index)
+        if observed == finish_token:
+            break
+        time.sleep(0.05)
+
+    limits_raw = _read_int_register(model, CHECK_POSE_LIMITS_REGISTER)
+    within = None if limits_raw is None else bool(limits_raw)
+    solved = [_read_double_register(model, register) for register in CHECK_POSE_IK_REGISTERS]
+    ik_solution = solved if all(value is not None for value in solved) else None
+
+    if observed == finish_token:
+        return ok({
+            "message": ("位姿预检完成：在安全限值内 = %s；逆运动学%s。"
+                        % (within, "可解" if ik_solution is not None else "**解不出**（位姿不可达或超出关节限位）")),
+            "data": {"ip": ip, "within_safety_limits": within, "reachable": ik_solution is not None,
+                     "joint_solution": ik_solution, "pose": pose,
+                     "registers": {"sentinel": index, "limits": CHECK_POSE_LIMITS_REGISTER,
+                                   "ik": list(CHECK_POSE_IK_REGISTERS)}},
+        })
+
+    if observed == start_token and limits_raw is not None:
+        # 起始哨兵在、结束哨兵不在 ⇒ 脚本在 `get_inverse_kin` 那一句中止了。
+        return ok({
+            "message": ("位姿预检：在安全限值内 = %s；但**逆运动学解不出**（控制器在执行 "
+                        "get_inverse_kin 时中止，脚本没能跑到结束哨兵）⇒ 该位姿通常不可达或超出关节限位。"
+                        % within),
+            "data": {"ip": ip, "within_safety_limits": within, "reachable": False,
+                     "joint_solution": None, "pose": pose,
+                     "note": "依据：起始哨兵已回读（脚本确实在控制器上跑过）而结束哨兵缺失，"
+                             "且限值寄存器已被写 —— 脚本正是在其后的 get_inverse_kin 处停止的。",
+                     "registers": {"sentinel": index, "limits": CHECK_POSE_LIMITS_REGISTER,
+                                   "ik": list(CHECK_POSE_IK_REGISTERS)}},
+        })
+
+    return err("位姿预检脚本已送出，但在 %.1fs 内既没看到结束哨兵也没看到起始哨兵（寄存器仍是 %s）"
+               "⇒ 无法判定可达性。请确认控制器处于远程控制模式后重试。"
+               % (CHECK_POSE_TIMEOUT_S, observed),
+               "NOT_EXECUTED", {"register": index, "observed": observed,
+                                "start": start_token, "finish": finish_token, "ip": ip})
+
+
+def op_set_speed_scaling(p):
+    """设置**速度倍率（速度滑块）**：URScript `set_speed_slider(f)`。
+
+    为什么值得有：这是最贴合直觉的"安全旋钮" —— 交出一段精细动作之前把整体速度压下来，
+    比逐条去改每条运动的 a/v 可靠得多。
+
+    ⚠️ 与那 12 个"没有回读通道"的设置类 op 不同，这一个**有**回读通道：接收配方里的
+    `target_speed_fraction` 就是速度滑块的目标值。所以这里**不**套 `ok_unverified()`，而是
+    设置后回读校验：一致才报 `verified: true`；不一致就如实说"未核实"，绝不假装已生效。
+    ⚠️ "set_speed_slider ⇒ target_speed_fraction" 这条映射**未经真机验证**（与
+    `set_conveyor_tracking` 同级别的诚实标注），因此一并回报 `hardware_verified: false`。
+    """
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    try:
+        fraction = float(p.get("fraction"))
+    except (TypeError, ValueError):
+        raise ValueError("fraction 必须是 0.0-1.0 的数（0 = 停住，1 = 满速）")
+    if not (0.0 <= fraction <= 1.0):
+        raise ValueError("fraction 必须在 [0.0, 1.0] 之间，实得 %r" % (p.get("fraction"),))
+
+    before = _rtde_field(model, "target_speed_fraction")
+    if not _realtime_send(robot, "set_speed_slider(%.10g)\n" % fraction):
+        return err("set_speed_slider 未能送出：%s" % _last_send_failure(robot),
+                   "SEND_FAILED", {"ip": ip})
+
+    deadline = time.time() + SPEED_READBACK_TIMEOUT_S
+    observed = None
+    while True:
+        observed = _rtde_field(model, "target_speed_fraction")
+        matched = observed is not None and abs(float(observed) - fraction) <= SPEED_READBACK_TOLERANCE
+        if matched or time.time() >= deadline:
+            break
+        time.sleep(0.05)
+    matched = observed is not None and abs(float(observed) - fraction) <= SPEED_READBACK_TOLERANCE
+
+    if matched:
+        message = ("速度倍率已设为 %.3f（回读 target_speed_fraction = %.3f，**已核实**）。"
+                   "⚠️ 该映射未经真机验证。" % (fraction, float(observed)))
+    else:
+        message = ("已下发 set_speed_slider(%.3f)，但 %.1fs 内回读的 target_speed_fraction 是 %s"
+                   "（与请求值不一致）⇒ **未核实**：可能被正在运行的程序覆盖、被速度滑块限制策略"
+                   "接管，或该固件不支持。不要把它当作已生效。"
+                   % (fraction, SPEED_READBACK_TIMEOUT_S,
+                      "不可用" if observed is None else ("%.3f" % float(observed))))
+    return ok({"message": message,
+               "data": {"ip": ip, "requested": fraction,
+                        "target_speed_fraction_before": None if before is None else float(before),
+                        "target_speed_fraction": None if observed is None else float(observed),
+                        "verified": matched, "hardware_verified": False}})
+
+
+# 示教器文本（弹窗 / 日志）的长度上限：那是给人看一眼的提示，不是放长文的地方。
+DASHBOARD_TEXT_MAX_CHARS = 300
+
+
+def _dashboard_text(value, name):
+    """校验要送进 dashboard **命令行**的文本。
+
+    ⚠️ 这是注入防线。dashboard 的命令是**按行**解析的（`dashboard.py` 直接
+    `'popup ' + popupText + '\\n'`），因此文本里一旦有换行，后半截会被当成**另一条 dashboard
+    命令**执行 —— `"x\\nshutdown"` 就是一次关机注入。所以这里**拒绝**，而不是悄悄替换成空格：
+    调用方应当知道自己的文本被拦下了。
+    """
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError("%s 必须是非空字符串" % name)
+    if len(value) > DASHBOARD_TEXT_MAX_CHARS:
+        raise ValueError("%s 超过 %d 字符上限（示教器弹窗/日志不是用来看长文的）"
+                         % (name, DASHBOARD_TEXT_MAX_CHARS))
+    for bad, why in (("\n", "换行"), ("\r", "回车")):
+        if bad in value:
+            raise ValueError(
+                "%s 里不得含%s —— dashboard 按行解析命令，换行会注入额外的 dashboard 命令"
+                "（例如在弹窗/日志之后再跟一句 shutdown）" % (name, why))
+    return value
+
+
+def op_popup_message(p):
+    """在示教器上弹一条消息（dashboard `popup <text>`）。
+
+    人机协作里最缺的一环：让机器人"开口"告诉现场下一步要做什么（"请取下工件"、
+    "即将移动到维护位"）。⚠️ 这是**模态**提示框，要现场有人点掉；它不会让机械臂运动，
+    因此**不受运动审批门禁**。同一时刻面板上只显示一个弹窗，要换内容先 `ur_close_popup`。
+    """
+    ip = str(p["ip"])
+    text = _dashboard_text(p.get("text"), "text")
+    ok_flag, resp = _dashboard_cmd_args(ip, "ur_popup", text)
+    if not ok_flag:
+        return err("示教器弹窗命令没有得到控制器应答（%s）。可能是 dashboard 服务未启用，"
+                   "或该固件不支持这条命令。" % (resp or "无应答"), "NOT_EXECUTED", {"ip": ip})
+    return ok({"message": "已在示教器上弹出消息（控制器应答：%s）。⚠️ 这是模态提示框，需要现场点掉。"
+               % resp, "data": {"ip": ip, "text": text, "respond": resp}})
+
+
+def op_close_popup(p):
+    """关闭示教器上的弹窗（dashboard `close popup`）。"""
+    ip = str(p["ip"])
+    ok_flag, resp = _dashboard_cmd(ip, "ur_close_popup")
+    if not ok_flag:
+        return err("关闭弹窗没有得到控制器应答（%s）。可能当前压根没有弹窗，或 dashboard 服务不可用。"
+                   % (resp or "无应答"), "NOT_EXECUTED", {"ip": ip})
+    return ok({"message": "已请求关闭示教器弹窗（控制器应答：%s）。" % resp,
+               "data": {"ip": ip, "respond": resp}})
+
+
+def op_add_log(p):
+    """往机器人的**日志历史**里写一条消息（dashboard `addToLog <text>`）。
+
+    ⚠️ 它会**留在控制器的日志里**（操作员在示教器的日志页能看到）—— 这正是它有用的地方：
+    出了问题能把"当时是谁让它做了什么"对上。所以**不要**把密钥、口令之类不该留痕的东西写进去。
+    """
+    ip = str(p["ip"])
+    text = _dashboard_text(p.get("text"), "text")
+    ok_flag, resp = _dashboard_cmd_args(ip, "ur_addToLog", text)
+    if not ok_flag:
+        return err("写日志命令没有得到控制器应答（%s）。可能是 dashboard 服务未启用，"
+                   "或该固件不支持这条命令。" % (resp or "无应答"), "NOT_EXECUTED", {"ip": ip})
+    return ok({"message": "已把消息写进机器人日志（控制器应答：%s）。⚠️ 这条消息会留在控制器日志里。"
+               % resp, "data": {"ip": ip, "text": text, "respond": resp}})
+
+
 def op_set_gravity(p):
     """设置重力方向向量的方向（单位向量），用于非水平安装。
 
@@ -3629,7 +4064,15 @@ HANDLERS = {
     "get_int_register": op_get_int_register,
     "get_double_register": op_get_double_register,
     "get_bit_register": op_get_bit_register,
+    "check_pose": op_check_pose,
+    "set_speed_scaling": op_set_speed_scaling,
     "list_programs": op_list_programs,
+    "upload_program": op_upload_program,
+    "download_program": op_download_program,
+    "delete_program": op_delete_program,
+    "popup_message": op_popup_message,
+    "close_popup": op_close_popup,
+    "add_log": op_add_log,
     "send_script": op_send_script,
     "movej": op_movej,
     "movel": op_movel,

@@ -6,7 +6,7 @@
 
 > ⚠️ **安全提示**：本插件会直接驱动真实机械臂。使用时务必保证机器人可见、急停按钮触手可及、工作区无障碍物与人员。请把它当作授予模型 `bash` 工具一样慎重对待。你（或模型）对任何运动指令负全责。
 
-> 🛡️ **运动审批门禁**：**40** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**的指令，在真正下发前会**暂停等待人工确认**：
+> 🛡️ **运动审批门禁**：**43** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**，以及**改写/删除机器人上已存程序**的指令，在真正下发前会**暂停等待人工确认**：
 >
 > | 分组 | 工具 |
 > |---|---|
@@ -15,24 +15,30 @@
 > | 程序与脚本 | `ur_load_program` `ur_run_program` `ur_send_script` `ur_reset_error` |
 > | 控制模式 / 电源 / 安全 | `ur_set_freedrive` `ur_set_teach_mode` `ur_power_on` `ur_power_off` `ur_brake_release` `ur_unlock_protective_stop` `ur_shutdown` |
 > | 力控与速度 | `ur_force_mode` `ur_end_force_mode` `ur_force_mode_settings` `ur_speedj` `ur_speedl` `ur_stopj` `ur_stopl` |
-> | 物理状态变更 | `ur_set_payload` `ur_set_payload_inertia` `ur_set_gravity` `ur_zero_ftsensor` `ur_motion_version` `ur_set_conveyor_tracking` |
+> | 程序存储 | `ur_upload_program` `ur_delete_program` |
+> | 物理状态变更 | `ur_set_payload` `ur_set_payload_inertia` `ur_set_gravity` `ur_zero_ftsensor` `ur_motion_version` `ur_set_speed_scaling` `ur_set_conveyor_tracking` |
 >
 > 交互式部署（审批策略为 `ask`）会在界面上弹出确认框。未组合审批服务、无代理、或应答不是 `allowed-once` 的调用都会**以拒绝方式安全关闭**（fail-closed）—— 指令被拒绝，绝不会到达机器人。默认值写在**代码**里（`config.requireApprovalForMotion ?? true`），因此"调用方跳过 schema 解析"也不会把门禁关掉；可用配置 `requireApprovalForMotion: false` 显式关闭。`test/approval-gate.test.mjs` 驱动真实工具注册表逐条验证上述行为，包括"多传一个 `op` 参数无法把调用改派到别的指令"。
+
+> 🧭 **预飞安全闸**：在审批门禁之外，再加一层"**单条指令最多能要求多少**"的物理上限。上限项：`safetyMaxStepM`（0.5 m，轴位移）、`safetyMaxLinearSpeed`（0.5 m/s）、`safetyMaxJointSpeed`（1.05 rad/s）、`safetyMaxDurationS`（60 s）、力控的 `safetyMaxForceN` / `safetyMaxTorqueNm`（40 N / 10 N·m），以及可选的 `safetyWorkspace` 包围盒（`"x:-1,1 y:-1,1 z:0,1.2"`，只针对显式笛卡尔目标）。它在**审批之前**判定 —— 一个物理上不可能的请求不该拿去打扰人 —— 并且与审批**解耦**：`requireApprovalForMotion: false` 只关掉人工确认，绝不会顺手关掉这些物理上限（那需要显式设 `safetyGate: false`）。`safetyWorkspace` 写错时 **fail closed**（拒绝一切运动指令），而不是被静默忽略。它是"防手滑 / 防单位写错"的一层，**不是**安全边界（安全边界仍是控制器自己的安全配置）；也刻意不覆盖 `ur_send_script` —— 那是任意 URScript 文本，本闸不解析脚本。
+>
+> 📝 **动作审计账本**：每条受门禁的指令都会追加一行 NDJSON（默认 `<DSH_HOME>/nonead-ur/audit.ndjson`；`auditLogPath` 换位置、`auditLog: false` 关掉、`auditLogAll: true` 连不受门禁的读取也记），字段为 `{ts, ip, op, tool_name, args, decision, reason}`，`decision ∈ {approved, denied, blocked, unchecked}` —— 事后能回答"模型到底对机器人做了什么"。写日志**绝不影响下发路径**：失败只回报，不抛异常。
 
 ---
 
 ## 功能一览
 
-共 **83** 个工具（`ur_*`）。
+共 **91** 个工具（`ur_*`）。
 
 | 类别 | 工具（`ur_*`） | 说明 |
 |---|---|---|
 | 连接 | `ur_connect` / `ur_disconnect` | 按 IP 连接 / 断开一台 UR 机器人 |
 | 状态 | `ur_get_status` | 一次性读取 TCP、关节、型号、序列号、版本、安全模式、运行/程序状态、电压、电流、温度、开机时长、关节电流/电压/角速度、TCP 速度与受力、速度倍率，以及 `rtde_resync_bytes`（RTDE 接收端为重新同步而丢弃的字节数；`0` 表示链路干净） |
 | 位姿 | `ur_get_tcp_pose` / `ur_get_joint_pose` | 读取当前 TCP 位置 / 关节角度 |
-| 目标值 | `ur_get_target_values` | 读取「**控制器打算去哪**」：目标关节角/角速度/角加速度、目标 TCP 位姿与速度（外加实际值便于对比）。来自 RTDE 的 `target_*` 字段，读取零代价 —— 这是判断「指令已下发但还没执行 / 正在交融 / 被安全限速拉住」的直接依据 |
+| 目标值 | `ur_get_target_values` / `ur_check_pose` | 读取「**控制器打算去哪**」：目标关节角/角速度/角加速度、目标 TCP 位姿与速度（外加实际值便于对比）。来自 RTDE 的 `target_*` 字段，读取零代价 —— 这是判断「指令已下发但还没执行 / 正在交融 / 被安全限速拉住」的直接依据。`ur_check_pose` 回答的是**动之前**值得先问的问题：这个 TCP 位姿在控制器的**安全限值**内吗？**逆运动学**解得出吗（即可达吗）？它是只读预检：由控制器执行 `is_within_safety_limits` + `get_inverse_kin`，结果经输出寄存器在首尾哨兵之间回读，所以"控制器根本没执行"会被如实报出来，而不是靠猜 |
 | 设备信息 | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_safety_status` / `ur_get_robot_mode` | 型号（含 `remote_control` 字段）/ 序列号 / 开机时长 / 软件版本 / 安全模式 / **安全与机器人状态位**（哪一类安全功能被触发，含 violation / fault；**限值数值本身**不经 RTDE/dashboard 暴露，需去 PolyScope 安全页读）/ 运行状态 |
-| 程序 | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` | 程序状态、加载、运行、停止、暂停、SSH 列表。`ur_list_programs` 扫描真机 `/programs` 或 URSim 的 `~/URSim_Linux-*/programs.*` 布局（可用 `programs_dir` 覆盖）；不传口令时会回报 `used_default_password`，并给出当前生效的 `host_key_policy`，可选 `known_hosts` 文件会让 SSH 切到 **`RejectPolicy` 严格校验主机指纹**（文件不存在直接报错，绝不静默退回）。运行/停止/暂停都会检查控制器应答并回带运行状态 |
+| 程序 | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` / `ur_upload_program` / `ur_download_program` / `ur_delete_program` | 程序状态、加载、运行、停止、暂停、SSH 列表，以及**程序文件的 SFTP 传输**。三个传输工具都**核对"到底做成了没有"**，而不是"请求已发出"：上传回读远端大小、下载回读本地大小、删除后确认文件真的不在了；下载**绝不静默覆盖**（目标已存在时先改名成 `<path>.bak`，备份失败就拒绝下载）。它们的本地路径被锁在 `programDir` 内 —— 见下文「本地文件访问」。`ur_list_programs` 扫描真机 `/programs` 或 URSim 的 `~/URSim_Linux-*/programs.*` 布局（可用 `programs_dir` 覆盖）；不传口令时会回报 `used_default_password`，并给出当前生效的 `host_key_policy`，可选 `known_hosts` 文件会让 SSH 切到 **`RejectPolicy` 严格校验主机指纹**（文件不存在直接报错，绝不静默退回）。运行/停止/暂停都会检查控制器应答并回带运行状态 |
+| 现场消息 | `ur_popup` / `ur_close_popup` / `ur_add_log` | 跟站在机器人旁边的人说话：在示教器上弹一个**模态**提示、关掉它、往**控制器自己的日志历史**里写一行。三者都不会让机械臂运动，因此都不在审批门禁后面；文本有注入校验（dashboard 按行解析命令，换行会注入另一条命令），长度上限 300 字符。注意 `ur_add_log` 会在控制器上**留下永久痕迹** —— 这正是它的用途，所以不要往里写密钥 |
 | 寄存器 | `ur_get_int_register` / `ur_get_double_register` / `ur_get_bit_register` | 读取 Int / Double / Bool 寄存器 |
 | 健康检查 | `ur_ping` | 无需连接机器人，检测 worker / Python / URBasic 就绪 |
 | I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` / `ur_get_tool_analog_in` | 数字输入/输出（含批量读位、`which="tool"` 的工具端 I/O）与标准模拟输入/输出（**按工程单位收值**：URScript 的 `set_analog_out` 收的是相对电平 [0,1]；电流域端口可用 `full_scale: 20`）。读工具端数字输入是**哨兵校验**的：控制器若始终没回报脚本执行完毕，工具会拒绝给值，而不是报一个无法担保的数字 |
@@ -43,7 +49,7 @@
 | 实时遥测 | `ur_get_runtime_telemetry` / `ur_get_robot_voltage` / `ur_get_robot_current` / `ur_get_joint_temperatures` / `ur_get_speed_scaling` / `ur_get_tcp_force` / `ur_get_tool_telemetry` | 关节电流/电压/角速度、TCP 线速度与受力/力矩、工具加速度计、速度倍率、整机电压电流、关节温度、工具电流/电压、I/O 电流。**这些字段本来就在 500 Hz 的 RTDE 数据流里**，读取零代价、无需改配置。单点读取（整机电压/电流、关节温度）与一次性汇总（`ur_get_runtime_telemetry`）并存：轮询某一项时用单点，诊断时用汇总 |
 | 传送带 | `ur_get_conveyor` / `ur_set_conveyor_tick` / `ur_set_conveyor_tracking` | 传送带 tick 读取 / 设置，以及**线性或圆盘跟踪的开启与停止**。`ur_get_conveyor` 对它依赖的那段脚本自证：只有观察到控制器把脚本执行完毕才给出 tick。⚠️ `ur_set_conveyor_tracking` **未经真机验证** —— 签名与量纲逐条对照官方手册，但跟踪行为需要真带编码器的传送带才能确认，请先在 URSim 上试 |
 | 运动 | `ur_movej` / `ur_movel` / `ur_movep` / `ur_movec` / `ur_servoj` / `ur_move_optimized` / `ur_move_x` / `ur_move_y` / `ur_move_z` / `ur_move_tool_x` / `ur_move_tool_y` / `ur_move_tool_z` | 关节空间 / 直线 / 路径 / **圆弧**（`mode` 0 插补姿态、1 固定姿态）/ 连续流 / **OptiMove 平滑运动**（`optimovej`/`optimovel`，jerk 受限、振动更小；⚠️ 它的 `a`/`v` 是**能力比例** (0,1] 而非 rad/s 或 m/s）/ 沿轴直线运动：`_move_*` 沿**基座**轴、`_move_tool_*` 沿**当前工具**轴（worker 侧用旋转矩阵换算，不依赖 URScript 的 `pose_trans`）。默认值取手册值（`movej` 1.4 / 1.05，`movel` 1.2 / 0.25）；给了 `t > 0` 时时长优先于 `a`/`v` |
-| 运动规划 | `ur_motion_version` / `ur_get_freedrive_status` | 设置 **Motion Version**（手册第 14 章）与 **jerk 增益**（0.01–1.0，只作用于 jerk 受限的剖面：版本 2 的 movej/movel 与 optimovej/optimovel）。版本 2 规划时把速度/加速度**钳到硬件上限**、交融半径重叠时**动态收缩**，而不是像版本 1 那样跳过整段运动并给 "Overlapping Blends" 警告。⚠️ 新机型与 PolyScope X **只支持版本 2**；CB3 没有这个设置。⚠️ 这两个设置**没有回读通道**。`ur_get_freedrive_status` 读取当前姿态在 freedrive 下离**奇异点**的距离（0 正常 / 1 接近 / 2 太接近 —— **不是** freedrive 的开关状态），据此提示操作员换路径 |
+| 运动规划 | `ur_motion_version` / `ur_set_speed_scaling` / `ur_get_freedrive_status` | 设置 **Motion Version**（手册第 14 章）与 **jerk 增益**（0.01–1.0，只作用于 jerk 受限的剖面：版本 2 的 movej/movel 与 optimovej/optimovel）。版本 2 规划时把速度/加速度**钳到硬件上限**、交融半径重叠时**动态收缩**，而不是像版本 1 那样跳过整段运动并给 "Overlapping Blends" 警告。⚠️ 新机型与 PolyScope X **只支持版本 2**；CB3 没有这个设置。⚠️ 这两个设置**没有回读通道**。`ur_set_speed_scaling` 设置**速度滑块**（`set_speed_slider`：0 = 停住 / 1 = 满速）—— 交出精细动作前把整体速度压下来，最直接可靠。与其它设置类 op 不同，它**有**回读通道（`target_speed_fraction`）：只有回读一致才报 `verified: true`；又因为该映射从未在真机上确认过，会同时回报 `hardware_verified: false`。`ur_get_freedrive_status` 读取当前姿态在 freedrive 下离**奇异点**的距离（0 正常 / 1 接近 / 2 太接近 —— **不是** freedrive 的开关状态），据此提示操作员换路径 |
 | 绘图 | `ur_draw_circle` / `ur_draw_square` / `ur_draw_rectangle` / `ur_draw_star` | 画圆 / 正方形 / 长方形 / 五角星。只有**观察到脚本真的在运行**之后才回报「执行完成」 |
 | 脚本 / 紧急 | `ur_send_script` / `ur_reset_error` | 发送 URScript（**校验执行**：哨兵注入到函数体内部/顶层语句之间并回读，「已发送」不再冒充「已执行」；含多个函数且看不出调用哪个时拒绝校验并给 `verified: null`）/ 复位错误 |
 
@@ -238,8 +244,10 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 - **连接持久性**：worker 进程在插件生命周期内常驻，机器人连接按 IP 保留；worker 崩溃或 DSH 重启后需重新 `connect`。
 - **远程控制模式**：部分 UR 机器人需处于「远程控制」才能执行运动/程序指令，`ur_connect` 会报告该状态。**URSoftware 3.1–3.20 之间的 CB3 机器人默认就允许远程控制**；但 `remote_control: false` 仍说明控制器**当前**不在远程模式 —— 本地/示教模式下 URScript 与运动指令会被静默丢弃，需在示教器上切到远程控制。其他固件（e-Series，或不在该区间的 CB3）则需先在 PolyScope 中开启 Remote Control。状态读不到时按"未知"处理，而不是假装是 `false`。
 - **读不到就不假装读到**：没有回读通道的设置型指令只回报 `verified: false`；控制器拒绝 RTDE 会话时报"未运行"而不是"已连接"；孪生某一帧刷新不出来会标 `stale`。
+- **本地文件访问**：`ur_upload_program` 会**读**本地文件、`ur_download_program` 会**写**本地文件，因此两者都被锁在 `programDir`（默认 `<DSH_HOME>/nonead-ur/programs`，可用 `programDir` 配置改）内。路径必须在该目录内 —— 判据是 `realpath` **之后**的结果，所以软链也带不出去；只传输 `.urp`；`maxProgramBytes`（1 MiB）限大小。**未配置或目录不存在的 `programDir` 一律 fail closed**：不读也不写任何本地文件。这与"把 shell 交给模型"是同一类暴露面，所以这里是设围栏，而不是靠信任。
+- **程序传输不是"发出去就算完"**：上传与下载都比对另一侧的字节数，删除会在删完之后再 `stat` 一次。不一致就报失败（`VERIFY_FAILED`），绝不报成功 —— 因为调用方的下一步很可能就是去运行那个程序。
 - **工具端数字 I/O**：`ur_get_digital_in` / `ur_set_digital_out` 的 `which="tool"` 用于工具端（法兰侧）数字 I/O。工具端数字信号**不经 RTDE**，因此读取工具输入会发送一段短的 URScript 程序，**可能打断正在运行的程序**。**工具端数字输出的读回不支持**（没有可靠的 `read_tool_digital_out` 表达式）。
-- **关节电流**：当前 RTDE 配方未直接暴露单关节电流，故未提供 `ur_get_joint_current`。
+- **关节电流**：接收配方里本来就有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的** `ur_get_joint_current` 工具，而不是这个值本身。
 - **线程/取消**：运动指令为阻塞到位的轮询，`commandTimeoutMs` 内完成；对长时间轨迹，请在描述中提醒模型设置合理超时或分步执行。
 - **非安全边界**：此插件与 bash 工具同级，可驱动物理设备，务必在真实机器人上充分测试后再用于生产。
 - **未知型号回退**：若某机器人没有内置网格（未知或定制型号字符串），会**回退到近似几何体渲染而不报错**，数字孪生不会因未知型号失败。

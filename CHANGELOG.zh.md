@@ -2,6 +2,38 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增 — 预飞安全闸（`lib/safety-gate.js`）
+
+与审批门禁**独立**的第二层：限制"**单条指令最多能要求多少**"，让"人点了头"永远不等于"什么都可以"。上限项：`safetyMaxStepM`（0.5 m）、`safetyMaxLinearSpeed`（0.5 m/s）、`safetyMaxJointSpeed`（1.05 rad/s）、`safetyMaxDurationS`（60 s）、力控的 `safetyMaxForceN` / `safetyMaxTorqueNm`（40 N / 10 N·m），以及针对显式笛卡尔目标的可选包围盒 `safetyWorkspace`。它在**审批之前**判定，与 `requireApprovalForMotion` **解耦**（关掉人工确认不该顺手把物理上限一起关掉），并在 `safetyWorkspace` 写错时 **fail closed** 而不是静默不检查。刻意不覆盖 `ur_send_script`（任意 URScript，不解析）。
+
+### 新增 — 动作审计账本（`lib/audit-log.js`）
+
+每条受门禁的指令追加一行 NDJSON（默认 `<DSH_HOME>/nonead-ur/audit.ndjson`），字段 `{ts, ip, op, tool_name, args, decision, reason}`，`decision ∈ {approved, denied, blocked, unchecked}`。在此之前，审批的唯一痕迹只活在内存里 —— "模型到底对机器人做了什么"事后无从回答。写入失败只回报不抛错：审计绝不能把下发路径弄挂。
+
+### 新增 — `ur_check_pose` 与 `ur_set_speed_scaling`（工具 83 → 85，受门禁 op 40 → 41）
+
+`ur_check_pose` 回答的是**动之前**值得先问的问题：*这个 TCP 位姿在控制器的安全限值内吗？逆运动学解得出吗（可达吗）？* 由控制器执行 `is_within_safety_limits` + `get_inverse_kin`，结果经输出寄存器在首尾哨兵之间回读，因此三种结局分得开 —— 跑完（两个答案都有）、只跑到一半（限值已写、控制器在 IK 那一句中止 ⇒ `reachable: false`，且把这条推论的依据写进返回值）、控制器没执行（未处于远程控制模式 / 固件没有这些函数 ⇒ 报 `NOT_EXECUTED`，不给编造的答案）。它**不能**用 `urScript.py` 的 `get_*` 访问器：那些依赖 RTDE **输入**字段，而本插件刻意没有 send 配方。
+
+`ur_set_speed_scaling` 设置速度滑块（`set_speed_slider`，0 = 停住 / 1 = 满速）—— 交出精细动作前把整体速度压下来，最直接可靠。与其它设置类 op 不同，它**有**回读通道（`target_speed_fraction`）：只有回读一致才报 `verified: true`；又因为 "`set_speed_slider` ⇒ `target_speed_fraction`" 这条映射从未在真机上确认过，会同时回报 `hardware_verified: false`。它已加入审批门禁（它改变的是**此后所有**运动的速度）。
+
+### 新增 — 程序文件 SFTP 传输（工具 85 → 88，受门禁 op 41 → 43）
+
+部署程序不再需要走到示教器：`ur_upload_program`、`ur_download_program`、`ur_delete_program` 在 `programDir` 与机器人之间搬 `.urp`，而且每个都**核对"到底做成了没有"**，而不是"请求已发出" —— 上传回读远端大小、下载回读本地大小、删除在 `remove` 之后重新 `stat`（不一致报 `VERIFY_FAILED`，绝不报成功，因为调用方的下一步通常就是运行这个程序）。下载**绝不静默覆盖**：目标已存在时先改名成 `<path>.bak`，备份失败就拒绝下载。
+
+本地这一半必须设围栏（`lib/program-files.js`）：上传会**读**本地文件、下载会**写**本地文件，没有围栏时模型就能把本机任意文件（私钥、凭据）送到机器人上，或把机器人文件写到本机任意路径 —— 而 `sanitizeArgs` 只挡参数**键**、不挡**取值**。本地路径必须 `realpath` 之后落在 `programDir` 内，因此 `..` 与指向目录外的软链都被拒绝；只处理 `.urp`；`maxProgramBytes` 限大小；`programDir` 缺失则 fail closed。`upload_program` 与 `delete_program` 加入审批门禁（覆盖或删除已存程序的后果不比一次运动轻，且兄弟 op `load_program` 早已受门禁）；`download_program` 不入，因为它只读机器人，写入侧由牢笼管。
+
+### 新增 — 现场消息（工具 88 → 91）
+
+`ur_popup`、`ur_close_popup`、`ur_add_log` 让模型能跟站在机器人旁边的人说话：示教器上的模态提示，以及写进**控制器自己的日志历史**的一行（这正是日后在车间里能回答"当时是谁让它做了什么"的原因）。三者都不会让机械臂运动，因此都不入审批门禁。
+
+文本经过**注入校验**：dashboard 按行解析命令（`dashboard.py` 拼的是 `'popup ' + text + '\n'`），所以文本里的换行会被当成**另一条 dashboard 命令**执行 —— `"x\nshutdown"` 就是一次关机。因此换行（与回车）一律**拒绝**并给出明确错误，而不是悄悄替换；文本长度上限 300 字符。
+
+### 修复 — 文档
+
+两份 README 都写「RTDE 配方未暴露单关节电流，故未提供 `ur_get_joint_current`」。实际配方里一直有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的**工具。
+
 ## [0.7.0] - 2026-10-14
 
 > **在一台机器上"失败 0"，而那 46 项里有 16 项从来没跑过。** 同一天还发现 `movej`/`movel` 接受

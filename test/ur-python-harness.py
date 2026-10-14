@@ -816,5 +816,151 @@ def probe_list_programs_contract():
 out['list_programs_contract'] = probe_list_programs_contract()
 
 
+# ---------------------------------------------------------------------------
+# 21. 新工具契约：ur_check_pose（可达性/安全限值预检）与 ur_set_speed_scaling（速度滑块）
+# ---------------------------------------------------------------------------
+
+def probe_new_ops_contract():
+    """源码级契约：两条新 op 必须走"能回读/能自证"的路径，而不是"发出去就算成功"。"""
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+    start = src.index('def op_check_pose(')
+    check_body = src[start:src.index('\ndef ', start + 1)]
+    start = src.index('def op_set_speed_scaling(')
+    speed_body = src[start:src.index('\ndef ', start + 1)]
+    return {
+        'check_pose_dispatched': '"check_pose": op_check_pose' in src,
+        'speed_dispatched': '"set_speed_scaling": op_set_speed_scaling' in src,
+        'check_uses_safety_limits': 'is_within_safety_limits' in check_body,
+        'check_uses_inverse_kin': 'get_inverse_kin' in check_body,
+        'check_has_sentinels': 'start_token' in check_body and 'finish_token' in check_body,
+        'check_reports_not_executed': 'NOT_EXECUTED' in check_body,
+        # 写 double 寄存器必须用仓库已验证过的 write_output_float_register（不是 RTDE 字段名）。
+        'check_writes_registers': ('write_output_float_register' in check_body
+                                   and 'write_output_integer_register' in check_body),
+        'speed_uses_slider': 'set_speed_slider' in speed_body,
+        'speed_reads_back': 'target_speed_fraction' in speed_body,
+        'speed_marks_unverified_hw': 'hardware_verified' in speed_body,
+    }
+
+
+out['new_ops_contract'] = probe_new_ops_contract()
+
+
+def probe_pose6_validation():
+    """`_pose6` 必须挡住畸形输入（BADARG 的来源），而不是把垃圾拼进 URScript。"""
+    results = {'accepts_valid': ur_worker._pose6([1, 2, 3, 0, 0, 0], 'pose') == [1.0, 2.0, 3.0, 0.0, 0.0, 0.0]}
+    cases = {
+        'short': [1, 2, 3],
+        'not_a_list': 'x',
+        'nan': [1, 2, 3, 4, 5, float('nan')],
+        'inf': [1, 2, 3, 4, 5, float('inf')],
+        'text_element': [1, 2, 3, 4, 5, 'a'],
+    }
+    for name, bad in cases.items():
+        try:
+            ur_worker._pose6(bad, 'pose')
+            results['rejects_' + name] = False
+        except ValueError:
+            results['rejects_' + name] = True
+    return results
+
+
+out['pose6_validation'] = probe_pose6_validation()
+
+
+# ---------------------------------------------------------------------------
+# 22. 程序文件传输契约：必须"核对做成了没有"，而不是"请求已发出"
+# ---------------------------------------------------------------------------
+
+def probe_program_ops_contract():
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+
+    def body(name):
+        start = src.index('def %s(' % name)
+        return src[start:src.index('\ndef ', start + 1)]
+
+    upload = body('op_upload_program')
+    download = body('op_download_program')
+    delete = body('op_delete_program')
+    ops = (('upload_program', 'op_upload_program'),
+           ('download_program', 'op_download_program'),
+           ('delete_program', 'op_delete_program'))
+    return {
+        'all_dispatched': all(('"%s": %s' % pair) in src for pair in ops),
+        # 上传/下载都要比对另一侧的字节数，不一致时报 VERIFY_FAILED（绝不报成功）。
+        'upload_verifies_size': 'st_size' in upload and 'local_size' in upload and 'VERIFY_FAILED' in upload,
+        'download_verifies_size': 'st_size' in download and 'local_size' in download and 'VERIFY_FAILED' in download,
+        # 删除必须在 remove 之后再 stat 一次确认真的没了。
+        'delete_rechecks': 'remove(' in delete and delete.count('stat(') >= 2 and 'VERIFY_FAILED' in delete,
+        # 下载不得静默覆盖：先备份成 .bak。
+        'download_backs_up': '.bak' in download and 'os.replace' in download,
+        # 三者都要**显式**读凭据参数（check-tool-params 逐 op 对账声明与读取）。
+        'credentials_read_explicitly': all(
+            'p.get("username"' in text and 'p.get("password"' in text and 'p.get("known_hosts")' in text
+            for text in (upload, download, delete)),
+    }
+
+
+out['program_ops_contract'] = probe_program_ops_contract()
+
+
+# ---------------------------------------------------------------------------
+# 23. 现场消息（示教器弹窗 / 日志）：文本注入防线 + 三个 op 的通道契约
+# ---------------------------------------------------------------------------
+
+def probe_dashboard_text_guard():
+    """`_dashboard_text` 必须拒绝换行 —— dashboard 按行解析，换行等于注入另一条命令。"""
+    results = {
+        'accepts_normal': ur_worker._dashboard_text('请取下工件', 'text') == '请取下工件',
+        'max_chars': int(ur_worker.DASHBOARD_TEXT_MAX_CHARS),
+    }
+    cases = {
+        'newline': 'x\nshutdown',
+        'cr': 'x\rshutdown',
+        'empty': '',
+        'spaces': '   ',
+        'too_long': 'a' * (ur_worker.DASHBOARD_TEXT_MAX_CHARS + 1),
+        'not_a_string': 123,
+    }
+    for name, bad in cases.items():
+        try:
+            ur_worker._dashboard_text(bad, 'text')
+            results['rejects_' + name] = False
+        except ValueError:
+            results['rejects_' + name] = True
+    return results
+
+
+out['dashboard_text_guard'] = probe_dashboard_text_guard()
+
+
+def probe_messaging_ops_contract():
+    """三个现场消息 op 必须走 dashboard 通道，且吃文本的两个都过注入防线。"""
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+
+    def body(name):
+        start = src.index('def %s(' % name)
+        return src[start:src.index('\ndef ', start + 1)]
+
+    popup = body('op_popup_message')
+    close = body('op_close_popup')
+    log = body('op_add_log')
+    return {
+        'all_dispatched': all(('"%s": %s' % pair) in src for pair in (
+            ('popup_message', 'op_popup_message'),
+            ('close_popup', 'op_close_popup'),
+            ('add_log', 'op_add_log'))),
+        'popup_via_dashboard_args': 'ur_popup' in popup and '_dashboard_cmd_args' in popup,
+        'close_via_dashboard': 'ur_close_popup' in close and '_dashboard_cmd(' in close,
+        'log_via_dashboard_args': 'ur_addToLog' in log and '_dashboard_cmd_args' in log,
+        'text_guard_applied': ('_dashboard_text(' in popup and '_dashboard_text(' in log),
+        # 拿不到控制器应答时必须报 NOT_EXECUTED，不能假装成功。
+        'honest_on_no_reply': all('NOT_EXECUTED' in text for text in (popup, close, log)),
+    }
+
+
+out['messaging_ops_contract'] = probe_messaging_ops_contract()
+
+
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + '\n')
 ur_worker._PROTOCOL_OUT.flush()
