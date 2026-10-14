@@ -24,6 +24,7 @@
     "multi-robot.test.mjs",
     "overlays.test.mjs",
     "pending-motion.test.mjs",
+    "pose-store.test.mjs",
     "program-files.test.mjs",
     "right-dock-entry.test.mjs",
     "rtde-config.test.mjs",

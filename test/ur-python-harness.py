@@ -1105,5 +1105,73 @@ def probe_selection_vector_guard():
 out['selection_vector_guard'] = probe_selection_vector_guard()
 
 
+# ---------------------------------------------------------------------------
+# 26. 命名位姿表：四个 pose op 的契约（原子写 + 回读 + 区分缺失/损坏 + 配额 + 跨语言常量一致）
+# ---------------------------------------------------------------------------
+
+def _size_product(text):
+    """把 `64 * 1024`（可能带 `;` 或 `=`）算出一个数 —— 按"数字串"提取，不用 re。
+
+    ⚠️ 不能用 `str.isdigit()` 逐 token 判：`1024;` 会被判成非数字，于是只取到 64，
+    断言就会以"两个常量不一致"的形式误报（本探针第一版就是这么错的）。
+    """
+    parts = []
+    current = ''
+    for char in text:
+        if char.isdigit():
+            current += char
+        elif current:
+            parts.append(int(current))
+            current = ''
+    if current:
+        parts.append(int(current))
+    if not parts:
+        return 0
+    if len(parts) == 1:
+        return parts[0]
+    return parts[0] * parts[1]
+
+
+def probe_pose_ops_contract():
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+
+    def code_of(name):
+        start = src.index('def %s(' % name)
+        text = src[start:src.index('\ndef ', start + 1)]
+        # 只看代码：docstring 里写着「不存在」「损坏」这些词本身，不能据此判定实现。
+        return text[text.index('"""', text.index('"""') + 3) + 3:]
+
+    save = code_of('op_pose_save')
+    get = code_of('op_pose_get')
+    listing = code_of('op_pose_list')
+    delete = code_of('op_pose_delete')
+    host = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             'lib', 'pose-store.js'), encoding='utf-8').read()
+    host_limit_line = [l for l in host.splitlines() if 'MAX_POSE_FILE_BYTES' in l and '=' in l]
+    worker_limit_line = [l for l in src.splitlines() if l.startswith('POSE_FILE_MAX_BYTES')]
+    return {
+        'all_dispatched': all(('"%s": %s' % pair) in src for pair in (
+            ('pose_save', 'op_pose_save'), ('pose_get', 'op_pose_get'),
+            ('pose_list', 'op_pose_list'), ('pose_delete', 'op_pose_delete'))),
+        'atomic_write': ('os.replace(' in save and '.tmp' in save),
+        'save_reads_back': ('_pose_read_json(' in save and 'VERIFY_FAILED' in save),
+        'save_reports_replaced': 'replaced' in save,
+        # ★ 「从没存过」与「存过但坏了」必须是两个不同的回答
+        'get_separates_missing': ('"NOT_FOUND"' in get and '"CORRUPT"' in get),
+        'get_flags_shape': 'pose_well_formed' in get,
+        # ★ 单个损坏条目不能让整张表失败
+        'list_survives_corrupt': ('"ok": False' in listing and 'broken' in listing),
+        'delete_rechecks': ('os.remove(' in delete and delete.count('os.path.exists(') >= 2
+                            and 'VERIFY_FAILED' in delete),
+        'quota_respects_existing': ('existed' in save and 'BADARG' in save),
+        # 跨语言常量一致：宿主的 MAX_POSE_FILE_BYTES 与 worker 的 POSE_FILE_MAX_BYTES 必须相等
+        'limit_matches_host': bool(host_limit_line and worker_limit_line
+                                   and _size_product(host_limit_line[0]) == _size_product(worker_limit_line[0])),
+    }
+
+
+out['pose_ops_contract'] = probe_pose_ops_contract()
+
+
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + '\n')
 ur_worker._PROTOCOL_OUT.flush()

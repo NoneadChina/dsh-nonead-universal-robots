@@ -479,3 +479,25 @@ test('★ 力控选择向量只接受 6 个 0/1', () => {
     assert.equal(v[key], true, `${key} 必须被拒绝`)
   }
 })
+
+test('★ 命名位姿表四个 op 的契约：原子写、回读、区分缺失/损坏、配额', () => {
+  const p = probe.pose_ops_contract
+  assert.equal(p.all_dispatched, true, 'HANDLERS 必须挂上四个 pose op')
+  assert.equal(p.atomic_write, true, '写盘必须是"临时文件 + os.replace"（否则会留下半截 JSON）')
+  assert.equal(p.save_reads_back, true, '★ 保存后必须回读比对，不一致报 VERIFY_FAILED')
+  assert.equal(p.save_reports_replaced, true, '覆盖已有位姿必须如实回报 replaced')
+  assert.equal(
+    p.get_separates_missing,
+    true,
+    '★ 「从没存过」(NOT_FOUND) 与「存过但损坏」(CORRUPT) 必须分开，否则调用方会去重存一个已存在的东西',
+  )
+  assert.equal(p.get_flags_shape, true, '读回来要指出 pose/joints 是否仍是合法 6 维数')
+  assert.equal(p.list_survives_corrupt, true, '★ 单个条目损坏不能让整张表失败')
+  assert.equal(p.delete_rechecks, true, '删除必须先确认存在、删完再确认真的没了')
+  assert.equal(p.quota_respects_existing, true, '配额只在新增时生效（更新已有位姿仍要放行）')
+  assert.equal(
+    p.limit_matches_host,
+    true,
+    '★ 宿主 MAX_POSE_FILE_BYTES 与 worker POSE_FILE_MAX_BYTES 必须同一个数（跨语言常量会漂）',
+  )
+})

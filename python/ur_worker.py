@@ -4189,6 +4189,221 @@ def op_move_force(p):
     return ok({"message": message, "data": data, "outcome": outcome})
 
 
+# ---------------------------------------------------------------------------
+# 命名位姿表：worker 只负责读写那个**已被宿主校验过**的绝对路径
+#
+# ⚠️ 分工（与 `lib/program-files.js` 同一模式）：**名字牢笼、配额判定、向量形状都在宿主侧**
+# （`lib/pose-store.js`，纯逻辑 + 可注入 IO + 单测覆盖）；worker 拿到的是已经校验过的绝对路径，
+# 以及宿主**注入**的 `_` 前缀协议字段（`_path` / `_dir` / `_pose_count` / `_max_poses` / `_capture`）。
+# 那些字段**不在**工具 schema 里，而 `sanitizeArgs` 只保留声明过的键，所以模型无法自己指定路径 ——
+# `scripts/check-tool-params.py` 也据此把 `_` 前缀视为协议内部字段，并反过来禁止**声明**这种名字。
+# ---------------------------------------------------------------------------
+
+POSE_FILE_VERSION = 1
+# 与 lib/pose-store.js 的 MAX_POSE_FILE_BYTES 保持一致（harness 里有断言盯着这两个数）。
+POSE_FILE_MAX_BYTES = 64 * 1024
+
+
+def _iso_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+
+
+def _six_numbers_or_none(value):
+    """把可能是 6 维数值的东西读出来；不是就返回 None（用于"这个文件被手工改坏了"的判定）。"""
+    if not isinstance(value, list) or len(value) != 6:
+        return None
+    try:
+        return [float(x) for x in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _pose_read_json(path):
+    """读一个位姿文件。返回 `(doc, error_code, error_message)`；doc 为 None 时看后两个。
+
+    ⚠️ **"不存在"与"损坏"必须分开**：前者说明这个名字没存过，后者说明**存过但坏了** ——
+    把它们混成一句"读不到"，会让调用方去重新保存一个其实已经存在、只是坏了的位姿。
+    """
+    if not os.path.exists(path):
+        return None, "NOT_FOUND", "文件不存在"
+    try:
+        size = os.path.getsize(path)
+    except Exception:
+        size = None
+    if size is not None and size > POSE_FILE_MAX_BYTES:
+        return None, "BADARG", "文件有 %d 字节，超过上限 %d 字节（这个目录里的东西不对劲）" % (
+            size, POSE_FILE_MAX_BYTES)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle), None, None
+    except Exception as exc:
+        return None, "CORRUPT", "文件存在但读不出/解析不了：%r" % (exc,)
+
+
+def op_pose_save(p):
+    """保存/更新一条命名位姿（一位姿一文件）。**写后回读核对**，不是"写完就报成功"。
+
+    写盘用"先写 `<path>.tmp`、`fsync`、再 `os.replace`"：同目录内的 replace 是原子的，
+    因此不会留下"半截 JSON"这种状态。不给 pose/joints 时改为**从机器人当前姿态捕获**。
+    """
+    path = str(p["_path"])
+    name = str(p["name"])
+    pose = p.get("pose")
+    joints = p.get("joints")
+    capture = bool(p.get("_capture"))
+    ip = p.get("ip")
+
+    if pose is None and joints is None:
+        if not capture:
+            raise ValueError("至少要给 pose 或 joints 之一；或者两者都不给、并给出 ip 让插件从机器人"
+                             "当前姿态捕获")
+        if not ip:
+            raise ValueError("要从机器人当前姿态捕获时必须给出 ip")
+        robot, model = ensure_connected(str(ip))
+        try:
+            pose = _pose6([float(x) for x in model.ActualTCPPose()], "pose")
+            joints = _pose6([float(x) for x in model.ActualQ()], "joints")
+        except Exception as exc:
+            return err("从机器人读当前姿态失败（%r）⇒ 没有写入任何东西。" % (exc,),
+                       "CONNECT_FAILED", {"ip": str(ip), "path": path})
+    else:
+        if pose is not None:
+            pose = _pose6(pose, "pose")
+        if joints is not None:
+            joints = _pose6(joints, "joints")
+
+    existed = os.path.exists(path)
+    if not existed:
+        count = p.get("_pose_count")
+        cap = p.get("_max_poses")
+        if count is not None and cap is not None and int(count) >= int(cap):
+            return err("位姿表已达上限 %d 条（当前 %d）⇒ 先删掉不再用的位姿再保存。"
+                       % (int(cap), int(count)), "BADARG",
+                       {"count": int(count), "max_poses": int(cap)})
+
+    doc = {"version": POSE_FILE_VERSION, "name": name, "pose": pose, "joints": joints,
+           "saved_at": _iso_now()}
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return err("写入位姿文件失败：%s（%r）" % (path, exc), "IO_FAILED", {"path": path})
+
+    read_back, _code, reason = _pose_read_json(path)
+    if read_back is None:
+        return err("位姿已写入但**回读失败**（%s）：%s ⇒ 不要当作保存成功。" % (path, reason),
+                   "VERIFY_FAILED", {"path": path})
+    if (not isinstance(read_back, dict) or read_back.get("pose") != pose
+            or read_back.get("joints") != joints or read_back.get("name") != name):
+        return err("位姿写入后回读的内容与要保存的不一致（%s）⇒ 保存不可信。" % path,
+                   "VERIFY_FAILED", {"path": path, "read_back": read_back})
+    try:
+        size = os.path.getsize(path)
+    except Exception:
+        size = None
+    return ok({"message": "位姿“%s”已%s（%s 字节，回读一致）。文件：%s"
+               % (name, "更新" if existed else "保存", "?" if size is None else size, path),
+               "data": {"name": name, "path": path, "pose": pose, "joints": joints,
+                        "replaced": existed, "bytes": size, "saved_at": read_back.get("saved_at"),
+                        "verified": True}})
+
+
+def op_pose_get(p):
+    """读回一条命名位姿。**"不存在"与"损坏"分开说**，并指出 pose/joints 是否仍是合法 6 维数。"""
+    path = str(p["_path"])
+    name = str(p["name"])
+    doc, code, reason = _pose_read_json(path)
+    if doc is None:
+        if code == "NOT_FOUND":
+            return err("位姿“%s”不存在（%s）⇒ 可用 ur_list_poses 看看已经存了哪些名字。"
+                       % (name, path), "NOT_FOUND", {"name": name, "path": path})
+        if code == "CORRUPT":
+            return err("位姿文件 %s **存在但损坏**：%s ⇒ 这与「不存在」是两回事，请人工看一眼这个文件"
+                       "（或删掉后重新保存）。" % (path, reason), "CORRUPT",
+                       {"name": name, "path": path})
+        return err("位姿文件 %s 不可用：%s" % (path, reason), code or "BADARG",
+                   {"name": name, "path": path})
+    if not isinstance(doc, dict):
+        return err("位姿文件 %s 的内容不是一个 JSON 对象（实得 %s）⇒ 视为损坏。"
+                   % (path, type(doc).__name__), "CORRUPT", {"name": name, "path": path})
+
+    pose = doc.get("pose")
+    joints = doc.get("joints")
+    pose_ok = _six_numbers_or_none(pose) is not None
+    joints_ok = _six_numbers_or_none(joints) is not None
+    note = ""
+    if not (pose_ok or joints_ok):
+        note = ("（⚠️ 里面的 pose/joints 形状不合法，可能是手工编辑弄坏的 —— 直接拿去运动之前请先核对）")
+    return ok({"message": "位姿“%s”：TCP 位姿 %s；关节角 %s；保存于 %s%s"
+               % (doc.get("name") or name, pose, joints, doc.get("saved_at"), note),
+               "data": {"name": doc.get("name") or name, "path": path, "pose": pose,
+                        "joints": joints, "saved_at": doc.get("saved_at"),
+                        "version": doc.get("version"), "pose_well_formed": pose_ok,
+                        "joints_well_formed": joints_ok}})
+
+
+def op_pose_list(p):
+    """列出位姿表（只列 `*.json`）。**单个条目损坏不会让整张表失败** —— 否则一个坏文件就让整个
+    功能不可用，而调用方连"坏的是哪个"都看不到。"""
+    directory = str(p["_dir"])
+    if not os.path.isdir(directory):
+        return ok({"message": "位姿目录 %s 还不存在（说明还没保存过任何位姿）。" % directory,
+                   "data": {"dir": directory, "poses": [], "count": 0, "broken": []}})
+    try:
+        filenames = sorted(f for f in os.listdir(directory) if f.lower().endswith(".json"))
+    except Exception as exc:
+        return err("位姿目录 %s 读不了（%r）⇒ 不会假装它是空的。" % (directory, exc),
+                   "IO_FAILED", {"dir": directory})
+    needle = p.get("filter")
+    if isinstance(needle, str) and needle.strip():
+        lowered = needle.strip().lower()
+        filenames = [f for f in filenames if lowered in f.lower()]
+
+    poses = []
+    for filename in filenames:
+        entry = {"file": filename, "name": filename[:-5]}
+        doc, _code, reason = _pose_read_json(os.path.join(directory, filename))
+        if isinstance(doc, dict):
+            entry.update({"ok": True, "name": doc.get("name") or entry["name"],
+                          "pose": doc.get("pose"), "joints": doc.get("joints"),
+                          "saved_at": doc.get("saved_at")})
+        else:
+            entry.update({"ok": False, "reason": reason or "读不出"})
+        poses.append(entry)
+    broken = [item["file"] for item in poses if not item.get("ok")]
+    return ok({"message": "位姿表共 %d 条%s" % (
+        len(poses), "，其中 %d 条**损坏**：%s" % (len(broken), ", ".join(broken)) if broken else ""),
+        "data": {"dir": directory, "poses": poses, "count": len(poses), "broken": broken}})
+
+
+def op_pose_delete(p):
+    """删除一条命名位姿：**先确认存在、删完再确认真的没了**（同 `delete_program` 的纪律）。"""
+    path = str(p["_path"])
+    name = str(p["name"])
+    if not os.path.exists(path):
+        return err("位姿“%s”不存在，未做任何删除（%s）。" % (name, path), "NOT_FOUND",
+                   {"name": name, "path": path})
+    try:
+        os.remove(path)
+    except Exception as exc:
+        return err("删除位姿文件失败：%s（%r）" % (path, exc), "IO_FAILED",
+                   {"name": name, "path": path})
+    if os.path.exists(path):
+        return err("删除后仍然能 stat 到 %s ⇒ 没有真正删除。" % path, "VERIFY_FAILED",
+                   {"name": name, "path": path})
+    return ok({"message": "已删除位姿“%s”（删除后已确认文件不存在）：%s" % (name, path),
+               "data": {"name": name, "path": path, "verified": True}})
+
+
 def op_set_gravity(p):
     """设置重力方向向量的方向（单位向量），用于非水平安装。
 
@@ -4478,6 +4693,10 @@ HANDLERS = {
     "modbus_set_runstate_dependent_choice": op_modbus_set_runstate_dependent_choice,
     "modbus_set_signal_update_frequency": op_modbus_set_signal_update_frequency,
     "move_force": op_move_force,
+    "pose_save": op_pose_save,
+    "pose_get": op_pose_get,
+    "pose_list": op_pose_list,
+    "pose_delete": op_pose_delete,
     "send_script": op_send_script,
     "movej": op_movej,
     "movel": op_movel,

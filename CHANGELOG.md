@@ -106,6 +106,36 @@ Two guards the shape of the API forced:
 a PLC or change which fieldbus points the controller supervises. The read and the two
 signal-configuration tools do not.
 
+### Added — named pose table (100 → 104 tools)
+
+`ur_save_pose` / `ur_get_pose` / `ur_list_poses` / `ur_delete_pose`: a local table of named poses, one
+JSON file per pose (`<poseDir>/<name>.json`, default `<DSH_HOME>/nonead-ur/poses`). They never touch the
+controller unless you ask `ur_save_pose` to capture the current pose.
+
+The split is the one the program files already use, for the same reason: `lib/pose-store.js` owns the
+**name jail, the quota and the vector shapes** (pure logic, injectable IO, unit-tested), and the worker
+only writes the file it is handed. The name becomes a file name — which is why the whitelist matters,
+and why the first version of it was wrong: it accepted ASCII only, so `工位 1` was refused. The unit test
+caught that; the rule is now "Unicode letters/digits, must start with one, no path separators, no
+Windows-illegal characters, no reserved device names, no leading/trailing whitespace".
+
+Details that took shape while writing the tests:
+- **`NOT_FOUND` and `CORRUPT` are different answers.** Collapsing them into one "cannot read" sends the
+  caller off to re-save a pose that already exists but is damaged.
+- Writes are atomic (`tmp` + `os.replace`), then **read back and compared**; a mismatch is
+  `VERIFY_FAILED`, never a success.
+- One corrupt entry never fails a whole listing: it is reported per entry, with its name in `broken`.
+- The quota refuses a **new** pose when the table is full but still allows **updating** an existing one —
+  otherwise "fix it and save again" would be impossible.
+- A directory that cannot be read does **not** degrade to "0 poses" (that would silently disable the
+  quota); it refuses the write instead.
+
+`scripts/check-tool-params.py` changed too: its docstring always claimed `_`-prefixed keys are protocol
+internals, but the code only excluded the literal `{ip, _timeout_ms}`. The implementation now matches
+its documentation (host-injected `_path` / `_dir` / `_pose_count` / `_max_poses` / `_capture` are
+excluded, and `sanitizeArgs` strips any same-named key the model sends), plus a **new** rule forbidding
+a *declared* `_`-prefixed parameter — otherwise a model could set a field the host intends to inject.
+
 ### Fixed — documentation
 
 The READMEs claimed the RTDE recipe does not expose per-joint current "so `ur_get_joint_current` is

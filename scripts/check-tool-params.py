@@ -116,6 +116,17 @@ for node in ast.walk(tree):
 
 IGNORE = {"ip", "_timeout_ms"}
 
+
+def is_protocol_internal(name: str) -> bool:
+    """`_` 前缀 = 宿主**注入**的协议字段（`_timeout_ms` 是第一个，位姿表的 `_path`/`_dir`/配额字段是后来的）。
+
+    docstring 一直写着"`_` 开头的键会被排除"，而实现原先只排除字面的 `{"ip", "_timeout_ms"}` ——
+    实现比自己的文档更严。这里让实现回到文档，因为这是协议**本来就有**的注入通道：
+    `sanitizeArgs` 只保留 schema 声明过的键，而未声明的 `_` 字段由宿主在过滤之后自己塞进去，
+    所以模型既改不了 `_timeout_ms`，也指定不了位姿文件路径。
+    """
+    return name.startswith("_")
+
 # Chinese messages on a GBK console: write the report to a file as UTF-8 and keep stdout
 # ASCII-safe, or the check itself dies with UnicodeEncodeError on a Chinese Windows box.
 # The file is written next to this script and deleted on the way out.
@@ -143,10 +154,18 @@ for op, info in sorted(tools.items()):
         print("  !! %-24s %s has NO handler in HANDLERS" % (op, info["tool"]))
         problems += 1
         continue
-    read = handlers.get(fn, set()) - IGNORE
+    read = {k for k in handlers.get(fn, set()) - IGNORE if not is_protocol_internal(k)}
     declared = info["params"] - IGNORE
     ignored = sorted(declared - read - HELPER_READS.get(op, set()))
     undeclared = sorted(read - declared - HELPER_READS.get(op, set()))
+    # ★ 新增：**声明过的**参数绝不能长得像协议内部字段。否则模型就能设置一个宿主打算注入的字段
+    # （宿主会在过滤后覆盖它，或者更糟：把某个 op 指向模型自己挑的路径/状态）。
+    internal_declared = sorted(k for k in info["params"] if is_protocol_internal(k))
+    if internal_declared:
+        problems += 1
+        print("  %-22s %s" % (op, info["tool"]))
+        print("      declared with a protocol-internal `_` name (the model would be able to set it): %s"
+              % internal_declared)
     if ignored or undeclared:
         problems += 1
         print("  %-22s %s" % (op, info["tool"]))

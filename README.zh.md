@@ -29,7 +29,7 @@
 
 ## 功能一览
 
-共 **100** 个工具（`ur_*`）。
+共 **104** 个工具（`ur_*`）。
 
 | 类别 | 工具（`ur_*`） | 说明 |
 |---|---|---|
@@ -41,6 +41,7 @@
 | 程序 | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` / `ur_upload_program` / `ur_download_program` / `ur_delete_program` | 程序状态、加载、运行、停止、暂停、SSH 列表，以及**程序文件的 SFTP 传输**。三个传输工具都**核对"到底做成了没有"**，而不是"请求已发出"：上传回读远端大小、下载回读本地大小、删除后确认文件真的不在了；下载**绝不静默覆盖**（目标已存在时先改名成 `<path>.bak`，备份失败就拒绝下载）。它们的本地路径被锁在 `programDir` 内 —— 见下文「本地文件访问」。`ur_list_programs` 扫描真机 `/programs` 或 URSim 的 `~/URSim_Linux-*/programs.*` 布局（可用 `programs_dir` 覆盖）；不传口令时会回报 `used_default_password`，并给出当前生效的 `host_key_policy`，可选 `known_hosts` 文件会让 SSH 切到 **`RejectPolicy` 严格校验主机指纹**（文件不存在直接报错，绝不静默退回）。运行/停止/暂停都会检查控制器应答并回带运行状态 |
 | 现场消息 | `ur_popup` / `ur_close_popup` / `ur_add_log` | 跟站在机器人旁边的人说话：在示教器上弹一个**模态**提示、关掉它、往**控制器自己的日志历史**里写一行。三者都不会让机械臂运动，因此都不在审批门禁后面；文本有注入校验（dashboard 按行解析命令，换行会注入另一条命令），长度上限 300 字符。注意 `ur_add_log` 会在控制器上**留下永久痕迹** —— 这正是它的用途，所以不要往里写密钥 |
 | Modbus | `ur_modbus_add_signal` / `ur_modbus_delete_signal` / `ur_modbus_get_signal_status` / `ur_modbus_send_custom_command` / `ur_modbus_set_output_register` / `ur_modbus_set_output_signal` / `ur_modbus_set_runstate_dependent_choice` / `ur_modbus_set_signal_update_frequency` | 现场总线 I/O：增删控制器监管的信号、读回一个信号、置输出寄存器与数字输出、发一条原始 Modbus 命令，以及调信号的程序状态行为与刷新频率。⚠️ vendored `urScript.py` 里那八个 `modbus_*` 方法**全是桩**（`raise NotImplementedError`），所以这些脚本是本插件自己拼的。⚠️ Modbus 写类**没有应答** —— 这些工具能证明的只是"这段 URScript 在控制器上跑完了"（首尾哨兵），**永远不能**证明 PLC 执行了，因此每条回执都带 `fieldbus_confirmed: false`；只有 `ur_modbus_get_signal_status` 能读回一个值（经输出寄存器，同样在哨兵之间回读）。信号名走**白名单**校验 —— 它会被拼进 URScript 字符串字面量，引号或换行等于注入脚本；读的时候必须显式声明 `kind`，因为 URScript 是强类型的（数字信号返回布尔、寄存器信号返回整数，一段脚本没法安全地回写两种）。五个写类工具在审批门禁后面；只读那一个与两个信号配置项不在 |
+| 命名位姿 | `ur_save_pose` / `ur_get_pose` / `ur_list_poses` / `ur_delete_pose` | **本机**的命名位姿表 —— 一位姿一文件 `<poseDir>/<名字>.json`，默认 `<DSH_HOME>/nonead-ur/poses`：保存当前姿态（或直接给数值）、读回一条、列出全部、删除一条。⚠️ **名字会变成文件名**，所以走白名单（允许 Unicode 字母/数字，**中文可用**；拒绝路径分隔符、Windows 非法字符、保留设备名与首尾空白），且围栏判据是 `realpath` **之后**的结果 —— 与程序文件同一套"宿主设围栏 / worker 落盘"分工。写盘是原子的（`tmp` + `os.replace`），写完还会**回读比对**；报 `VERIFY_FAILED` 就是别信那个文件。读的时候把**「从没存过」（`NOT_FOUND`）与「存过但损坏」（`CORRUPT`）分开** —— 混成一句会让调用方去重新保存一个其实已经存在的东西。单个条目损坏**不会**让整张表失败：按条目回报，文件名列在 `broken` 里。⚠️ 刻意**不提供**"按名字直接运动"：那样位姿数值在调用前对安全闸与审批门禁都是不可见的；安全流程是两步 —— 先 `ur_get_pose(name)`、再 `ur_movel(pose, …)`，让两道门禁都看到真实数字 |
 | 寄存器 | `ur_get_int_register` / `ur_get_double_register` / `ur_get_bit_register` | 读取 Int / Double / Bool 寄存器 |
 | 健康检查 | `ur_ping` | 无需连接机器人，检测 worker / Python / URBasic 就绪 |
 | I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` / `ur_get_tool_analog_in` | 数字输入/输出（含批量读位、`which="tool"` 的工具端 I/O）与标准模拟输入/输出（**按工程单位收值**：URScript 的 `set_analog_out` 收的是相对电平 [0,1]；电流域端口可用 `full_scale: 20`）。读工具端数字输入是**哨兵校验**的：控制器若始终没回报脚本执行完毕，工具会拒绝给值，而不是报一个无法担保的数字 |
@@ -248,6 +249,7 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 - **读不到就不假装读到**：没有回读通道的设置型指令只回报 `verified: false`；控制器拒绝 RTDE 会话时报"未运行"而不是"已连接"；孪生某一帧刷新不出来会标 `stale`。
 - **本地文件访问**：`ur_upload_program` 会**读**本地文件、`ur_download_program` 会**写**本地文件，因此两者都被锁在 `programDir`（默认 `<DSH_HOME>/nonead-ur/programs`，可用 `programDir` 配置改）内。路径必须在该目录内 —— 判据是 `realpath` **之后**的结果，所以软链也带不出去；只传输 `.urp`；`maxProgramBytes`（1 MiB）限大小。**未配置或目录不存在的 `programDir` 一律 fail closed**：不读也不写任何本地文件。这与"把 shell 交给模型"是同一类暴露面，所以这里是设围栏，而不是靠信任。
 - **程序传输不是"发出去就算完"**：上传与下载都比对另一侧的字节数，删除会在删完之后再 `stat` 一次。不一致就报失败（`VERIFY_FAILED`），绝不报成功 —— 因为调用方的下一步很可能就是去运行那个程序。
+- **命名位姿是本机数据，不是机器人状态**：`ur_save_pose` / `ur_get_pose` / `ur_list_poses` / `ur_delete_pose` 只在 `poseDir` 下按"一位姿一文件"读写 JSON，不碰控制器（除非让 `ur_save_pose` 捕获当前姿态，那需要 `ip`）。目录在首次保存时自动创建；未配置 `poseDir` 则 fail closed。真要走到某个保存过的位姿，请**分两步**（先 `ur_get_pose` 再 `ur_movel`），让门禁看到真实数字。
 - **工具端数字 I/O**：`ur_get_digital_in` / `ur_set_digital_out` 的 `which="tool"` 用于工具端（法兰侧）数字 I/O。工具端数字信号**不经 RTDE**，因此读取工具输入会发送一段短的 URScript 程序，**可能打断正在运行的程序**。**工具端数字输出的读回不支持**（没有可靠的 `read_tool_digital_out` 表达式）。
 - **关节电流**：接收配方里本来就有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的** `ur_get_joint_current` 工具，而不是这个值本身。
 - **线程/取消**：运动指令为阻塞到位的轮询，`commandTimeoutMs` 内完成；对长时间轨迹，请在描述中提醒模型设置合理超时或分步执行。

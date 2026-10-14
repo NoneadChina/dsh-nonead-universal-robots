@@ -44,6 +44,21 @@
 
 `ur_modbus_add_signal`、`ur_modbus_delete_signal`、`ur_modbus_send_custom_command`、`ur_modbus_set_output_register`、`ur_modbus_set_output_signal` 加入审批门禁 —— 它们会驱动 PLC，或改变控制器监管哪些现场总线点位；只读那一个与两个信号配置项不入。
 
+### 新增 — 命名位姿表（工具 100 → 104）
+
+`ur_save_pose` / `ur_get_pose` / `ur_list_poses` / `ur_delete_pose`：本机的命名位姿表，一位姿一文件（`<poseDir>/<名字>.json`，默认 `<DSH_HOME>/nonead-ur/poses`）。除"让 `ur_save_pose` 捕获当前姿态"外，它们不碰控制器。
+
+分工与程序文件一致，理由也一样：`lib/pose-store.js` 负责**名字牢笼、配额与向量形状**（纯逻辑、可注入 IO、有单测），worker 只写它拿到手的那份文件。名字会变成文件名 —— 这正是白名单要紧的原因，也是初版写错的地方：它只收 ASCII，于是 `工位 1` 被拒。单测抓到了这一点；现在的规则是"Unicode 字母/数字、必须以其中之一开头、不含路径分隔符与 Windows 非法字符、不是保留设备名、无首尾空白"。
+
+写测试过程中定下来的几处诚实细节：
+- **`NOT_FOUND` 与 `CORRUPT` 是两个不同的回答**。混成一句"读不到"，会让调用方去重新保存一个其实已经存在、只是损坏了的位姿。
+- 写盘是原子的（`tmp` + `os.replace`），写完**回读比对**；不一致报 `VERIFY_FAILED`，绝不报成功。
+- 单个条目损坏**不会**让整张表失败：按条目回报，名字列在 `broken` 里。
+- 配额拒绝**新增**，但**更新**一条已存在的位姿仍然放行 —— 否则"改一下再存"都做不了。
+- 目录读不了**不会**退化成"0 条"（那会让配额静默失效），而是拒绝写入。
+
+`scripts/check-tool-params.py` 也改了：它的 docstring 一直写着"`_` 开头的键是协议内部字段"，而实现只排除了字面的 `{ip, _timeout_ms}`。现在实现与文档一致（宿主注入的 `_path` / `_dir` / `_pose_count` / `_max_poses` / `_capture` 被排除，且 `sanitizeArgs` 会把模型塞的同名字段丢掉），并**新增**一条规则：禁止把 `_` 开头的名字**声明**成参数 —— 否则模型就能设置一个宿主打算注入的字段。
+
 ### 修复 — 文档
 
 两份 README 都写「RTDE 配方未暴露单关节电流，故未提供 `ur_get_joint_current`」。实际配方里一直有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的**工具。
