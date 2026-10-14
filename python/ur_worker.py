@@ -151,6 +151,19 @@ _PROTOCOL_OUT = sys.stdout
 # `respond()` 并发写同一个 stdout。少了这把锁，两条 JSON 行会交错甚至互相截断，
 # Node 侧 readline 于是拿到无法解析的行 —— 表现为孪生随机丢帧、请求莫名超时。
 _PROTOCOL_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# 孪生遥测的**独立通道**：stderr + 魔数前缀 + 自己的锁
+#
+# 为什么推送不能继续与响应共用 stdout + `_PROTOCOL_LOCK`（真机上会冻结孪生）：
+#   - 主线程写一条**大响应**时占着 `_PROTOCOL_LOCK`；若此时 stdout 管道因宿主一时没抽干而背压，
+#     这条写会**阻塞**，推送线程就被同一把锁挡在门外；
+#   - 超过宿主 `TWIN_PUSH_FRESH_MS`（300 ms）没收到推送，`lib/twin-routes.js` 就**回退**去发一次
+#     显式读 —— 运动期间那次读排在运动指令后面，于是孪生只剩"数据已停止更新"。
+# 独立通道后：推送既不被响应的锁串行化，也不被 stdout 的背压堵住。宿主两路都收
+# （`lib/worker.js` 同时接受 stdout 的推送行与本通道的前缀行，见 `lib/push-channel.js`）。
+_PUSH_LOCK = threading.Lock()
+PUSH_CHANNEL_PREFIX = "@@DSH-UR-PUSH@@ "
 _LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ur_worker.log")
 
 # 日志上限：一份现役 + 一份滚动的旧文件，磁盘占用因此被钳在 ~2×上限。
@@ -4788,6 +4801,29 @@ def _write_protocol_line(body):
             _PROTOCOL_OUT.flush()
 
 
+def _write_push_line(body):
+    """把一个遥测推送行写到**独立通道**（stderr + `PUSH_CHANNEL_PREFIX`）。
+
+    两层意义：①不与响应争 `_PROTOCOL_LOCK`；②不受 stdout 背压影响。
+    前缀让宿主能把遥测从普通 stderr（Python traceback、URBasic 的 print）里分出来 ——
+    那些仍然进 `stderrTail` 供诊断，不会被遥测挤掉。
+    """
+    line = (PUSH_CHANNEL_PREFIX + body + "\n").encode("utf-8")
+    with _PUSH_LOCK:
+        try:
+            buf = getattr(sys.stderr, "buffer", None)
+            if buf is not None:
+                buf.write(line)
+                buf.flush()
+            else:
+                sys.stderr.write(line.decode("utf-8"))
+                sys.stderr.flush()
+        except Exception:
+            # 推送是加分项：写不出去（stderr 被关掉/重定向到不可写对象）绝不能打死推送线程，
+            # 更不能影响主协议。丢一帧遥测远好过崩掉 worker。
+            pass
+
+
 def respond(payload):
     # Write UTF-8 bytes on the raw buffer so locale text encodings (e.g. GBK on
     # Chinese Windows) can never corrupt or reject the JSON. Node's readline
@@ -4865,7 +4901,7 @@ def _twin_push_loop():
                 snapshot = _twin_push_snapshot(ip)
                 if snapshot is None:
                     continue
-                _write_protocol_line(json.dumps({
+                _write_push_line(json.dumps({
                     "push": "telemetry",
                     "ip": ip,
                     "ts": int(time.time() * 1000),

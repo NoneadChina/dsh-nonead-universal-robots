@@ -76,6 +76,20 @@
 - 运动指令一律以 **`killOnTimeout: false`** 调用：超出预算就**如实报超时**，而不是毁掉会话。这与本插件
   一贯的诚实性纪律一致 ——「我没在预算内拿到确认」不是拆掉连接的许可。
 
+### 修复 — 遥测不再与响应共用通道（`lib/push-channel.js`）
+
+孪生的推送帧原先走 **stdout，并与响应共用同一把 `_PROTOCOL_LOCK`**。那把锁在整条响应写期间都被占着，
+所以一条大响应（或宿主一时没抽干导致的 stdout 背压）足以让推送停超过宿主的 `TWIN_PUSH_FRESH_MS`
+（300 ms）—— 一过这个窗口，`lib/twin-routes.js` 就**回退**去发一次**显式读**，而那次读正好排在 worker
+的 stdin 队列里、堵在运行中的运动指令后面。于是孪生在这次运动的剩余时间里只剩"数据已停止更新"。
+
+现在遥测有独立通道：**stderr + `@@DSH-UR-PUSH@@ ` 前缀，并用自己的锁**（Python 侧 `_write_push_line` /
+`_PUSH_LOCK`，宿主侧 `lib/push-channel.js`）。它既不被响应串行化，也不受 stdout 背压影响；普通 stderr
+（traceback、URBasic 的 print）仍原样进 `stderrTail`。宿主**两路都收**，所以旧版 Python 侧也能工作。
+
+切分函数是带独立单测的纯函数，因为它的失败模式恰好都是最难看的那些：一行被切成两段、
+切点落在**魔数前缀内部**、以及一个最后一行没有换行的 traceback（那条必须立刻交给诊断，否则永久丢失）。
+
 ### 修复 — 文档
 
 两份 README 都写「RTDE 配方未暴露单关节电流，故未提供 `ur_get_joint_current`」。实际配方里一直有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的**工具。

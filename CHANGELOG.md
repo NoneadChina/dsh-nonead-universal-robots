@@ -158,6 +158,26 @@ Two changes, both in `lib/motion-budget.js`:
   honestly instead of destroying the session. That is the same honesty rule used everywhere else here:
   "I could not confirm it within my budget" is not a licence to tear the connection down.
 
+### Fixed — telemetry no longer shares the response channel (`lib/push-channel.js`)
+
+The twin's pushed frames used to travel on **stdout, under the same `_PROTOCOL_LOCK` as responses**.
+That lock is held for the whole of a response write, so a large response (or stdout back-pressure while
+the host is momentarily slow to drain) could stop the pushes for longer than the host's
+`TWIN_PUSH_FRESH_MS` (300 ms) — and past that window `lib/twin-routes.js` falls back to an **explicit
+read**, which is precisely the read that stands in the worker's stdin queue behind a running motion.
+The twin then sits on "data stalled" for the rest of the move.
+
+Telemetry now has its own channel: **stderr + a `@@DSH-UR-PUSH@@ ` prefix, with its own lock**
+(`_write_push_line` / `_PUSH_LOCK` on the Python side, `lib/push-channel.js` on the host side). It is
+neither serialised behind responses nor affected by stdout back-pressure, and ordinary stderr
+(tracebacks, URBasic prints) still lands in `stderrTail` untouched. The host accepts pushes on **both**
+channels, so an older Python half keeps working.
+
+The chunk splitter is a pure function with its own tests, because its failure modes are exactly the
+ugly ones: a line split across two chunks, a chunk boundary **inside the magic prefix**, and a traceback
+whose last line has no trailing newline (that one must be handed to the diagnostics immediately, or it
+is lost forever).
+
 ### Fixed — documentation
 
 The READMEs claimed the RTDE recipe does not expose per-joint current "so `ur_get_joint_current` is

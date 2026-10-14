@@ -27,6 +27,7 @@
     "pending-motion.test.mjs",
     "pose-store.test.mjs",
     "program-files.test.mjs",
+    "push-channel.test.mjs",
     "right-dock-entry.test.mjs",
     "rtde-config.test.mjs",
     "safety.test.mjs",
