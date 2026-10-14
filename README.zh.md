@@ -6,7 +6,7 @@
 
 > ⚠️ **安全提示**：本插件会直接驱动真实机械臂。使用时务必保证机器人可见、急停按钮触手可及、工作区无障碍物与人员。请把它当作授予模型 `bash` 工具一样慎重对待。你（或模型）对任何运动指令负全责。
 
-> 🛡️ **运动审批门禁**：**43** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**，以及**改写/删除机器人上已存程序**的指令，在真正下发前会**暂停等待人工确认**：
+> 🛡️ **运动审批门禁**：**48** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**、**改写/删除机器人上已存程序**，以及**通过 Modbus 驱动现场总线设备**的指令，在真正下发前会**暂停等待人工确认**：
 >
 > | 分组 | 工具 |
 > |---|---|
@@ -17,6 +17,7 @@
 > | 力控与速度 | `ur_force_mode` `ur_end_force_mode` `ur_force_mode_settings` `ur_speedj` `ur_speedl` `ur_stopj` `ur_stopl` |
 > | 程序存储 | `ur_upload_program` `ur_delete_program` |
 > | 物理状态变更 | `ur_set_payload` `ur_set_payload_inertia` `ur_set_gravity` `ur_zero_ftsensor` `ur_motion_version` `ur_set_speed_scaling` `ur_set_conveyor_tracking` |
+> | Modbus 写类 | `ur_modbus_add_signal` `ur_modbus_delete_signal` `ur_modbus_send_custom_command` `ur_modbus_set_output_register` `ur_modbus_set_output_signal` |
 >
 > 交互式部署（审批策略为 `ask`）会在界面上弹出确认框。未组合审批服务、无代理、或应答不是 `allowed-once` 的调用都会**以拒绝方式安全关闭**（fail-closed）—— 指令被拒绝，绝不会到达机器人。默认值写在**代码**里（`config.requireApprovalForMotion ?? true`），因此"调用方跳过 schema 解析"也不会把门禁关掉；可用配置 `requireApprovalForMotion: false` 显式关闭。`test/approval-gate.test.mjs` 驱动真实工具注册表逐条验证上述行为，包括"多传一个 `op` 参数无法把调用改派到别的指令"。
 
@@ -28,7 +29,7 @@
 
 ## 功能一览
 
-共 **91** 个工具（`ur_*`）。
+共 **99** 个工具（`ur_*`）。
 
 | 类别 | 工具（`ur_*`） | 说明 |
 |---|---|---|
@@ -39,6 +40,7 @@
 | 设备信息 | `ur_get_robot_model` / `ur_get_serial_number` / `ur_get_uptime` / `ur_get_software_version` / `ur_get_safety_mode` / `ur_get_safety_status` / `ur_get_robot_mode` | 型号（含 `remote_control` 字段）/ 序列号 / 开机时长 / 软件版本 / 安全模式 / **安全与机器人状态位**（哪一类安全功能被触发，含 violation / fault；**限值数值本身**不经 RTDE/dashboard 暴露，需去 PolyScope 安全页读）/ 运行状态 |
 | 程序 | `ur_get_program_state` / `ur_load_program` / `ur_run_program` / `ur_stop_program` / `ur_pause_program` / `ur_list_programs` / `ur_upload_program` / `ur_download_program` / `ur_delete_program` | 程序状态、加载、运行、停止、暂停、SSH 列表，以及**程序文件的 SFTP 传输**。三个传输工具都**核对"到底做成了没有"**，而不是"请求已发出"：上传回读远端大小、下载回读本地大小、删除后确认文件真的不在了；下载**绝不静默覆盖**（目标已存在时先改名成 `<path>.bak`，备份失败就拒绝下载）。它们的本地路径被锁在 `programDir` 内 —— 见下文「本地文件访问」。`ur_list_programs` 扫描真机 `/programs` 或 URSim 的 `~/URSim_Linux-*/programs.*` 布局（可用 `programs_dir` 覆盖）；不传口令时会回报 `used_default_password`，并给出当前生效的 `host_key_policy`，可选 `known_hosts` 文件会让 SSH 切到 **`RejectPolicy` 严格校验主机指纹**（文件不存在直接报错，绝不静默退回）。运行/停止/暂停都会检查控制器应答并回带运行状态 |
 | 现场消息 | `ur_popup` / `ur_close_popup` / `ur_add_log` | 跟站在机器人旁边的人说话：在示教器上弹一个**模态**提示、关掉它、往**控制器自己的日志历史**里写一行。三者都不会让机械臂运动，因此都不在审批门禁后面；文本有注入校验（dashboard 按行解析命令，换行会注入另一条命令），长度上限 300 字符。注意 `ur_add_log` 会在控制器上**留下永久痕迹** —— 这正是它的用途，所以不要往里写密钥 |
+| Modbus | `ur_modbus_add_signal` / `ur_modbus_delete_signal` / `ur_modbus_get_signal_status` / `ur_modbus_send_custom_command` / `ur_modbus_set_output_register` / `ur_modbus_set_output_signal` / `ur_modbus_set_runstate_dependent_choice` / `ur_modbus_set_signal_update_frequency` | 现场总线 I/O：增删控制器监管的信号、读回一个信号、置输出寄存器与数字输出、发一条原始 Modbus 命令，以及调信号的程序状态行为与刷新频率。⚠️ vendored `urScript.py` 里那八个 `modbus_*` 方法**全是桩**（`raise NotImplementedError`），所以这些脚本是本插件自己拼的。⚠️ Modbus 写类**没有应答** —— 这些工具能证明的只是"这段 URScript 在控制器上跑完了"（首尾哨兵），**永远不能**证明 PLC 执行了，因此每条回执都带 `fieldbus_confirmed: false`；只有 `ur_modbus_get_signal_status` 能读回一个值（经输出寄存器，同样在哨兵之间回读）。信号名走**白名单**校验 —— 它会被拼进 URScript 字符串字面量，引号或换行等于注入脚本；读的时候必须显式声明 `kind`，因为 URScript 是强类型的（数字信号返回布尔、寄存器信号返回整数，一段脚本没法安全地回写两种）。五个写类工具在审批门禁后面；只读那一个与两个信号配置项不在 |
 | 寄存器 | `ur_get_int_register` / `ur_get_double_register` / `ur_get_bit_register` | 读取 Int / Double / Bool 寄存器 |
 | 健康检查 | `ur_ping` | 无需连接机器人，检测 worker / Python / URBasic 就绪 |
 | I/O | `ur_get_digital_in` / `ur_set_digital_out` / `ur_get_digital_in_bits` / `ur_get_digital_out_bits` / `ur_get_analog_in` / `ur_set_analog_out` / `ur_get_tool_analog_in` | 数字输入/输出（含批量读位、`which="tool"` 的工具端 I/O）与标准模拟输入/输出（**按工程单位收值**：URScript 的 `set_analog_out` 收的是相对电平 [0,1]；电流域端口可用 `full_scale: 20`）。读工具端数字输入是**哨兵校验**的：控制器若始终没回报脚本执行完毕，工具会拒绝给值，而不是报一个无法担保的数字 |

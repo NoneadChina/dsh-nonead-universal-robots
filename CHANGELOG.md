@@ -72,6 +72,40 @@ The text is **injection-checked**: the dashboard parses its commands line by lin
 another dashboard command — `"x\nshutdown"` is a shutdown. A newline or CR is therefore **rejected**
 with a clear error instead of being quietly replaced, and the text is capped at 300 characters.
 
+### Added — Modbus / fieldbus I/O (91 → 99 tools, 43 → 48 gated)
+
+Eight tools for the fieldbus side: `ur_modbus_add_signal`, `ur_modbus_delete_signal`,
+`ur_modbus_get_signal_status`, `ur_modbus_send_custom_command`, `ur_modbus_set_output_register`,
+`ur_modbus_set_output_signal`, `ur_modbus_set_runstate_dependent_choice` and
+`ur_modbus_set_signal_update_frequency`.
+
+**The vendored methods could not be reused**: all eight `modbus_*` methods in `urScript.py` are stubs
+(`raise NotImplementedError('Function Not yet implemented')`), so the URScript is built here, sent
+through the same start/finish-sentinel runner that `ur_check_pose` uses. That runner distinguishes
+"ran to the end" / "started but did not finish" / "the controller never ran it" — and the second and
+third outcomes are reported as failures with different wording, because they mean different things.
+
+The honesty boundary matters more here than anywhere else so far: **Modbus writes get no response**
+(the manual: `send custom command` "cannot be used to request data, since the response will not be
+received"). Everything these tools can prove is that the URScript ran on the controller — never that
+the PLC received it, let alone that a machine moved. Every reply therefore carries
+`fieldbus_confirmed: false`, and only `ur_modbus_get_signal_status` returns a real value (read back
+through an output register behind its own sentinels; a missing register is an error, not a zero).
+
+Two guards the shape of the API forced:
+- **Signal names are whitelist-checked.** They are interpolated into a URScript string literal, so a
+  name like `a", 0)` plus a newline would inject arbitrary script into the controller. Whitelist
+  (`[A-Za-z0-9_.- ]`, ≤64), not escaping.
+- **A read must declare `kind`.** URScript is strongly typed: a digital signal returns a bool and a
+  register returns an unsigned int, and one script cannot safely write both into a float register
+  (writing a bool there aborts the program). The tool refuses to guess; a wrong `kind` surfaces as
+  `NOT_EXECUTED` with an explicit explanation of both possibilities.
+
+`ur_modbus_add_signal`, `ur_modbus_delete_signal`, `ur_modbus_send_custom_command`,
+`ur_modbus_set_output_register` and `ur_modbus_set_output_signal` join the approval gate — they drive
+a PLC or change which fieldbus points the controller supervises. The read and the two
+signal-configuration tools do not.
+
 ### Fixed — documentation
 
 The READMEs claimed the RTDE recipe does not expose per-joint current "so `ur_get_joint_current` is

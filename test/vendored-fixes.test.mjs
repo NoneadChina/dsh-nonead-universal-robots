@@ -412,3 +412,44 @@ test('现场消息三个 op 必须走 dashboard 通道，并如实报"没得到�
   assert.equal(m.text_guard_applied, true, '两个吃文本的 op 都必须过注入防线')
   assert.equal(m.honest_on_no_reply, true, '拿不到控制器应答时报 NOT_EXECUTED，不假装成功')
 })
+
+test('★ Modbus：八个 op 走哨兵运行器，且如实标注"现场总线未被确认"', () => {
+  const m = probe.modbus_contract
+  assert.equal(m.all_dispatched, true, 'HANDLERS 必须挂上八个 Modbus op')
+  assert.equal(
+    m.all_use_sentinel_runner,
+    true,
+    '八个都要走"首尾哨兵 + 三种结局"的公共运行器 —— 否则"脚本有没有跑"无从判断',
+  )
+  assert.equal(
+    m.declares_fieldbus_unconfirmed,
+    true,
+    '★ Modbus 写类没有应答：必须回报 fieldbus_confirmed=false，不能声称 PLC 已执行',
+  )
+  assert.equal(m.status_reads_back, true, '唯一有回读的那条必须真的回读输出寄存器')
+  assert.equal(
+    m.status_kind_branches,
+    true,
+    '★ 数字/寄存器两种 kind 必须生成不同脚本（URScript 强类型，bool 写浮点寄存器会让程序中止）',
+  )
+  assert.equal(m.validators_used, true, '吃信号名的 op 都必须过白名单校验')
+  assert.equal(m.byte_list_validated, true, '字节数组必须逐项校验 0-255')
+  assert.equal(m.write_ops_gated, true, '五个写类 op 必须入审批门禁（能驱动 PLC）')
+  assert.equal(m.read_op_not_gated, true, '只读那条不该入审批门禁')
+  assert.equal(m.config_ops_not_gated, true, '两个信号配置项不该入审批门禁')
+})
+
+test('★ Modbus 参数防线：信号名注入与越界都必须被拒', () => {
+  const v = probe.modbus_validators
+  assert.equal(v.accepts_signal_name, true, '正常信号名必须放行')
+  assert.equal(v.accepts_ip, true, '正常 IPv4 必须放行')
+  assert.equal(v.accepts_bytes, true, '正常字节数组必须放行')
+  for (const key of Object.keys(v)) {
+    if (key.startsWith('accepts_')) continue
+    assert.equal(
+      v[key],
+      true,
+      `${key} 必须被拒绝 —— 信号名会被拼进 URScript 字符串字面量，引号/换行等于注入脚本`,
+    )
+  }
+})

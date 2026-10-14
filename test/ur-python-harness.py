@@ -962,5 +962,93 @@ def probe_messaging_ops_contract():
 out['messaging_ops_contract'] = probe_messaging_ops_contract()
 
 
+# ---------------------------------------------------------------------------
+# 24. Modbus：八个 op 的通道契约 + 信号名/字节数组的注入与范围防线 + 门禁归属
+# ---------------------------------------------------------------------------
+
+MODBUS_OPS = ('op_modbus_add_signal', 'op_modbus_delete_signal', 'op_modbus_get_signal_status',
+              'op_modbus_send_custom_command', 'op_modbus_set_output_register',
+              'op_modbus_set_output_signal', 'op_modbus_set_runstate_dependent_choice',
+              'op_modbus_set_signal_update_frequency')
+
+
+def probe_modbus_contract():
+    """八个 op 必须走"首尾哨兵 + 三种结局"的公共运行器，且如实标注现场总线未被确认。"""
+    src = open(os.path.join(PY, 'ur_worker.py'), encoding='utf-8').read()
+
+    def body(name):
+        start = src.index('def %s(' % name)
+        return src[start:src.index('\ndef ', start + 1)]
+
+    bodies = {name: body(name) for name in MODBUS_OPS}
+    status = bodies['op_modbus_get_signal_status']
+    host_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib', 'index.js')
+    host = open(host_path, encoding='utf-8').read()
+    approval = host[host.index('const APPROVAL_OPS = new Set(['):]
+    approval = approval[:approval.index(']);')]
+    return {
+        'all_dispatched': all(('"%s": %s' % (name[3:], name)) in src for name in MODBUS_OPS),
+        'all_use_sentinel_runner': all(
+            ('_modbus_verdict' in text or '_run_sentinel_script' in text) for text in bodies.values()),
+        'declares_fieldbus_unconfirmed': 'fieldbus_confirmed' in src,
+        # 唯一有回读的那条必须真的回读 payload 寄存器
+        'status_reads_back': 'MODBUS_PAYLOAD_REGISTER' in status,
+        # 数字/寄存器两种 kind 必须生成不同的脚本（URScript 强类型，不能靠一次转换蒙混）
+        'status_kind_branches': ('if v == True:' in status
+                                 and 'write_output_float_register(%d, v)' in status),
+        'validators_used': all('_modbus_text(' in bodies[name] for name in (
+            'op_modbus_add_signal', 'op_modbus_delete_signal',
+            'op_modbus_set_output_register', 'op_modbus_set_output_signal')),
+        'byte_list_validated': '_modbus_byte_list(' in bodies['op_modbus_send_custom_command'],
+        # 门禁归属：五个写类必须入，只读那个与两个配置项必须不入
+        'write_ops_gated': all("'%s'" % name[3:] in approval for name in (
+            'op_modbus_add_signal', 'op_modbus_delete_signal', 'op_modbus_send_custom_command',
+            'op_modbus_set_output_register', 'op_modbus_set_output_signal')),
+        'read_op_not_gated': "'modbus_get_signal_status'" not in approval,
+        'config_ops_not_gated': ("'modbus_set_runstate_dependent_choice'" not in approval
+                                 and "'modbus_set_signal_update_frequency'" not in approval),
+    }
+
+
+out['modbus_contract'] = probe_modbus_contract()
+
+
+def probe_modbus_validators():
+    """信号名/IP/整数/字节数组的防线：注入与越界都必须被拒。"""
+    results = {'accepts_signal_name': ur_worker._modbus_text('output1', 'signal_name') == 'output1',
+               'accepts_ip': ur_worker._modbus_ip('192.168.1.10', 'unit_ip') == '192.168.1.10',
+               'accepts_bytes': ur_worker._modbus_byte_list([17, 32, 2, 88], 'data') == [17, 32, 2, 88]}
+    text_cases = {'quote_injection': 'a", 0)', 'newline_injection': 'a\nshutdown()',
+                  'semicolon': 'a;b', 'empty': '', 'not_a_string': 5}
+    for name, bad in text_cases.items():
+        try:
+            ur_worker._modbus_text(bad, 'signal_name')
+            results['rejects_text_' + name] = False
+        except ValueError:
+            results['rejects_text_' + name] = True
+    for name, bad in {'octet_overflow': '192.168.1.300', 'not_an_ip': 'plc.local'}.items():
+        try:
+            ur_worker._modbus_ip(bad, 'unit_ip')
+            results['rejects_ip_' + name] = False
+        except ValueError:
+            results['rejects_ip_' + name] = True
+    for name, bad in {'byte_too_big': [256], 'empty': [], 'not_a_list': 'x'}.items():
+        try:
+            ur_worker._modbus_byte_list(bad, 'data')
+            results['rejects_bytes_' + name] = False
+        except ValueError:
+            results['rejects_bytes_' + name] = True
+    for name, bad in {'out_of_range': 70000, 'not_a_number': 'x'}.items():
+        try:
+            ur_worker._modbus_int(bad, 'register_value', 0, 65535)
+            results['rejects_int_' + name] = False
+        except ValueError:
+            results['rejects_int_' + name] = True
+    return results
+
+
+out['modbus_validators'] = probe_modbus_validators()
+
+
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + '\n')
 ur_worker._PROTOCOL_OUT.flush()

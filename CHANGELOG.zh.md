@@ -30,6 +30,20 @@
 
 文本经过**注入校验**：dashboard 按行解析命令（`dashboard.py` 拼的是 `'popup ' + text + '\n'`），所以文本里的换行会被当成**另一条 dashboard 命令**执行 —— `"x\nshutdown"` 就是一次关机。因此换行（与回车）一律**拒绝**并给出明确错误，而不是悄悄替换；文本长度上限 300 字符。
 
+### 新增 — Modbus / 现场总线 I/O（工具 91 → 99，受门禁 op 43 → 48）
+
+八个面向现场总线的工具：`ur_modbus_add_signal`、`ur_modbus_delete_signal`、`ur_modbus_get_signal_status`、`ur_modbus_send_custom_command`、`ur_modbus_set_output_register`、`ur_modbus_set_output_signal`、`ur_modbus_set_runstate_dependent_choice`、`ur_modbus_set_signal_update_frequency`。
+
+**vendored 的方法无法复用**：`urScript.py` 里那八个 `modbus_*` **全是桩**（`raise NotImplementedError('Function Not yet implemented')`），所以这里的 URScript 是自己拼的，走的是 `ur_check_pose` 那套首尾哨兵运行器。该运行器把"跑完 / 开始但没跑完 / 控制器根本没执行"三者分开 —— 后两种都报失败，但用词不同，因为它们含义不同。
+
+这里的诚实边界比此前任何一处都重要：**Modbus 写类没有应答**（手册原话：`send custom command` "cannot be used to request data, since the response will not be received"）。这些工具能证明的只有"这段 URScript 在控制器上跑过" —— 永远不能证明 PLC 收到，更不能证明设备动了。因此每条回执都带 `fieldbus_confirmed: false`；只有 `ur_modbus_get_signal_status` 会返回真实数值（经输出寄存器在哨兵之间回读；寄存器读不到就报错，不拿 0 冒充）。
+
+接口形状逼出来的两条防线：
+- **信号名走白名单**：它会被拼进 URScript 字符串字面量，`a", 0)` 加一个换行就能把任意脚本注入控制器。用白名单（`[A-Za-z0-9_.- ]`，≤64），不做转义。
+- **读的时候必须声明 `kind`**：URScript 是强类型的 —— 数字信号返回布尔、寄存器信号返回无符号整数，一段脚本没法安全地把两者都写进浮点寄存器（把 bool 写进浮点寄存器会让程序中止）。工具不猜；`kind` 写错会以 `NOT_EXECUTED` 暴露，并同时说明两种可能。
+
+`ur_modbus_add_signal`、`ur_modbus_delete_signal`、`ur_modbus_send_custom_command`、`ur_modbus_set_output_register`、`ur_modbus_set_output_signal` 加入审批门禁 —— 它们会驱动 PLC，或改变控制器监管哪些现场总线点位；只读那一个与两个信号配置项不入。
+
 ### 修复 — 文档
 
 两份 README 都写「RTDE 配方未暴露单关节电流，故未提供 `ur_get_joint_current`」。实际配方里一直有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的**工具。

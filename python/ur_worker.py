@@ -3793,6 +3793,279 @@ def op_add_log(p):
                % resp, "data": {"ip": ip, "text": text, "respond": resp}})
 
 
+# ---------------------------------------------------------------------------
+# Modbus（外部 PLC / 现场总线）
+#
+# ⚠️ vendored 的 `urScript.py` 里那八个 `modbus_*` 方法**全是桩**
+# （逐个 `raise NotImplementedError('Function Not yet implemented')`），**没有实现可复用** ——
+# 所以这里只能自己拼 URScript 发出去（与 `ur_check_pose` 同一条路）。
+#
+# ⚠️ 诚实边界：Modbus 的写类命令**没有应答**（手册原话：`send custom command`
+# "cannot be used to request data, since the response will not be received"）。因此这些工具能证明的
+# 只有"这段 URScript 确实在控制器上跑完了"（首尾哨兵）。它**不能**证明 PLC 收到了，更不能证明
+# 现场设备动了 —— 返回值里用 `fieldbus_confirmed: false` 把这条边界写死。
+# ---------------------------------------------------------------------------
+
+MODBUS_PAYLOAD_REGISTER = 18
+MODBUS_SIGNAL_NAME_RE = re.compile(r"^[A-Za-z0-9_.\- ]{1,64}$")
+MODBUS_IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _modbus_text(value, name):
+    """校验 Modbus 信号名 —— 它会**进 URScript 字符串字面量**，所以必须挡住引号与换行。
+
+    ⚠️ 注入防线（与 dashboard 那条同族）：名为 `a", 0)` + 换行 + `shutdown()` 的信号名能把任意
+    URScript 塞进控制器。信号名在 UR 里本来就是字母/数字/下划线/点/连字符/空格，所以这里用
+    **白名单**，而不是试图转义。
+    """
+    if not isinstance(value, str) or not MODBUS_SIGNAL_NAME_RE.match(value):
+        raise ValueError("%s 只允许字母/数字/下划线/点/连字符/空格，长度 1-64（实得 %r）。"
+                         "信号名会被拼进 URScript 字符串字面量，因此用白名单挡注入。" % (name, value))
+    return value
+
+
+def _modbus_ip(value, name):
+    """校验 IPv4 字符串（同样会进 URScript 字面量）。"""
+    if not isinstance(value, str) or not MODBUS_IP_RE.match(value):
+        raise ValueError("%s 必须是 IPv4 点分十进制字符串，例如 192.168.1.10（实得 %r）" % (name, value))
+    for part in value.split("."):
+        if int(part) > 255:
+            raise ValueError("%s 的每一段必须在 0-255 之间：%s" % (name, value))
+    return value
+
+
+def _modbus_int(value, name, low, high):
+    """校验整数并给出**带范围**的报错（模型能据此自己改）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("%s 必须是 %d-%d 的整数（实得 %r）" % (name, low, high, value))
+    if not low <= value <= high:
+        raise ValueError("%s 必须在 %d-%d 之间（实得 %r）" % (name, low, high, value))
+    return value
+
+
+def _modbus_byte_list(value, name):
+    """校验字节数组（`send custom command` 的 data）。"""
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("%s 必须是非空的字节数组，例如 [17, 32, 2, 88]（实得 %r）" % (name, value))
+    if len(value) > 64:
+        raise ValueError("%s 最多 64 个字节（实得 %d）" % (name, len(value)))
+    return [_modbus_int(item, "%s[%d]" % (name, index), 0, 255) for index, item in enumerate(value)]
+
+
+def _run_sentinel_script(robot, model, call_lines, call_name, *, payload_register=None,
+                         index=DEFAULT_SENTINEL_REGISTER, timeout=SEND_SCRIPT_VERIFY_TIMEOUT_S):
+    """发一段"首尾带哨兵"的 URScript，并把三种结局如实分开。
+
+    Returns `(outcome, info)`，outcome ∈ `"executed"` / `"partial"` / `"not_executed"`：
+      - 回读到**结束**哨兵 ⇒ executed：脚本确实在控制器上跑到了末尾；
+      - 只回读到**起始**哨兵 ⇒ partial：开始执行了但没跑完，多半在中间那句被控制器拒绝；
+      - 连起始哨兵都没有 ⇒ not_executed：未处于远程控制模式，或整段脚本被静默丢弃。
+    `payload_register` 非空时，调用方应在 `call_lines` 里把结果写进该 double 寄存器（结束哨兵之前）。
+    """
+    probe_token = _sentinel_token(_read_int_register(model, index))
+    probe = ("def dsh_modbus_probe():\n"
+             "  write_output_integer_register(%d, %d)\n"
+             "end\ndsh_modbus_probe()\n" % (index, probe_token))
+    if not _send_program(robot, probe):
+        return "not_executed", {"reason": "通道探测脚本未能送达控制器：%s" % _last_send_failure(robot)}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _read_int_register(model, index) == probe_token:
+            break
+        time.sleep(0.1)
+    else:
+        return "not_executed", {
+            "reason": "控制器没有执行探测脚本（output_int_register_%d 上看不到哨兵 %d）⇒ 它可能未处于"
+                      "远程控制模式（本地/示教器模式下 URScript 会被静默丢弃）。" % (index, probe_token)}
+
+    start_token = _sentinel_token(probe_token)
+    finish_token = _sentinel_token(start_token, probe_token)
+    lines = ["def %s():" % call_name,
+             "  write_output_integer_register(%d, %d)" % (index, start_token)]
+    lines += ["  " + line for line in call_lines]
+    lines.append("  write_output_integer_register(%d, %d)" % (index, finish_token))
+    lines += ["end", "%s()" % call_name]
+    if not _send_program(robot, "\n".join(lines) + "\n"):
+        return "not_executed", {"reason": "脚本未能送达控制器：%s" % _last_send_failure(robot)}
+
+    deadline = time.time() + timeout
+    observed = probe_token
+    while time.time() < deadline:
+        observed = _read_int_register(model, index)
+        if observed == finish_token:
+            break
+        time.sleep(0.05)
+    info = {"observed": observed, "probe_token": probe_token, "start_token": start_token,
+            "finish_token": finish_token, "register": index,
+            "payload": None if payload_register is None else _read_double_register(model, payload_register)}
+    if observed == finish_token:
+        return "executed", info
+    if observed == start_token:
+        return "partial", info
+    return "not_executed", info
+
+
+def _modbus_verdict(ip, robot, model, call_line, fn_name, data, *, payload_register=None,
+                    executed_note="URScript 已在控制器上执行完毕（首尾哨兵确认）"):
+    """跑一条 Modbus 调用并把结果翻译成 ok / err。三种结局分开说话，不夸大也不隐瞒。"""
+    outcome, info = _run_sentinel_script(robot, model, [call_line], fn_name,
+                                        payload_register=payload_register)
+    out = dict(data)
+    out["ip"] = ip
+    out["fieldbus_confirmed"] = False
+    if payload_register is not None and outcome == "executed":
+        out["value_raw"] = info.get("payload")
+    if outcome == "executed":
+        return ok({"message": ("%s。⚠️ 这**不**证明 PLC/现场设备执行了：Modbus 的写类命令没有应答"
+                               "（手册：expects no response），现场总线侧未被确认。" % executed_note),
+                   "data": out, "outcome": outcome})
+    if outcome == "partial":
+        return err("脚本在控制器上**开始执行但没跑完**（只回读到起始哨兵）⇒ 那句调用很可能被控制器"
+                   "拒绝了（信号不存在 / 类型不符 / 地址非法）。⚠️ 但**不能**据此断定现场设备没收到任何"
+                   "东西：中止也可能发生在结果回写那一步。", "NOT_EXECUTED", out)
+    return err("控制器没有执行这段 URScript（连起始哨兵都没回读到）⇒ 本次命令**是否生效未知**。%s"
+               % info.get("reason", ""), "NOT_EXECUTED", out)
+
+
+def op_modbus_add_signal(p):
+    """添加一个 Modbus 信号（URScript `modbus_add_signal`）。`signal_type`：0 数字输入 / 1 数字输出 /
+    2 寄存器输入 / 3 寄存器输出。同名信号会被替换。⚠️ 受审批门禁（让控制器开始监管新的现场总线点位）。"""
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    unit_ip = _modbus_ip(p.get("unit_ip"), "unit_ip")
+    slave = _modbus_int(p.get("slave_number", 255), "slave_number", 0, 255)
+    address = _modbus_int(p.get("signal_address"), "signal_address", 0, 65535)
+    kind = _modbus_int(p.get("signal_type"), "signal_type", 0, 3)
+    name = _modbus_text(p.get("signal_name"), "signal_name")
+    line = 'modbus_add_signal("%s", %d, %d, %d, "%s")' % (unit_ip, slave, address, kind, name)
+    return _modbus_verdict(ip, robot, model, line, "dsh_modbus_add_signal",
+                           {"unit_ip": unit_ip, "slave_number": slave, "signal_address": address,
+                            "signal_type": kind, "signal_name": name})
+
+
+def op_modbus_delete_signal(p):
+    """删除一个 Modbus 信号（URScript `modbus_delete_signal`）。⚠️ 受审批门禁（删掉一个正在被现场
+    逻辑使用的点位，后果不比一次运动轻）。"""
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    name = _modbus_text(p.get("signal_name"), "signal_name")
+    line = 'modbus_delete_signal("%s")' % name
+    return _modbus_verdict(ip, robot, model, line, "dsh_modbus_delete_signal",
+                           {"signal_name": name})
+
+
+def op_modbus_get_signal_status(p):
+    """读一个 Modbus 信号的当前值（URScript `modbus_get_signal_status`）——**这一条有真正的回读**。
+
+    ⚠️ 必须显式声明 `kind`：URScript 是强类型的，数字信号返回 true/false、寄存器信号返回无符号整数，
+    这两种返回值没法用同一段脚本安全地回写（拿 bool 去写 float 寄存器会在控制器上报错），所以
+    工具不猜、由调用方声明。
+    """
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    name = _modbus_text(p.get("signal_name"), "signal_name")
+    kind = p.get("kind", "register")
+    if kind not in ("digital", "register"):
+        raise ValueError("kind 只能是 'digital'（数字信号 ⇒ true/false）或 'register'（寄存器信号 ⇒ "
+                         "无符号整数）；实得 %r" % (p.get("kind"),))
+    if kind == "digital":
+        lines = ['local v = modbus_get_signal_status("%s", False)' % name,
+                 "if v == True:",
+                 "  write_output_float_register(%d, 1)" % MODBUS_PAYLOAD_REGISTER,
+                 "else:",
+                 "  write_output_float_register(%d, 0)" % MODBUS_PAYLOAD_REGISTER,
+                 "end"]
+    else:
+        lines = ['local v = modbus_get_signal_status("%s", False)' % name,
+                 "write_output_float_register(%d, v)" % MODBUS_PAYLOAD_REGISTER]
+
+    outcome, info = _run_sentinel_script(robot, model, lines, "dsh_modbus_get_signal_status",
+                                        payload_register=MODBUS_PAYLOAD_REGISTER)
+    data = {"signal_name": name, "kind": kind, "ip": ip, "fieldbus_confirmed": False}
+    if outcome != "executed":
+        data["value"] = None
+        if outcome == "partial":
+            return err("读信号脚本在控制器上开始执行但没跑完（只回读到起始哨兵）⇒ 很可能该信号不存在，"
+                       "或 kind 声明与该信号类型不符（数字/寄存器不是一个类型）。", "NOT_EXECUTED", data)
+        return err("控制器没有执行这段 URScript（连起始哨兵都没回读到）⇒ 本次读到的东西不可信，"
+                   "**没有**给出数值。%s" % info.get("reason", ""), "NOT_EXECUTED", data)
+    if info.get("payload") is None:
+        return err("脚本跑完了，但 double 寄存器 %d 上回读不到值（该寄存器可能未在接收配方里启用）"
+                   "⇒ 拒绝给一个无法担保的数字。" % MODBUS_PAYLOAD_REGISTER, "UNSUPPORTED", data)
+    value = float(info["payload"])
+    data["value"] = bool(round(value)) if kind == "digital" else int(round(value))
+    return ok({"message": "信号 %s（%s）= %s（脚本执行完毕且结果已回读）。" % (name, kind, data["value"]),
+               "data": data, "outcome": outcome})
+
+
+def op_modbus_send_custom_command(p):
+    """向 Modbus 单元发一条自定义命令（URScript `modbus_send_custom_command`）。
+    ⚠️ 手册明确**收不到应答**，且用户需自己保证 data 对该 function_code 有意义。
+    ⚠️ 受审批门禁：它能直接驱动 PLC（例如改看门狗、写寄存器）。"""
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    unit_ip = _modbus_ip(p.get("unit_ip"), "unit_ip")
+    slave = _modbus_int(p.get("slave_number"), "slave_number", 0, 255)
+    code = _modbus_int(p.get("function_code"), "function_code", 1, 127)
+    data = _modbus_byte_list(p.get("data"), "data")
+    line = 'modbus_send_custom_command("%s", %d, %d, [%s])' % (
+        unit_ip, slave, code, ", ".join(str(b) for b in data))
+    return _modbus_verdict(ip, robot, model, line, "dsh_modbus_send_custom_command",
+                           {"unit_ip": unit_ip, "slave_number": slave, "function_code": code,
+                            "data": data})
+
+
+def op_modbus_set_output_register(p):
+    """把一个 Modbus 输出寄存器信号设成给定值（0-65535）。⚠️ 受审批门禁（直接驱动 PLC）。"""
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    name = _modbus_text(p.get("signal_name"), "signal_name")
+    value = _modbus_int(p.get("register_value"), "register_value", 0, 65535)
+    line = 'modbus_set_output_register("%s", %d, False)' % (name, value)
+    return _modbus_verdict(ip, robot, model, line, "dsh_modbus_set_output_register",
+                           {"signal_name": name, "register_value": value})
+
+
+def op_modbus_set_output_signal(p):
+    """把一个 Modbus 输出数字信号设成 true/false。⚠️ 受审批门禁（直接驱动 PLC）。"""
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    name = _modbus_text(p.get("signal_name"), "signal_name")
+    digital = p.get("digital_value")
+    if not isinstance(digital, bool):
+        raise ValueError("digital_value 必须是布尔值 true/false（实得 %r）" % (digital,))
+    line = 'modbus_set_output_signal("%s", %s, False)' % (name, "True" if digital else "False")
+    return _modbus_verdict(ip, robot, model, line, "dsh_modbus_set_output_signal",
+                           {"signal_name": name, "digital_value": digital})
+
+
+def op_modbus_set_runstate_dependent_choice(p):
+    """设置输出信号在程序未运行时的行为（0 保持 / 1 置低 / 2 置高）。不改现场设备，不受门禁。"""
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    name = _modbus_text(p.get("signal_name"), "signal_name")
+    choice = _modbus_int(p.get("runstate_choice"), "runstate_choice", 0, 2)
+    line = 'modbus_set_runstate_dependent_choice("%s", %d)' % (name, choice)
+    return _modbus_verdict(ip, robot, model, line, "dsh_modbus_set_runstate_choice",
+                           {"signal_name": name, "runstate_choice": choice},
+                           executed_note="该信号的程序状态依赖行为已设置（首尾哨兵确认脚本执行完毕）")
+
+
+def op_modbus_set_signal_update_frequency(p):
+    """设置该信号的刷新频率（0-125 Hz）。不改现场设备的值，不受门禁。"""
+    ip = str(p["ip"])
+    robot, model = ensure_connected(ip)
+    name = _modbus_text(p.get("signal_name"), "signal_name")
+    frequency = _modbus_int(p.get("update_frequency"), "update_frequency", 0, 125)
+    line = 'modbus_set_signal_update_frequency("%s", %d)' % (name, frequency)
+    return _modbus_verdict(ip, robot, model, line, "dsh_modbus_set_update_frequency",
+                           {"signal_name": name, "update_frequency": frequency},
+                           executed_note="刷新频率已设置（首尾哨兵确认脚本执行完毕）")
+
+
 def op_set_gravity(p):
     """设置重力方向向量的方向（单位向量），用于非水平安装。
 
@@ -4073,6 +4346,14 @@ HANDLERS = {
     "popup_message": op_popup_message,
     "close_popup": op_close_popup,
     "add_log": op_add_log,
+    "modbus_add_signal": op_modbus_add_signal,
+    "modbus_delete_signal": op_modbus_delete_signal,
+    "modbus_get_signal_status": op_modbus_get_signal_status,
+    "modbus_send_custom_command": op_modbus_send_custom_command,
+    "modbus_set_output_register": op_modbus_set_output_register,
+    "modbus_set_output_signal": op_modbus_set_output_signal,
+    "modbus_set_runstate_dependent_choice": op_modbus_set_runstate_dependent_choice,
+    "modbus_set_signal_update_frequency": op_modbus_set_signal_update_frequency,
     "send_script": op_send_script,
     "movej": op_movej,
     "movel": op_movel,
