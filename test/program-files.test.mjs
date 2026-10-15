@@ -99,6 +99,40 @@ test('★ 软链逃逸：字符串里没有 .. 也必须挡住（判据是 realp
   assert.match(asWrite.reason, /programDir 之外|逃出了 programDir/);
 });
 
+test('★ read 模式同样挡 junction 逃逸（stat 会跟着链接走）', async (t) => {
+  const { base, root } = await makeRoot(t);
+  const outside = join(base, 'outside-dir');
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, 'leak.urp'), '<urp/>');
+  try {
+    await symlink(outside, join(root, 'link'), 'junction');
+  } catch {
+    t.skip('本机无法创建链接（Windows 需要开发者模式/权限），跳过 read 逃逸用例');
+    return;
+  }
+  const out = checkLocalPath('link/leak.urp', { root, mode: 'read' });
+  assert.equal(out.ok, false, '文件 realpath 落在 programDir 之外必须拒绝（否则能读到目录外的任意 .urp）');
+  assert.match(out.reason, /programDir 之外/);
+});
+
+test('★ write 模式：目标文件自己是指向外面的链接也要挡住', async (t) => {
+  const { base, root } = await makeRoot(t);
+  const outside = join(base, 'outside-dir');
+  await mkdir(outside, { recursive: true });
+  const hijacked = join(outside, 'hijacked.urp');
+  await writeFile(hijacked, '<urp/>');
+  try {
+    // 文件级软链在 Windows 上需要特权（非特权的 EPERM）—— 建不了就跳过；POSIX 上会真跑。
+    await symlink(hijacked, join(root, 'planted.urp'));
+  } catch {
+    t.skip('本机无法创建文件级软链（Windows 非特权用户 EPERM），跳过该用例');
+    return;
+  }
+  const out = checkLocalPath('planted.urp', { root, mode: 'write' });
+  assert.equal(out.ok, false, '目标文件的 realpath 落在 programDir 之外必须拒绝（否则写入会跟着链接跑出去）');
+  assert.match(out.reason, /programDir 之外/);
+});
+
 test('远端路径：绝对、无 ..、且必须是 .urp', () => {
   assert.equal(checkRemotePath('/programs/pick.urp').ok, true);
   assert.equal(checkRemotePath('  /programs/pick.urp  ').path, '/programs/pick.urp', '两侧空白应被裁掉');
