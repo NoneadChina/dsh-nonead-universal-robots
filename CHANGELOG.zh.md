@@ -4,6 +4,42 @@
 
 ## [未发布]
 
+## [0.7.3] - 2026-10-15
+
+> **本地程序文件的牢笼在 Windows 上能被走出去，而本该拦住它的那道判据，恰好是唯一看不见这次
+> 逃逸的东西。** 一个不解 junction 的 `realpath` 会把 junction 路径原样报回来，于是"父目录
+> `realpath` 之后仍要在 `programDir` 内"这条要求**天然成立**。
+
+### 修复 — 牢笼漏掉了 Windows 的 junction，而且三条路径里有两条根本没解
+
+`programDir` 是拦住 `ur_upload_program` 读任意本地文件、`ur_download_program` 写任意本地文件的
+那层，所以每一种逃逸都必须被拒。Windows 实测：`programDir` 里的一条 junction（**免特权可建**，
+文件级软链则需特权）**不被 `lstat` 报成符号链接**（`isSymbolicLink()` 为 `false`），`readlink`
+直接答 `EINVAL`。JS 版 `fs.realpathSync` 是在用户态自己逐级解链接的，于是它把 junction 路径
+**原样返回** —— 判据根本看不到逃逸；最小复现确认，经这条 junction 写入的文件确实落在了
+`programDir` 之外。
+
+三处缺口，全部补上：
+
+- **根判据**改用 `realpathSync.native`（走 OS 的 `GetFinalPathNameByHandle`），它连同 junction
+  在内的所有重解析点一起解开。`rootReal` 与 write 模式的 `parentReal` 共用同一个变量，所以这一
+  处同时把两条判定重新武装起来。
+- **read 模式**原先对 candidate 只做 `stat`、从不解链接，而 `stat` 会跟着链接走。现在对 candidate
+  自身也解一次，并要求结果落在 `rootReal` 内。没有这一步，上传能顺着同一条 junction 读到
+  `programDir` 之外的 `.urp`。
+- **write 模式**原先只判父目录，于是**已经存在**的目标文件若是一条指向外面的软链，写入仍会跟着
+  它走；而一条**悬空**软链会让目标文件在目录外被创建。现在已存在的目标文件也要解一次，解不出
+  真实路径的链接一律拒绝，而不是被当成"文件不存在"放行。
+
+`checkProgramTransfer` 仍然只回答放行/拒绝，并把调用方给的 `local_path` 原样交下去，因此下游
+行为没有任何变化。
+
+### 测试 — 三个逃逸用例，都真跑
+
+`test/program-files.test.mjs` 新增了 read 模式的 junction 用例与"已存在目标是指向外面的链接"用例；
+write 模式的 junction 用例正是当初揪出这个缺陷的那条（它是整个套件里唯一的失败项）。
+`node --test test/program-files.test.mjs` → 11/11，无一跳过。
+
 ## [0.7.2] - 2026-10-15
 
 > **机器人在动、数字孪生却一直说"数据已停止更新"；运动前的位姿预检，把机械臂"此刻正站着"的位姿报成

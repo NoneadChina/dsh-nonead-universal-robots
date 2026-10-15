@@ -4,6 +4,45 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-15
+
+> **The local program-file cage could be walked out of on Windows, and the check meant to stop that
+> was the one thing that could not see the escape.** A `realpath` that does not resolve junctions
+> reported the junction path verbatim, so "the parent directory must still be inside `programDir`
+> after `realpath`" held by construction.
+
+### Fixed — the cage missed Windows junctions, and never resolved two of the three paths
+
+`programDir` is what stops `ur_upload_program` from reading an arbitrary local file and
+`ur_download_program` from writing one, so every escape has to be refused. Measured on Windows: a
+junction inside `programDir` (creatable without privilege — a file symlink is not) is **not** reported
+as a symbolic link by `lstat` (`isSymbolicLink()` is `false`), and `readlink` answers `EINVAL`. The JS
+`fs.realpathSync` resolves links itself in user space, so it returned the junction path **verbatim**:
+the guard never saw the escape, and a reproduction confirmed that a write through that junction landed
+outside `programDir`.
+
+Three gaps, all closed:
+
+- **The root judgement** now uses `realpathSync.native` (the OS `GetFinalPathNameByHandle`), which
+  resolves junctions along with every other reparse point. `rootReal` and the write-mode `parentReal`
+  share that one variable, so this re-arms both at once.
+- **Read mode** never resolved the candidate at all — it only `stat`ed it, and `stat` follows links. It
+  now resolves the candidate and requires the result inside `rootReal`. Without this, an upload could
+  read an out-of-tree `.urp` through the same junction.
+- **Write mode** judged only the parent directory, so a target file that already existed as a link
+  pointing outside was still followed by the write, and a *dangling* link would have had its target
+  created outside the tree. An existing target is now resolved too, and a link that cannot be resolved
+  is refused instead of being treated as an absent file.
+
+`checkProgramTransfer` still answers only allow/deny and hands the caller back the `local_path` it was
+given, so nothing downstream changes.
+
+### Tests — three escape cases, all really executed
+
+`test/program-files.test.mjs` gained the read-mode junction case and the existing-target-link case; the
+write-mode junction case is the one that caught this in the first place (it was the suite's single
+failing test). `node --test test/program-files.test.mjs` → 11/11, none skipped.
+
 ## [0.7.2] - 2026-10-15
 
 > **The digital twin kept saying "data stalled" while the robot was moving, the pre-flight pose check
