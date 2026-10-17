@@ -2,7 +2,10 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.4] - 2026-10
+
+### Changed
+- **Version unified to 0.7.4**: the repository now reports a single version across `package.json` and both changelogs. No functional changes in this release; it aligns the repository version with the 0.7.x plugin line already published.
 
 ## [0.7.3] - 2026-10-15
 
