@@ -1,0 +1,70 @@
+name: CI
+
+# 工程面门禁：静态/跨语言检查 + 42 个测试文件 + 5 个离线探针。
+# 这个仓库此前**没有任何 CI**，56 项套件只靠人工跑；这里把它变成每次 push/PR 的硬门槛。
+#
+# 注意：
+#   - Node 下限由门禁自己决定：`module.registerHooks` 需要 ≥22.15，两个 SSE 探针需要
+#     ≥22.3 的 --experimental-eventsource。`engines` 仍写 >=20（运行期），这里测真实开发下限。
+#   - 必须完整检出：`assets/models/*.glb`（14 个，约 20.86 MB）是普通 git 对象（非 LFS），
+#     `model-contract` / `texture-resize` 测试真的会读它们。
+#   - 宿主兼容检查（真实 value-schema DSL）需要 DSH Desktop 的 app.asar；普通 Linux runner 上
+#     会显式 SKIP（`npm test` 单独一行说明，不计入 56 项）。需要真机/宿主的发布校验在本地
+#     `npm run check:host:strict` 或 `node scripts/check-host-compat.mjs --host-asar <app.asar>`。
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: node ${{ matrix.node }} / python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.15', '24']
+        python: ['3.9', '3.12']
+    steps:
+      - name: Checkout (full; mesh assets are regular git blobs)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install Node dependencies
+        # 仓库目前没有 lockfile：有 package-lock.json 时用可复现的 `npm ci`，否则退回 `npm install`
+        # （两者都会装 devDependencies —— check-client-bundle 需要 esbuild、客户端测试需要 three）。
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Static + cross-language gates
+        run: npm run check
+
+      - name: Tests, gates and offline probes
+        run: npm test

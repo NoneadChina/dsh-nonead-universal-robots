@@ -17,6 +17,7 @@ import {
   TWIN_ASSET_PATH,
   TWIN_MODELS_PATH,
   TWIN_CODES,
+  MAX_TWIN_STREAMS,
   TWIN_STREAM_FRAME_ERROR_EVENT,
   TWIN_STREAM_STALE_EVENT,
   createTwinStateHandler,
@@ -70,6 +71,8 @@ test('失败必须带机器可读的 code（客户端据此给出不同提示）
     WORKER_UNAVAILABLE: 'worker_unavailable',
     ROBOT_ERROR: 'robot_error',
     BAD_REQUEST: 'bad_request',
+    // 0.7.5 / C8：SSE 并发连接超限（第 MAX_TWIN_STREAMS+1 条返回 429）
+    TOO_MANY_STREAMS: 'too_many_streams',
   });
 
   const none = await createTwinStateHandler({ worker, connectedIps: () => new Set() })({});
@@ -528,8 +531,13 @@ test('模型清单在目录缺失/未配置时返回空列表而不是报错', a
 //   ② 事件名叫 `error` ⇒ 被浏览器的 `EventSource.onerror` 接走 ⇒ 一次单帧失败就拆流，
 //      连来 8 次就进入终态 gaveup，孪生永久冻结。
 
-/** 捕获 SSE 写入的假响应（按 `\n\n` 切事件，解析 `event:` / `data:`）。 */
-function makeSseCapture() {
+/**
+ * 捕获 SSE 写入的假响应（按 `\n\n` 切事件，解析 `event:` / `data:`）。
+ *
+ * `writeOk` 可以是布尔或函数：返回 false 时模拟 Node 的**写背压**（`res.write()` 返回
+ * false，直到测试触发 `drain`）。`writes` 记录调用次数，是"背压期间有没有继续写"的判据。
+ */
+function makeSseCapture({ writeOk } = {}) {
   const events = [];
   let buffer = '';
   const handlers = new Map();
@@ -537,9 +545,14 @@ function makeSseCapture() {
     statusCode: 0,
     headers: {},
     ended: false,
+    /** `res.end(body)` 的正文（429 JSON 用；SSE 正常收尾时为 undefined）。 */
+    body: undefined,
+    /** `res.write()` 被调用的次数（含被背压挡下的那些）。 */
+    writes: 0,
     writeHead(status, headers) { res.statusCode = status; Object.assign(res.headers, headers ?? {}); },
     setHeader(name, value) { res.headers[name] = value; },
     write(chunk) {
+      res.writes += 1;
       buffer += String(chunk);
       let at;
       while ((at = buffer.indexOf('\n\n')) !== -1) {
@@ -549,12 +562,21 @@ function makeSseCapture() {
         const dataLine = /^data: (.*)$/mu.exec(raw)?.[1];
         events.push({ type, data: dataLine === undefined ? undefined : JSON.parse(dataLine) });
       }
-      return true;
+      return typeof writeOk === 'function' ? writeOk(chunk) !== false : writeOk !== false;
     },
-    end() { res.ended = true; },
+    end(chunk) {
+      res.ended = true;
+      if (chunk !== undefined) res.body = String(chunk);
+    },
     on(event, fn) {
       if (!handlers.has(event)) handlers.set(event, new Set());
       handlers.get(event).add(fn);
+    },
+    once(event, fn) { res.on(event, fn); },
+    removeListener(event, fn) { handlers.get(event)?.delete(fn); },
+    /** 触发一个事件（`drain` / `close` 等）；测试用它驱动生命周期。 */
+    emit(event, ...args) {
+      for (const fn of [...(handlers.get(event) ?? [])]) fn(...args);
     },
     /**
      * 测试收尾：触发 `close`，让 handler 清掉自己的 interval。
@@ -562,7 +584,7 @@ function makeSseCapture() {
      * ⚠️ **每个用例末尾都必须调用**，否则那条 SSE 的 `setInterval` 会一直挂着，
      * `node test/x.test.mjs` 跑完之后进程不退出（表现成"测试卡住"）。
      */
-    close() { for (const fn of handlers.get('close') ?? []) fn(); },
+    close() { res.emit('close'); },
   };
   return { res, events };
 }
@@ -852,5 +874,286 @@ test('推送读取抛错时静默降级到显式读（遥测是加分项，不�
 
   assert.equal(result.body.connected, true);
   assert.deepEqual(result.body.q, [0, 0, 0, 0, 0, 0]);
+});
+
+// ── C8（0.7.5）：并发上限 / 共享帧泵 / 背压 / 空闲超时 / 审批按 ip 归属 ──────
+//
+// 背景（`.audit/client-twin.md` P2-2 / P2-5）：以前"同一时刻只有一帧读在飞"是**每连接**
+// 变量，4 条连接就是 4 倍 worker 调用；而 Python worker 是单线程、`maxInFlight` 只有 8，
+// 堆满之后模型下发的**运动指令会被 WORKER_BUSY 拒绝**（可视化通道挤死控制通道）。
+// 下面把上限、合并（1×）、背压、空闲回收四条都钉住。
+
+test('C8：MAX_TWIN_STREAMS = 4（并发上限是对外契约的一部分）', () => {
+  assert.equal(MAX_TWIN_STREAMS, 4);
+});
+
+test('★ C8 并发上限：前 4 条 200，第 5 条 429 + too_many_streams，关闭后名额立即释放', () => {
+  const handler = createTwinStreamHandler({
+    worker,
+    connectedIps: () => new Set(['1.2.3.4']),
+    intervalMs: 1000,
+    detailMs: 0,
+  });
+  const accepted = [];
+  for (let i = 0; i < MAX_TWIN_STREAMS; i += 1) {
+    const req = requestOf();
+    const capture = makeSseCapture();
+    handler(req, capture.res);
+    assert.equal(capture.res.statusCode, 200, `第 ${i + 1} 条必须建立`);
+    accepted.push({ req, capture });
+  }
+
+  const overflow = makeSseCapture();
+  handler(requestOf(), overflow.res);
+  assert.equal(overflow.res.statusCode, 429);
+  assert.match(overflow.res.headers['content-type'], /application\/json/);
+  assert.match(overflow.res.headers['cache-control'], /no-store/);
+  const payload = JSON.parse(overflow.res.body);
+  assert.equal(payload.code, TWIN_CODES.TOO_MANY_STREAMS);
+  assert.equal(payload.code, 'too_many_streams');
+  assert.equal(payload.max, MAX_TWIN_STREAMS);
+  assert.equal(overflow.events.length, 0, '429 不得进入 SSE 状态机（不推事件、不占定时器）');
+
+  // 关闭一条 ⇒ 名额释放，新连接可以建立（计数在 cleanup 里归还）
+  accepted[0].req.close();
+  assert.equal(accepted[0].capture.res.ended, true, 'close 后必须 res.end()');
+  const replacementReq = requestOf();
+  const replacement = makeSseCapture();
+  handler(replacementReq, replacement.res);
+  assert.equal(replacement.res.statusCode, 200, '★ 释放后必须允许新连接（计数没有泄漏）');
+
+  // 429 自身不占名额：现在又满了，第 6 条仍应是 429
+  const sixth = makeSseCapture();
+  handler(requestOf(), sixth.res);
+  assert.equal(sixth.res.statusCode, 429);
+
+  for (const item of accepted) item.req.close();
+  replacementReq.close();
+});
+
+test('★ C8 共享帧泵：4 条连接 = 1 份 worker 调用（不再 4× 放大）', async () => {
+  let calls = 0;
+  const counting = {
+    call: async (op, params) => {
+      calls += 1;
+      return worker.call(op, params);
+    },
+  };
+  const handler = createTwinStreamHandler({
+    worker: counting,
+    connectedIps: () => new Set(['1.2.3.4']),
+    modelFor: () => 'UR3',
+    intervalMs: 20,
+    detailMs: 0,
+  });
+  const connections = [];
+  for (let i = 0; i < 4; i += 1) {
+    const req = requestOf();
+    const capture = makeSseCapture();
+    handler(req, capture.res);
+    connections.push({ req, capture });
+  }
+
+  await sleep(220); // ≈ 11 拍
+  for (const { capture } of connections) {
+    const frames = capture.events.filter((event) => event.type === 'state').length;
+    assert.ok(frames >= 5, `每条连接都必须持续收到帧（实测 ${frames}）`);
+  }
+  // 每拍一次读 = 2 次调用（get_joint_pose + get_tcp_pose）；11 拍 ≈ 22~24 次。
+  // 若退化成"每连接各读一次"则 ≈ 88~96 次 —— 上界 45 足以区分且不受 CI 抖动影响。
+  assert.ok(calls <= 45, `4 条连接 220ms 内 worker 调用 ${calls} 次，疑似共享帧泵失效（期望 ≈ 2×拍数）`);
+  assert.ok(calls >= 4, '至少要真的读过');
+
+  for (const { req } of connections) req.close();
+});
+
+test('★ C8 共享帧泵：读没回来时 4 条连接共用同一个在飞 Promise（只发一次读）', async () => {
+  let calls = 0;
+  const hanging = {
+    call: async () => {
+      calls += 1;
+      return new Promise(() => {});
+    },
+  };
+  const handler = createTwinStreamHandler({
+    worker: hanging,
+    connectedIps: () => new Set(['1.2.3.4']),
+    intervalMs: 10,
+    staleNotifyMs: 10,
+    detailMs: 0,
+    frameTimeoutMs: 60000, // 不让超时安全网介入
+  });
+  const connections = [];
+  for (let i = 0; i < 4; i += 1) {
+    const req = requestOf();
+    const capture = makeSseCapture();
+    handler(req, capture.res);
+    connections.push({ req, capture });
+  }
+
+  await sleep(90); // 9 拍
+  assert.equal(calls, 2, `4 条连接只该发起 2 次 worker 调用（两个 op 各一次），实测 ${calls}`);
+  for (const { capture } of connections) {
+    assert.ok(capture.events.some((event) => event.type === TWIN_STREAM_STALE_EVENT), '读没回来时每条连接都必须收到 stale（绝不静默）');
+  }
+
+  for (const { req } of connections) req.close();
+});
+
+test('★ C8 背压：write 返回 false 后停写（含心跳）且整组停读，drain 后恢复', async () => {
+  let blocked = false;
+  let calls = 0;
+  const counting = {
+    call: async (op, params) => {
+      calls += 1;
+      return worker.call(op, params);
+    },
+  };
+  const handler = createTwinStreamHandler({
+    worker: counting,
+    connectedIps: () => new Set(['1.2.3.4']),
+    modelFor: () => 'UR3',
+    intervalMs: 10,
+    heartbeatMs: 20,
+    detailMs: 0,
+  });
+  const req = requestOf();
+  const capture = makeSseCapture({ writeOk: () => !blocked });
+  handler(req, capture.res);
+  assert.ok(await waitFor(() => capture.events.some((event) => event.type === 'state')), 2000);
+
+  blocked = true;
+  await sleep(50); // 让下一次写撞上背压
+  const frozenWrites = capture.res.writes;
+  const frozenCalls = calls;
+  await sleep(100);
+  assert.equal(capture.res.writes, frozenWrites, '背压期间不得继续写（否则 Node 写缓冲无界增长）');
+  assert.equal(calls, frozenCalls, '整组都在背压时不得继续读（否则白占 worker 名额）');
+
+  blocked = false;
+  capture.res.emit('drain');
+  assert.ok(
+    await waitFor(() => capture.res.writes > frozenWrites + 1, 2000),
+    'drain 后必须恢复推帧',
+  );
+  assert.ok(calls > frozenCalls, 'drain 后必须恢复读取');
+  req.close();
+});
+
+test('★ C8 空闲超时：长时间没有数据事件 ⇒ 关闭连接并释放名额', async () => {
+  const hanging = { call: async () => new Promise(() => {}) };
+  const handler = createTwinStreamHandler({
+    worker: hanging,
+    connectedIps: () => new Set(['1.2.3.4']),
+    intervalMs: 10,
+    heartbeatMs: 10,
+    idleTimeoutMs: 60,
+    frameTimeoutMs: 60000, // 只测空闲看门狗，不让读超时介入
+    detailMs: 0,
+    maxStreams: 1, // 只有 1 个名额：若不释放，第二条会被 429
+  });
+  const req = requestOf();
+  const capture = makeSseCapture();
+  handler(req, capture.res);
+  assert.ok(await waitFor(() => capture.res.ended === true, 2000), '空闲到点必须关闭连接');
+
+  // 名额已释放：第二条连接必须被接受（若计数泄漏会是 429）
+  const req2 = requestOf();
+  const capture2 = makeSseCapture();
+  handler(req2, capture2.res);
+  assert.equal(capture2.res.statusCode, 200, '★ 空闲关闭必须归还并发名额');
+  req2.close();
+});
+
+test('★ C8 待审批目标按 ip 归属：绝不把 B 的审批画到 A 上', async () => {
+  const h = createTwinStateHandler({
+    worker,
+    connectedIps: () => new Set(['10.0.0.1', '10.0.0.2']),
+  });
+  const token = pendingMotion.begin('ur_movej', { q: [0.1, 0, 0, 0, 0, 0] }, '10.0.0.1');
+  try {
+    const a = await h({ ip: '10.0.0.1' });
+    assert.ok(a.body.pending_motion, '目标机必须看到自己的待审批目标');
+    assert.equal(a.body.pending_motion.kind, 'joints');
+
+    const b = await h({ ip: '10.0.0.2' });
+    assert.equal(b.body.pending_motion, undefined, '★ 另一台机器人不得看到别人的待审批目标');
+  } finally {
+    pendingMotion.end(token);
+  }
+});
+
+test('C8 兼容：legacy 预览（begin 没有 ip）不会被 ip 过滤掉', async () => {
+  const h = createTwinStateHandler({ worker, connectedIps: () => new Set(['10.0.0.1']) });
+  const token = pendingMotion.begin('ur_movel', { pose: [0, 0, 0, 0, 0, 0] });
+  try {
+    const r = await h({ ip: '10.0.0.1' });
+    assert.ok(r.body.pending_motion, '旧调用方没有 ip 时必须保持旧行为（单机场景）');
+  } finally {
+    pendingMotion.end(token);
+  }
+});
+
+test('★ C8 共享帧泵不跨 ip：A/B 两条连接各读各的机器人（绝不把 B 的位姿推给 A）', async () => {
+  const seen = [];
+  const spy = {
+    call: async (op, params) => {
+      seen.push(`${op}:${params?.ip}`);
+      return worker.call(op, params);
+    },
+  };
+  const handler = createTwinStreamHandler({
+    worker: spy,
+    connectedIps: () => new Set(['10.0.0.1', '10.0.0.2']),
+    modelFor: () => 'UR3',
+    intervalMs: 20,
+    detailMs: 0,
+  });
+  const reqA = requestOf('/twin/stream?ip=10.0.0.1');
+  const reqB = requestOf('/twin/stream?ip=10.0.0.2');
+  const capA = makeSseCapture();
+  const capB = makeSseCapture();
+  handler(reqA, capA.res);
+  handler(reqB, capB.res);
+
+  assert.ok(
+    await waitFor(
+      () => capA.events.some((e) => e.type === 'state') && capB.events.some((e) => e.type === 'state'),
+      2000,
+    ),
+    '两条连接都必须收到帧',
+  );
+  assert.ok(seen.includes('get_joint_pose:10.0.0.1'), 'A 的读必须带 A 的 ip');
+  assert.ok(seen.includes('get_joint_pose:10.0.0.2'), 'B 的读必须带 B 的 ip');
+  assert.equal(capA.events.find((e) => e.type === 'state')?.data.ip, '10.0.0.1');
+  assert.equal(capB.events.find((e) => e.type === 'state')?.data.ip, '10.0.0.2');
+
+  reqA.close();
+  reqB.close();
+});
+
+test('C8 组内部分关闭：剩余连接继续收帧（组不因一个订阅者退出而停摆）', async () => {
+  const handler = createTwinStreamHandler({
+    worker,
+    connectedIps: () => new Set(['1.2.3.4']),
+    modelFor: () => 'UR3',
+    intervalMs: 20,
+    detailMs: 0,
+  });
+  const reqA = requestOf();
+  const reqB = requestOf();
+  const capA = makeSseCapture();
+  const capB = makeSseCapture();
+  handler(reqA, capA.res);
+  handler(reqB, capB.res);
+  assert.ok(await waitFor(() => capB.events.some((e) => e.type === 'state')), 2000);
+
+  reqA.close();
+  const framesAtClose = capB.events.filter((e) => e.type === 'state').length;
+  assert.ok(
+    await waitFor(() => capB.events.filter((e) => e.type === 'state').length > framesAtClose + 1, 2000),
+    '另一条连接关闭后，剩余连接必须继续收到帧',
+  );
+  reqB.close();
 });
 

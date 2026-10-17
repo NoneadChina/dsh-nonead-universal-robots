@@ -2,6 +2,23 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.5] - 2026-10
+
+### 修复
+- **`ur_run_program` 可能执行与审批不符的程序**：`play` 前必须确认加载成功（load 已发送、已加载程序非空、basename 与目标一致、应答不是失败文案）。`ur_load_program` 只有拿到正向证据才报 `confirmed: true`。
+- **运动类调用超时不再杀 worker**：`MOTION_OPS` 与 `APPROVAL_OPS` 解耦；`ur_wait_steady` 按 `timeout_s` 计预算并带 `killOnTimeout: false`；运动在飞（或状态未知）时，任何超时/取消都不再杀 Python 子进程 —— RTDE/Dashboard 会话、数字孪生与停止机械臂的能力得以保留。
+- **预飞安全闸补齐**：`draw_*` 的半径/边长/圆心/原点、加速度（`safetyMaxAccel`）、力控 `limits` / `task_frame` / `wrench` / `selection_vector`、`speedj`/`speedl` 形状全部校验；参数"出现但不合格"一律拒绝，不再当作未提供跳过。
+- **审批覆盖**：`set_tcp`、数字/模拟输出、工具电压/输出模式/通信、传送带 tick 纳入门禁（共 53 个）；`stopj` / `stopl` / `end_force_mode` 移出门禁 —— 停止动作不应反过来要人工批准。
+- **`ur_delete_program`** 在宿主与 worker 两侧都校验远端路径；**`programDir`** 改为注入 realpath 后的绝对路径，不再让 Python 按自身 cwd 解析；下载增加大小上限。
+- **审批 / 审计**：`ur_send_script` 展示完整脚本、sha256 与字节数（上限 64 KiB）；SSH 口令在审批正文与审计账本中脱敏；关闭审批时受门禁 op 仍记审计。
+- **数值加固**：轴位移 `distance` 拒绝 NaN/Infinity；`set_tcp` 增加幅值上限。
+- **数字孪生**：按机器人共享帧泵（不再 N 倍放大 worker 调用）、最多 4 条并发流（超出返回 429）、写入背压、空闲超时、待审批预览按机器人隔离。
+- **工程面**：新增 CI；宿主兼容门禁支持 `--host-asar` / `--strict`；peer 范围接受当前宿主；`THIRD_PARTY_NOTICES.md` 进入 npm 包；README 计数更正。
+
+### 变更
+- 审批门禁：49 → 53 个；README 表格与 `check-approval-gate.py` 同步。
+- 取消/超时现在会明确提示"机器人可能仍在运动，请用 `ur_stopj` / `ur_stopl` 收尾"，插件不再为此拆除 worker 会话。
+
 ## [0.7.4] - 2026-10
 
 ### 变更

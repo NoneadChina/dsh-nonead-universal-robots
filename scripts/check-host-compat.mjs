@@ -13,15 +13,20 @@
  *   4. dsh.client 声明与客户端 bundle：类型契约、`exports["./client"]` 可解析、bundle 以包名注册。
  *
  * 用法：
- *   node scripts/check-host-compat.mjs [hostNodeModules]
+ *   node scripts/check-host-compat.mjs [hostNodeModules] [--strict]
+ *   node scripts/check-host-compat.mjs --host-asar <resources/app.asar> [--strict]
  *   缺省依次尝试 $DSH_HOST_NODE_MODULES、../dsh-plugin-desktop/node_modules、自插件目录向上查找。
+ *   `--host-asar` 用于 DSH Desktop 的标准安装形态（node_modules 打包在 app.asar 内、磁盘上没有
+ *   目录）：脚本只读 asar 头，把实际 import 到的包懒解包到临时目录，DSL 校验仍然真实执行。
+ *   `--strict`（发布门禁用）：缺少宿主即 exit 2，不因 --allow-missing-host 而放行。
  *
- * 退出码：0 = 全部通过；1 = 存在失败；2 = 环境错误。
+ * 退出码：0 = 全部通过或（非 strict 下）明确 SKIP；1 = 存在失败；2 = 环境错误。
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, openSync, readSync, closeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { createRequire, registerHooks } from 'node:module'
+import { createRequire, registerHooks, isBuiltin } from 'node:module'
 import { dirname, join, resolve as resolvePath } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { expectedToolCount } from './tool-registry.mjs'
 
@@ -55,6 +60,176 @@ const fail = (title, detail) => {
 }
 const note = (text) => console.log(`note  ${text}`)
 
+// ── 命令行选项 ─────────────────────────────────────────────────────────────
+// `--host-asar <path>`：宿主以 Electron 的 app.asar 形态安装时（DSH Desktop 的默认形态），
+// 磁盘上没有 `node_modules` 目录，`findHostModules` 永远找不到。这个模式把 asar 当作只读
+// 虚拟 node_modules：按需把被 import 的包解包到临时目录，再用 Node 正常解析（含 exports/子路径），
+// 因此 `@deepseek-ai/dsh-tools` 的真实 value-schema DSL 仍然被真正执行。
+// `--strict`：缺少宿主即失败（发布门禁用）；`--allow-missing-host` 仍用于本地 `npm run check`。
+const ARGV = process.argv.slice(2)
+const HOST_ASAR_INDEX = ARGV.indexOf('--host-asar')
+const HOST_ASAR = (() => {
+  if (HOST_ASAR_INDEX < 0) return undefined
+  const value = ARGV[HOST_ASAR_INDEX + 1]
+  if (value === undefined || value.startsWith('--')) {
+    console.error('--host-asar 需要一个 asar 路径：node scripts/check-host-compat.mjs --host-asar <resources/app.asar>')
+    process.exit(2)
+  }
+  return value
+})()
+const STRICT = ARGV.includes('--strict')
+const ALLOW_MISSING_HOST = ARGV.includes('--allow-missing-host')
+const EXPLICIT_HOST = ARGV.find((arg, index) => !arg.startsWith('--')
+  && !(HOST_ASAR_INDEX >= 0 && index === HOST_ASAR_INDEX + 1))
+
+/** 从裸 import 说明符里取出包名（scope 感知）。 */
+function packageNameOf(specifier) {
+  if (specifier.startsWith('@')) {
+    const [scope, name] = specifier.split('/')
+    return name === undefined || name === '' ? undefined : `${scope}/${name}`
+  }
+  const [name] = specifier.split('/')
+  return name === '' ? undefined : name
+}
+
+/**
+ * 把 app.asar 当作只读的 node_modules 使用。
+ *
+ * asar 文件头是 Chromium pickle：`[4]` = header 区长度、`[12]` = JSON 长度，JSON 从偏移 16 开始，
+ * 文件数据区从 `8 + headerSize` 开始。本函数只在内存里解析一次 header，按包懒解包到临时目录；
+ * `unpacked` 文件从 `<asar>.unpacked` 读取，`link`（硬链）按目标路径读取。
+ */
+function createAsarHost(asarPath) {
+  const unpackedRoot = `${asarPath}.unpacked`
+  const fd = openSync(asarPath, 'r')
+  const head = Buffer.alloc(16)
+  readSync(fd, head, 0, 16, 0)
+  const headerSize = head.readUInt32LE(4)
+  const jsonSize = head.readUInt32LE(12)
+  if (!Number.isInteger(headerSize) || !Number.isInteger(jsonSize) || jsonSize <= 0) {
+    closeSync(fd)
+    throw new Error(`不是有效的 asar 文件（header 长度异常）：${asarPath}`)
+  }
+  const headerBuf = Buffer.alloc(jsonSize)
+  readSync(fd, headerBuf, 0, jsonSize, 16)
+  const header = JSON.parse(headerBuf.toString('utf8'))
+  const base = 8 + headerSize
+
+  const tempRoot = mkdtempSync(join(tmpdir(), 'dsh-host-asar-'))
+  const modulesDir = join(tempRoot, 'node_modules')
+  mkdirSync(modulesDir, { recursive: true })
+  writeFileSync(join(tempRoot, 'package.json'), '{"name":"dsh-host-asar","private":true}\n')
+  const noopPath = join(tempRoot, 'noop.js')
+  writeFileSync(noopPath, 'export {}\n')
+  const noopUrl = pathToFileURL(noopPath).href
+
+  const extracted = new Set()
+  const absent = new Set()
+
+  /** 按相对路径取 asar header 节点（目录节点带 `.files`）。 */
+  function asarNode(parts) {
+    let node = header.files
+    for (const part of parts) {
+      node = node?.[part]
+      if (node === undefined) return undefined
+      node = node.files ?? node
+    }
+    return node
+  }
+
+  function readMeta(meta, relParts) {
+    if (meta.unpacked === true) {
+      const abs = join(unpackedRoot, ...relParts)
+      return existsSync(abs) ? readFileSync(abs) : null
+    }
+    if (typeof meta.link === 'string') return readRel(meta.link)
+    if (meta.offset === undefined || typeof meta.size !== 'number') return null
+    const buf = Buffer.alloc(meta.size)
+    readSync(fd, buf, 0, meta.size, base + Number(meta.offset))
+    return buf
+  }
+
+  function readRel(relPath) {
+    const parts = relPath.split('/')
+    const node = asarNode(parts.slice(0, -1))
+    if (node === undefined) return null
+    const meta = node[parts[parts.length - 1]]
+    if (meta === undefined || meta.files !== undefined) return null
+    return readMeta(meta, parts)
+  }
+
+  function walkDir(node, relParts, destDir) {
+    for (const [name, meta] of Object.entries(node)) {
+      const childParts = [...relParts, name]
+      const dest = join(destDir, name)
+      if (meta.files !== undefined) {
+        mkdirSync(dest, { recursive: true })
+        walkDir(meta.files, childParts, dest)
+        continue
+      }
+      const buf = readMeta(meta, childParts)
+      if (buf === null) continue
+      mkdirSync(dirname(dest), { recursive: true })
+      writeFileSync(dest, buf)
+    }
+  }
+
+  function ensureManifest(name) {
+    if (absent.has(name)) return false
+    const parts = name.split('/')
+    const dest = join(modulesDir, ...parts, 'package.json')
+    if (existsSync(dest)) return true
+    const buf = readRel(['node_modules', ...parts, 'package.json'].join('/'))
+    if (buf === null) {
+      absent.add(name)
+      return false
+    }
+    mkdirSync(dirname(dest), { recursive: true })
+    writeFileSync(dest, buf)
+    return true
+  }
+
+  function ensurePackage(name) {
+    if (extracted.has(name)) return true
+    if (!ensureManifest(name)) return false
+    const rootParts = ['node_modules', ...name.split('/')]
+    const node = asarNode(rootParts)
+    if (node === undefined) return false
+    const destDir = join(modulesDir, ...name.split('/'))
+    mkdirSync(destDir, { recursive: true })
+    walkDir(node, rootParts, destDir)
+    extracted.add(name)
+    return true
+  }
+
+  // 预解包：DSL 编译直接 import 的包、peer 版本展示要读 manifest 的包、以及 semver（node:module
+  // 的 createRequire 走文件系统，钩子不参与）。其余依赖由 import 钩子按需解包。
+  ensureManifest('@deepseek-ai/dsh')
+  for (const name of ['@deepseek-ai/dsh-tools', '@deepseek-ai/cordis', '@deepseek-ai/schemastery', 'semver']) {
+    if (!ensurePackage(name)) {
+      closeSync(fd)
+      rmSync(tempRoot, { recursive: true, force: true })
+      throw new Error(`asar 里缺少 ${name}（不是完整的 DSH 宿主安装？）：${asarPath}`)
+    }
+  }
+
+  let cleaned = false
+  function cleanup() {
+    if (cleaned) return
+    cleaned = true
+    try { closeSync(fd) } catch { /* already closed */ }
+    if (process.env.DSH_HOST_ASAR_KEEP === '1') {
+      console.log(`note  --host-asar 解包目录保留（DSH_HOST_ASAR_KEEP=1）：${tempRoot}`)
+      return
+    }
+    try { rmSync(tempRoot, { recursive: true, force: true }) } catch { /* Windows 偶发占用，交给系统清理 */ }
+  }
+  process.once('exit', cleanup)
+
+  return { modulesDir, noopUrl, ensurePackage, ensureManifest, cleanup, asarPath }
+}
+
+
 /**
  * Windows 上 `Program Files` 不在 PATH 里，只能枚举目录来找宿主的 node_modules。
  *
@@ -80,8 +255,7 @@ function desktopCandidates() {
 }
 
 /** 定位宿主 node_modules（含 @deepseek-ai/dsh-tools 的那个）。 */
-function findHostModules(argv) {
-  const explicit = typeof argv[2] === 'string' && !argv[2].startsWith('--') ? argv[2] : undefined
+function findHostModules(explicit) {
   const candidates = [
     explicit,
     process.env.DSH_HOST_NODE_MODULES,
@@ -130,23 +304,34 @@ function hostEntry(hostModules, specifier) {
   return typeof relative === 'string' ? pathToFileURL(join(packageDir, relative)).href : undefined
 }
 
-const hostModules = findHostModules(process.argv)
+const asarHost = (() => {
+  if (HOST_ASAR === undefined) return undefined
+  try {
+    return createAsarHost(HOST_ASAR)
+  } catch (cause) {
+    console.error(`--host-asar 失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    process.exit(2)
+  }
+})()
+
+const hostModules = asarHost !== undefined ? asarHost.modulesDir : findHostModules(EXPLICIT_HOST)
 if (hostModules === undefined) {
   const message =
     '找不到宿主 node_modules（需要含 @deepseek-ai/dsh-tools 的那一份）；' +
-    '请显式传路径：node scripts/check-host-compat.mjs <host node_modules>'
-  // `--allow-missing-host` 让这条门禁可以安全地接入 `npm run check`：装了宿主的机器
-  // 会真跑校验，没装的机器得到一条**响亮的跳过说明**而不是硬失败。
-  // 默认（不带该开关）仍然是 exit 2 —— 环境错误必须与"检查通过"区分开。
-  if (process.argv.includes('--allow-missing-host')) {
+    '请显式传路径：node scripts/check-host-compat.mjs <host node_modules>，' +
+    '或用 --host-asar <resources/app.asar> 读取 DSH Desktop 的 asar 安装'
+  // 优先级：`--strict`（发布门禁，缺宿主即失败）> `--allow-missing-host`（本地 check，响亮 SKIP）
+  // > 默认（exit 2，环境错误必须与"检查通过"区分开）。
+  if (!STRICT && ALLOW_MISSING_HOST) {
     console.log(`SKIP  ${message}`)
     process.exit(0)
   }
   console.error(message)
+  if (STRICT) console.error('--strict：发布门禁不允许缺宿主 —— 先安装 DSH Desktop（或用 --host-asar 指定 app.asar）。')
   process.exit(2)
 }
 console.log(`plugin  ${PLUGIN_ROOT}`)
-console.log(`host    ${hostModules}`)
+console.log(`host    ${asarHost !== undefined ? `${asarHost.asarPath}  (解包到 ${hostModules})` : hostModules}`)
 console.log('')
 
 const manifest = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'package.json'), 'utf8'))
@@ -182,11 +367,32 @@ else {
 // ── 2/3. 用宿主真实的编译器驱动插件 ────────────────────────────────────────
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith('@deepseek-ai/')) {
-      const url = hostEntry(hostModules, specifier)
-      if (url !== undefined) return { url, shortCircuit: true }
+    if (asarHost === undefined) {
+      if (specifier.startsWith('@deepseek-ai/')) {
+        const url = hostEntry(hostModules, specifier)
+        if (url !== undefined) return { url, shortCircuit: true }
+      }
+      return nextResolve(specifier, context)
     }
-    return nextResolve(specifier, context)
+
+    // asar 模式：**必须先解包、再让 Node 解析**。
+    // 反过来做（先 nextResolve、失败后再解包重试）会踩 Node 的 package.json 负缓存：
+    // 第一次解析失败时 Node 把 `.../node_modules/<pkg>/package.json` 缓存成「不存在」，
+    // 解包之后的第二次解析仍读到缓存的 null，于是退化成 legacy main（index.js）并失败。
+    if (specifier.startsWith('node:') || specifier.startsWith('.') || specifier.startsWith('/')
+      || specifier.startsWith('file:') || specifier.startsWith('#') || isBuiltin(specifier)) {
+      return nextResolve(specifier, context)
+    }
+    const packageName = packageNameOf(specifier)
+    if (packageName !== undefined) asarHost.ensurePackage(packageName)
+    try {
+      return nextResolve(specifier, context)
+    } catch (cause) {
+      // 走到这里说明这个包不在 asar 里（不是宿主依赖）—— 用临时目录作为解析起点再试一次，
+      // 让 Node 自己处理 exports/子路径；仍失败就如实抛出。
+      if (packageName === undefined || !asarHost.ensurePackage(packageName)) throw cause
+      return nextResolve(specifier, { ...context, parentURL: asarHost.noopUrl })
+    }
   },
 })
 
@@ -237,6 +443,9 @@ try {
   )
 } catch (cause) {
   fail('驱动插件 apply()', cause instanceof Error ? cause.message : String(cause))
+  if (process.env.DSH_HOST_ASAR_DEBUG === '1' && cause instanceof Error && cause.stack !== undefined) {
+    console.error(cause.stack)
+  }
 }
 
 if (effectErrors.length > 0) fail('effect 回调执行', effectErrors.join('；'))

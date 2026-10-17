@@ -23,16 +23,24 @@ MUST_BE_GATED = {
     "movej", "movel", "movep", "movec", "servoj", "move_x", "move_y", "move_z",
     "move_tool_x", "move_tool_y", "move_tool_z", "move_optimized",
     "draw_circle", "draw_square", "draw_rectangle", "draw_star",
-    # open-ended velocity / force control
-    "speedj", "speedl", "stopj", "stopl", "force_mode", "end_force_mode", "force_mode_settings",
+    # open-ended velocity / force control.
+    # `stopj` / `stopl` / `end_force_mode` 只**降低或解除**已经生效的运动 —— 它们是
+    # 操作员想用来收尾的动作，给它们加人工确认只会让「停下来」变慢，所以不入闸。
+    "speedj", "speedl", "force_mode", "force_mode_settings",
     # programs and raw scripting
     "load_program", "run_program", "send_script", "reset_error",
     # arm state: stiffness, power, brakes, safety
     "set_freedrive", "set_teach_mode", "power_on", "power_off", "brake_release",
     "unlock_protective_stop", "shutdown",
-    # anything that re-zeros or re-defines the force/torque reference, or how motion is planned
+    # anything that re-zeros or re-defines the force/torque reference, how motion is planned,
+    # or changes the TCP / tool electrical state that later motions and I/O depend on
     "zero_ftsensor", "set_payload", "set_payload_inertia", "set_gravity",
     "conveyor_tracking", "motion_version",
+    # physical actuation / kinematic frame / tool electrical configuration.
+    # 这些不是「读」：置数字量输出、改 TCP 基准、改工具供电/串口、改工具输出模式、
+    # 改传送带 tick，都会直接改变现场设备或此后所有运动/IO 的语义。
+    "set_tcp", "set_tool_voltage", "set_tool_output_mode", "tool_communication",
+    "set_digital_out", "set_analog_out", "set_conveyor_tick",
 }
 
 failures = []

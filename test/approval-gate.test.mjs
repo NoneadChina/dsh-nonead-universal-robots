@@ -22,6 +22,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // 只桩掉两个 peer 依赖；worker.js 是本地文件，真实加载。
 registerHooks({
@@ -70,8 +73,8 @@ async function harness({ config = {}, approvalOutcome = 'allowed-once', approval
   const calls = []
   const approvalRequests = []
 
-  UrWorker.prototype.call = async function call(op, params) {
-    calls.push({ op, params })
+  UrWorker.prototype.call = async function call(op, params, budget, signal, options) {
+    calls.push({ op, params, budget, options })
     return { message: `stub:${op}`, data: { op, params } }
   }
 
@@ -291,5 +294,117 @@ test('声明层守卫：APPROVAL_OPS 里每个名字都必须是真实存在的 
       gated.has(b),
       `${a} 与 ${b} 副作用同类（都改变力/力矩测量基准），不得一个门禁一个不门禁`,
     )
+  }
+})
+
+
+// ── 0.7.5 修复回归（host-audit P0/P1） ─────────────────────────────────────
+
+test('P0-1 回归：ur_wait_steady 走运动预算且明确不杀进程', async () => {
+  const { registered, calls, approvalRequests } = await harness()
+  const tool = registered.get('ur_wait_steady')
+  assert.ok(tool, '未注册 ur_wait_steady')
+  await tool.execute({ ip: '1.2.3.4', timeout_s: 120 }, exec)
+  assert.equal(approvalRequests.length, 0, 'wait_steady 是收尾动作，不该要人工批准')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].op, 'wait_steady')
+  assert.equal(calls[0].options?.motion, true, '必须标记为运动类，worker 才不会在运动在飞时杀进程')
+  assert.equal(calls[0].options?.killOnTimeout, false)
+  assert.ok(calls[0].budget >= 120000, `预算必须覆盖 timeout_s=120，实得 ${calls[0].budget}`)
+})
+
+test('P1-2 回归：stopj / stopl / end_force_mode 移出审批门禁', async () => {
+  for (const name of ['ur_stopj', 'ur_stopl', 'ur_end_force_mode']) {
+    const { registered, calls, approvalRequests } = await harness({ approvalOutcome: 'denied' })
+    const tool = registered.get(name)
+    assert.ok(tool, `未注册 ${name}`)
+    await tool.execute({ ip: '1.2.3.4' }, exec)
+    assert.equal(approvalRequests.length, 0, `${name} 是减速/解除动作，不能被审批挡住`)
+    assert.deepEqual(calls.map((c) => c.op), [name.replace('ur_', '')])
+  }
+})
+
+test('P1-5 回归：set_tcp 现在需要人工批准', async () => {
+  const denied = await harness({ approvalOutcome: 'denied' })
+  await assert.rejects(
+    () => denied.registered.get('ur_set_tcp').execute({ ip: '1.2.3.4', pose: [0, 0, 0.1, 0, 0, 0] }, exec),
+  )
+  assert.equal(denied.calls.length, 0, '被拒的 set_tcp 绝不能下发（它决定此后所有运动的参考系）')
+
+  const allowed = await harness({ approvalOutcome: 'allowed-once' })
+  await allowed.registered.get('ur_set_tcp').execute({ ip: '1.2.3.4', pose: [0, 0, 0.1, 0, 0, 0] }, exec)
+  assert.equal(allowed.approvalRequests.length, 1)
+  assert.deepEqual(allowed.calls.map((c) => c.op), ['set_tcp'])
+})
+
+test('P1-3 回归：delete_program 远端路径在宿主侧就被拦', async () => {
+  const { registered, calls, approvalRequests } = await harness()
+  await assert.rejects(
+    () => registered.get('ur_delete_program').execute({ ip: '1.2.3.4', remote_path: '/etc/passwd' }, exec),
+    /PROGRAM_PATH|urp/,
+  )
+  assert.equal(calls.length, 0, '非法远端路径绝不能到达 worker')
+  assert.equal(approvalRequests.length, 0, '路径不合法时不该打扰人')
+})
+
+test('P1-4 回归：send_script 审批展示完整脚本与 sha256', async () => {
+  const { registered, approvalRequests } = await harness({ approvalOutcome: 'allowed-once' })
+  const tail = 'def __tail_marker():\n  return 1\nend\n__tail_marker()'
+  const script = `movej([0,0,0,0,0,0],1,1)\n${tail}`
+  await registered.get('ur_send_script').execute({ ip: '1.2.3.4', script }, exec)
+  const reason = approvalRequests[0].reason
+  assert.ok(reason.includes('__tail_marker'), '审批正文必须能看到脚本尾部（不能再截到 240 字符）')
+  assert.match(reason, /sha256 [0-9a-f]{64}/)
+  assert.ok(reason.length > script.length, `reason 长度 ${reason.length} 应包含全文`)
+})
+
+test('P2-8 回归：send_script 超过 64 KiB 直接拒绝，不进审批也不下发', async () => {
+  const { registered, calls, approvalRequests } = await harness()
+  await assert.rejects(
+    () => registered.get('ur_send_script').execute({ ip: '1.2.3.4', script: 'A'.repeat(65537) }, exec),
+    /64 KiB/,
+  )
+  assert.equal(calls.length, 0)
+  assert.equal(approvalRequests.length, 0)
+})
+
+test('P1-5 回归：SSH password 在审批理由中脱敏', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ur-approval-'))
+  try {
+    writeFileSync(join(dir, 'pick.urp'), '<urp/>')
+    const { registered, approvalRequests } = await harness({
+      config: { programDir: dir },
+      approvalOutcome: 'allowed-once',
+    })
+    await registered.get('ur_upload_program').execute({
+      ip: '1.2.3.4',
+      local_path: 'pick.urp',
+      remote_path: '/programs/pick.urp',
+      password: 'S3cr3t-Pass!',
+    }, exec)
+    const reason = approvalRequests[0].reason
+    assert.ok(!reason.includes('S3cr3t-Pass!'), '口令不得出现在审批弹窗里')
+    assert.ok(reason.includes('"password":"***"'), '口令应显示为 ***')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1-6 回归：关闭审批后受门禁 op 仍写审计（unchecked）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ur-audit-'))
+  const auditPath = join(dir, 'audit.ndjson')
+  try {
+    const { registered, calls } = await harness({
+      config: { requireApprovalForMotion: false, auditLogPath: auditPath },
+      approvalOutcome: 'denied',
+    })
+    await registered.get('ur_power_off').execute({ ip: '1.2.3.4' }, exec)
+    assert.deepEqual(calls.map((c) => c.op), ['power_off'])
+    const lines = readFileSync(auditPath, 'utf8').trim().split('\n')
+    const last = JSON.parse(lines[lines.length - 1])
+    assert.equal(last.decision, 'unchecked', '自主运行模式下必须留痕')
+    assert.equal(last.op, 'power_off')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })

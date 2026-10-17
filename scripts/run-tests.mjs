@@ -170,11 +170,36 @@ const CHECKS = [
     bin: process.execPath,
     args: ['--experimental-eventsource', 'scripts/probe-twin-stream-error-event.mjs'],
   },
+  /*
+   * 宿主兼容检查（真实 DSL 编译 104 个工具 schema + 路由注册）。它是**环境检查**：
+   * 没有安装 DSH Desktop 的机器上只能 SKIP，不能因此判失败，但**绝不允许静默通过** ——
+   * 单独打印结果与原因，并明确标注「不计入上面的 56 项」。装了宿主（或 CI 提供
+   * `--host-asar`）时它真的会跑，并把 104/104 注册数当作证据。
+   */
+  {
+    name: 'node scripts/check-host-compat.mjs --allow-missing-host',
+    bin: process.execPath,
+    args: ['scripts/check-host-compat.mjs', '--allow-missing-host'],
+    hostCheck: true,
+  },
 ];
+
+/** 宿主检查是环境项：单独记录、单独打印，不计入 56 项总数（结果不影响本机无宿主的运行）。 */
+let hostResult = null;
 
 const pythonBin = python.bin;
 for (const check of CHECKS) {
   const label = check.name;
+  if (check.hostCheck) {
+    process.stdout.write(`\n── ${label} ──\n`);
+    const r = spawnSync(check.bin, check.args, { encoding: 'utf8', cwd: root, env: process.env });
+    const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    process.stdout.write(output);
+    if (r.status !== 0) hostResult = { status: 'fail', detail: `exit ${r.status}` };
+    else if (/^SKIP\b/m.test(output)) hostResult = { status: 'skipped', detail: '宿主不可用（原因见上；装 DSH Desktop 或用 --host-asar）' };
+    else hostResult = { status: 'pass', detail: '宿主真实 value-schema DSL 校验通过' };
+    continue;
+  }
   if (check.needsPython && skipPython) {
     results.push({ file: label, status: 'skipped', detail: '--skip-python' });
     continue;
@@ -207,6 +232,10 @@ for (const r of results) {
   const mark = r.status === 'pass' ? 'PASS' : r.status === 'skipped' ? 'SKIP' : 'FAIL';
   console.log(`${mark}  ${r.file}${r.detail ? ` — ${r.detail}` : ''}`);
 }
+if (hostResult !== null) {
+  const mark = hostResult.status === 'pass' ? 'PASS' : hostResult.status === 'skipped' ? 'SKIP' : 'FAIL';
+  console.log(`${mark}  宿主兼容检查 — ${hostResult.detail}（环境项，不计入下面的项数）`);
+}
 const ran = results.length - skippedAll.length;
 console.log(
   `\n共 ${results.length} 项（测试文件 + 门禁）：通过 ${results.length - failedAll.length - skippedAll.length}，` +
@@ -220,9 +249,13 @@ console.log(
  * 机器上，11 个测试文件 + 5 条门禁会全部跳过，`npm test` 照样打印「失败 0」并 exit 0：
  * 看起来全绿，实际上什么都没验证过。显式的跳过开关（`--skip-python` / `--allow-skip`）照旧放行，
  * 因为它们表达的正是"我知道这些没跑"。
+ *
+ * 宿主兼容检查是唯一允许 SKIP 的项：它是**环境**（有没有装 DSH Desktop），不是插件代码；
+ * 但它必须在上面的汇总里单独占一行并带上原因，不能被悄悄算进 PASS。
  */
 const allowSkip = skipPython || process.argv.includes('--allow-skip');
 if (failedAll.length > 0) process.exit(1);
+if (hostResult !== null && hostResult.status === 'fail') process.exit(1);
 if (ran === 0) {
   console.error('\n没有任何一项真正执行（全部被跳过）—— 这不能算通过。');
   process.exit(1);

@@ -125,6 +125,102 @@ test('move_optimized：a/v 是能力比例 (0,1]，不是物理量 —— 判据
   assert.equal(checkMotionSafety('move_optimized', { goal_type: 'pose', goal: [1, 2] })?.code, 'SAFETY_ARGS');
 });
 
+// ── C4：draw_* 限幅 / 严格形状 / 加速度 / 力控 limits ──────────────────────
+
+test('★ C4 绘图幅值：半径/边长按 maxStepM 限幅（毫米写成米的典型错误）', () => {
+  assert.equal(checkMotionSafety('draw_circle', { center: POSE, r: 0.05 }), null);
+  const circle = checkMotionSafety('draw_circle', { center: POSE, r: 10 });
+  assert.equal(circle?.code, 'SAFETY_STEP');
+  assert.match(circle.message, /draw_circle 的 r=10/);
+  assert.equal(checkMotionSafety('draw_square', { origin: POSE, border: 0.2 }), null);
+  assert.equal(checkMotionSafety('draw_square', { origin: POSE, border: 10 })?.code, 'SAFETY_STEP');
+  assert.equal(checkMotionSafety('draw_rectangle', { origin: POSE, width: 0.2, height: 0.1 }), null);
+  assert.equal(checkMotionSafety('draw_rectangle', { origin: POSE, width: 0.2, height: 10 })?.code, 'SAFETY_STEP');
+  assert.equal(checkMotionSafety('draw_star', { center: POSE, side: 10 })?.code, 'SAFETY_STEP');
+  // 闭区间：恰好等于上限放行。
+  assert.equal(checkMotionSafety('draw_circle', { center: POSE, r: 0.5 }), null);
+});
+
+test('★ C4 绘图：缺参数/负值/NaN/位姿形状错一律 SAFETY_ARGS（不得当"未提供"跳过）', () => {
+  assert.equal(checkMotionSafety('draw_circle', { center: POSE })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('draw_circle', { center: POSE, r: -0.05 })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('draw_circle', { center: POSE, r: Number.NaN })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('draw_square', { origin: [0.3, 0.2], border: 0.1 })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('draw_star', { center: [0, 0, 0, 0, 0, Infinity], side: 0.1 })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('draw_rectangle', { origin: POSE, width: 0.1 })?.code, 'SAFETY_ARGS');
+});
+
+test('★ C4 绘图目标也受工作空间约束', () => {
+  const limits = { ...DEFAULT_LIMITS, workspace: { x: [-0.5, 0.5], y: [-0.5, 0.5], z: [0, 1] } };
+  assert.equal(checkMotionSafety('draw_circle', { center: POSE, r: 0.05 }, limits), null);
+  assert.equal(
+    checkMotionSafety('draw_circle', { center: [2, 0, 0.4, 0, 0, 0], r: 0.05 }, limits)?.code,
+    'SAFETY_WORKSPACE',
+  );
+});
+
+test('★ C4 加速度：a 出现即校验，超过 maxAccel 拒绝；负值/NaN 也拒绝', () => {
+  assert.equal(checkMotionSafety('movej', { q: Q, a: 1.0 }), null);
+  assert.equal(checkMotionSafety('movej', { q: Q, a: 0 })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('movej', { q: Q, a: 3 })?.code, 'SAFETY_ACCEL');
+  assert.equal(checkMotionSafety('movel', { pose: POSE, a: Number.NaN })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('movel', { pose: POSE, a: 1.2 }), null);
+  assert.equal(checkMotionSafety('movel', { pose: POSE, a: 2.5 })?.code, 'SAFETY_ACCEL');
+  assert.equal(checkMotionSafety('speedl', { xd: [0.1, 0, 0, 0, 0, 0], a_rot: 0.5 }), null);
+  assert.equal(checkMotionSafety('speedl', { xd: [0.1, 0, 0, 0, 0, 0], a_rot: -1 })?.code, 'SAFETY_ARGS');
+  // 上限可配置（Config 的 safetyMaxAccel 会通过 limits 传进来）。
+  assert.equal(checkMotionSafety('movej', { q: Q, a: 3 }, { ...DEFAULT_LIMITS, maxAccel: 5 }), null);
+});
+
+test('★ C4 速度：v 出现即校验（负值/NaN 不再被当作"未提供"跳过）', () => {
+  assert.equal(checkMotionSafety('movel', { pose: POSE, v: -0.25 })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('movel', { pose: POSE, v: Number.NaN })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('movel', { pose: POSE, v: 0 })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('movel', { pose: POSE, v: '0.25' })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('movej', { q: Q, v: -1 })?.code, 'SAFETY_ARGS');
+});
+
+test('★ C4 速度指令形状：speedj.qd / speedl.xd 不是 6 个有限数一律拒绝', () => {
+  assert.equal(checkMotionSafety('speedj', { qd: 'oops' })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('speedj', { qd: [1, 0, 0, 0, 0] })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('speedj', { qd: [1, 0, 0, 0, 0, Number.NaN] })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('speedl', { xd: [0.1, 0, 0, 0, 0] })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('speedl', { xd: [0.1, 0, 0, 0, 0, 'x'] })?.code, 'SAFETY_ARGS');
+});
+
+test('★ C4 力控 limits / task_frame / wrench：形状与幅值都必须判', () => {
+  // limits：前 3 项 = 柔性轴最大速度（≤ maxLinearSpeed），后 3 项 = 刚性轴最大偏差（≤ maxJointSpeed）。
+  assert.equal(checkMotionSafety('force_mode', { limits: [0.1, 0.1, 0.1, 1, 1, 1] }), null);
+  assert.equal(checkMotionSafety('force_mode', { limits: [9, 0.1, 0.1, 1, 1, 1] })?.code, 'SAFETY_SPEED');
+  assert.equal(checkMotionSafety('force_mode', { limits: [0.1, 0.1, 0.1, 9, 1, 1] })?.code, 'SAFETY_SPEED');
+  assert.equal(checkMotionSafety('move_force', {
+    pose: POSE,
+    selection_vector: [0, 0, 1, 0, 0, 0],
+    wrench: [0, 0, 5, 0, 0, 0],
+    limits: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+  }), null);
+  assert.equal(
+    checkMotionSafety('move_force', { pose: POSE, limits: [1e9, 0.1, 0.1, 1, 1, 1] })?.code,
+    'SAFETY_SPEED',
+  );
+  // 形状错、负值、非有限值 → SAFETY_ARGS（不能当"没给"跳过）
+  assert.equal(checkMotionSafety('force_mode', { limits: [0.1, 0.1, 0.1] })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('force_mode', { limits: [-0.1, 0.1, 0.1, 1, 1, 1] })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('force_mode', { limits: 'x' })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('force_mode', { task_frame: [0, 0, 0] })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('force_mode', { task_frame: POSE }), null);
+  assert.equal(checkMotionSafety('force_mode', { wrench: [30, 0, 10, 0, 0] })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('force_mode', { wrench: [30, 0, 10, 0, 0, 0] }), null);
+  assert.equal(checkMotionSafety('move_force', { pose: POSE, selection_vector: [0, 0, 2, 0, 0, 0] })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('move_force', { pose: POSE, selection_vector: 'x' })?.code, 'SAFETY_ARGS');
+});
+
+test('★ C4 时长 t：NaN/负值 → SAFETY_ARGS（不再静默跳过）', () => {
+  assert.equal(checkMotionSafety('movej', { q: Q, t: Number.NaN })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('movej', { q: Q, t: -1 })?.code, 'SAFETY_ARGS');
+  assert.equal(checkMotionSafety('movej', { q: Q, t: 0 }), null);
+});
+
 // ── checkMotionSafety：工作空间与 fail closed ──────────────────────────────
 
 test('★ 工作空间：声明了就把显式笛卡尔目标关在盒子里', () => {

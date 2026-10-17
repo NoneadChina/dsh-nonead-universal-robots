@@ -1384,11 +1384,59 @@ def _ssh_client(ip, username, password, known_hosts):
     return ssh, policy
 
 
+# 与 `lib/program-files.js` 的 `DEFAULT_MAX_PROGRAM_BYTES` 保持一致。worker 看不到宿主配置，
+# 因此默认用同一个常量给"下载前"的远端文件大小把关；宿主也可以注入 `_max_program_bytes`
+# 覆盖（见 FIX_PLAN_074 C5）。
+PROGRAM_FILE_MAX_BYTES = 1024 * 1024
+
+# 远端程序路径的**形状**规则（C5/C6）：机器人是 POSIX 路径，必须是 `/` 开头的绝对路径、
+# 不含 `..` 段、以 `.urp` 结尾。以前这条只在 JS 侧对 upload/download 做过（delete 完全没有），
+# 而 worker 是独立可直连的协议端点 —— 它必须能自己拒绝 `/etc/passwd` 这类路径。
+def _remote_program_path_problem(value):
+    """校验机器人上的程序路径；合法返回 None，否则返回一句可读原因。"""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return "远端路径不能为空"
+    if not text.startswith("/"):
+        return "远端路径必须是机器人上的绝对路径（以 / 开头），实得 %r" % (text,)
+    if ".." in text.split("/"):
+        return "远端路径不得包含 .. 段，实得 %r" % (text,)
+    if not text.lower().endswith(".urp"):
+        return "远端路径必须以 .urp 结尾，实得 %r" % (text,)
+    return None
+
+
 def op_upload_program(p):
-    """把本地的 `.urp` 上传到机器人，并**回读远端大小核对**后才报成功。"""
+    """把本地的 `.urp` 上传到机器人，并**回读远端大小核对**后才报成功。
+
+    C5：路径优先取宿主注入的 `_local_path`/`_remote_path`（模型传的同名参数已被宿主
+    `sanitizeArgs` 丢掉，注入发生在过滤之后）；有 `_local_path` 时它必须是绝对路径。
+    没有注入时回退到旧行为，但**在返回里如实标明**这是模型给的路径。
+    """
     ip = str(p["ip"])
-    local = str(p["local_path"])
-    remote = str(p["remote_path"])
+    injected_local = p.get("_local_path")
+    if injected_local is not None:
+        local = str(injected_local)
+        if not os.path.isabs(local):
+            return err("不执行上传：_local_path 必须是宿主注入的**绝对路径**，实得 %r" % (local,),
+                       "BADARG", {"ip": ip, "local_path": local, "_local_path": local})
+        local_source, path_warning = "host", None
+    else:
+        local = str(p["local_path"])
+        local_source = "model"
+        path_warning = ("未收到宿主注入的 _local_path：本次改用模型参数 local_path（旧行为，"
+                        "宿主侧 programDir 牢笼未被验证）")
+    injected_remote = p.get("_remote_path")
+    if injected_remote is not None:
+        remote = str(injected_remote)
+        remote_source = "host"
+    else:
+        remote = str(p["remote_path"])
+        remote_source = "model"
+    problem = _remote_program_path_problem(remote)
+    if problem is not None:
+        return err("不执行上传：%s" % problem, "BADARG",
+                   {"ip": ip, "local_path": local, "remote_path": remote})
     username = p.get("username", "root")
     password = p.get("password", "easybot")
     known_hosts = p.get("known_hosts")
@@ -1422,21 +1470,57 @@ def op_upload_program(p):
                    "不要在机器人上运行这个文件。" % (observed, local_size),
                    "VERIFY_FAILED",
                    {"ip": ip, "local_path": local, "remote_path": remote,
-                    "local_bytes": local_size, "remote_bytes": observed})
-    return ok({"message": "程序已上传到 %s（%d 字节，远端回读一致）。" % (remote, observed),
+                    "local_bytes": local_size, "remote_bytes": observed,
+                    "path_source": {"local": local_source, "remote": remote_source}})
+    note = ("；%s" % path_warning) if path_warning else ""
+    return ok({"message": "程序已上传到 %s（%d 字节，远端回读一致）%s" % (remote, observed, note),
                "data": {"ip": ip, "local_path": local, "remote_path": remote,
-                        "bytes": observed, "verified": True, "host_key_policy": policy}})
+                        "bytes": observed, "verified": True, "host_key_policy": policy,
+                        "path_source": {"local": local_source, "remote": remote_source},
+                        "path_warning": path_warning}})
 
 
 def op_download_program(p):
     """把机器人上的 `.urp` 下载到本地，并**回读本地大小核对**。
 
+    C5：路径优先取宿主注入的 `_remote_path` / `_local_path`；有 `_local_path` 时必须是绝对路径。
+    下载前先 `sftp.stat` 取远端大小，超过上限（`PROGRAM_FILE_MAX_BYTES`，可被宿主注入的
+    `_max_program_bytes` 覆盖）就**在动本地文件之前**拒绝 —— 拒绝路径绝不能留下"原文件被改名成
+    `.bak`"的副作用。
+
     目标文件已存在时**先备份成 `<path>.bak` 再写**，绝不静默覆盖（覆盖掉的是一个可能还有用的
     程序文件）。备份失败就拒绝下载。
     """
     ip = str(p["ip"])
-    local = str(p["local_path"])
-    remote = str(p["remote_path"])
+    injected_local = p.get("_local_path")
+    if injected_local is not None:
+        local = str(injected_local)
+        if not os.path.isabs(local):
+            return err("不执行下载：_local_path 必须是宿主注入的**绝对路径**，实得 %r" % (local,),
+                       "BADARG", {"ip": ip, "local_path": local})
+        local_source, path_warning = "host", None
+    else:
+        local = str(p["local_path"])
+        local_source = "model"
+        path_warning = ("未收到宿主注入的 _local_path：本次改用模型参数 local_path（旧行为，"
+                        "宿主侧 programDir 牢笼未被验证）")
+    injected_remote = p.get("_remote_path")
+    if injected_remote is not None:
+        remote = str(injected_remote)
+        remote_source = "host"
+    else:
+        remote = str(p["remote_path"])
+        remote_source = "model"
+    problem = _remote_program_path_problem(remote)
+    if problem is not None:
+        return err("不执行下载：%s" % problem, "BADARG", {"ip": ip, "remote_path": remote})
+    max_bytes = p.get("_max_program_bytes")
+    try:
+        max_bytes = int(max_bytes) if max_bytes is not None else PROGRAM_FILE_MAX_BYTES
+    except (TypeError, ValueError):
+        max_bytes = PROGRAM_FILE_MAX_BYTES
+    if max_bytes <= 0:
+        max_bytes = PROGRAM_FILE_MAX_BYTES
     username = p.get("username", "root")
     password = p.get("password", "easybot")
     known_hosts = p.get("known_hosts")
@@ -1445,24 +1529,30 @@ def op_download_program(p):
         if not os.path.isfile(known_hosts):
             return err("known_hosts 指向的文件不存在：%s" % known_hosts, "BADARG")
 
-    backed_up = False
-    if os.path.exists(local):
-        try:
-            os.replace(local, local + ".bak")
-            backed_up = True
-        except Exception as e:
-            return err("目标文件已存在且无法备份为 %s.bak（%s）⇒ 拒绝下载以免覆盖丢数据。"
-                       % (local, e), "BADARG")
-
     try:
         ssh, policy = _ssh_client(ip, username, password, known_hosts)
     except Exception as e:
         return err("SSH 连接 %s:22 失败（%s）。请确认机器人已启动 SSH 服务，或检查 username/password。"
                    % (ip, e))
+    backed_up = False
     try:
         sftp = ssh.open_sftp()
         try:
+            # ★ 先按大小上限把关，再动本地文件：拒绝路径不能把用户的原文件留在 .bak 上。
             remote_size = int(sftp.stat(remote).st_size)
+            if remote_size > max_bytes:
+                return err("远端文件 %s 有 %d 字节，超过下载大小上限 %d 字节 ⇒ 拒绝下载，"
+                           "本地文件未改动。" % (remote, remote_size, max_bytes), "BADARG",
+                           {"ip": ip, "remote_path": remote, "remote_bytes": remote_size,
+                            "max_bytes": max_bytes,
+                            "path_source": {"remote": remote_source}})
+            if os.path.exists(local):
+                try:
+                    os.replace(local, local + ".bak")
+                    backed_up = True
+                except Exception as e:
+                    return err("目标文件已存在且无法备份为 %s.bak（%s）⇒ 拒绝下载以免覆盖丢数据。"
+                               % (local, e), "BADARG")
             sftp.get(remote, local)
         finally:
             sftp.close()
@@ -1477,17 +1567,36 @@ def op_download_program(p):
                    % (local_size, remote_size), "VERIFY_FAILED",
                    {"ip": ip, "local_path": local, "remote_path": remote,
                     "local_bytes": local_size, "remote_bytes": remote_size})
-    return ok({"message": "程序已下载到 %s（%d 字节，本地回读一致）%s"
-               % (local, local_size, "；原有同名文件已备份为 .bak" if backed_up else ""),
+    note = ("；%s" % path_warning) if path_warning else ""
+    return ok({"message": "程序已下载到 %s（%d 字节，本地回读一致）%s%s"
+               % (local, local_size,
+                  "；原有同名文件已备份为 .bak" if backed_up else "", note),
                "data": {"ip": ip, "local_path": local, "remote_path": remote,
                         "bytes": local_size, "verified": True, "backed_up": backed_up,
-                        "host_key_policy": policy}})
+                        "max_bytes": max_bytes, "host_key_policy": policy,
+                        "path_source": {"local": local_source, "remote": remote_source},
+                        "path_warning": path_warning}})
 
 
 def op_delete_program(p):
-    """删除机器人上的一个 `.urp`：**先确认存在、删除后再确认真的没了**。"""
+    """删除机器人上的一个 `.urp`：**先确认存在、删除后再确认真的没了**。
+
+    C6：远端路径必须绝对、不含 `..`、`.urp` 结尾。这条以前只在 JS 侧（且只对 upload/download）
+    存在，delete 完全没校验 —— 一个 `remote_path=/etc/passwd` 会先 stat 成功、再被 root SSH 删掉。
+    这里在 worker 侧独立拒绝；宿主注入 `_remote_path` 时优先用它。
+    """
     ip = str(p["ip"])
-    remote = str(p["remote_path"])
+    injected_remote = p.get("_remote_path")
+    if injected_remote is not None:
+        remote = str(injected_remote)
+        remote_source = "host"
+    else:
+        remote = str(p["remote_path"])
+        remote_source = "model"
+    problem = _remote_program_path_problem(remote)
+    if problem is not None:
+        return err("不执行删除：%s" % problem, "BADARG",
+                   {"ip": ip, "remote_path": remote})
     username = p.get("username", "root")
     password = p.get("password", "easybot")
     known_hosts = p.get("known_hosts")
@@ -1526,7 +1635,8 @@ def op_delete_program(p):
                    "VERIFY_FAILED", {"ip": ip, "remote_path": remote})
     return ok({"message": "已删除机器人上的 %s（删除后 stat 已确认不存在）。" % remote,
                "data": {"ip": ip, "remote_path": remote, "verified": True,
-                        "host_key_policy": policy}})
+                        "host_key_policy": policy,
+                        "path_source": {"remote": remote_source}}})
 
 
 # ---------------------------------------------------------------------------
@@ -1860,6 +1970,11 @@ def op_movel(p):
 def _axis_move(p, axis):
     ip = str(p["ip"])
     distance = float(p["distance"])
+    # C7：相对位移是唯一漏掉 isfinite 的数值入口。NaN/Infinity 一旦进入目标位姿，
+    # 会被 URBasic 原样拼成 `movel(p[nan,...])` —— 语义未定义（且 XML/JSON 里也非法）。
+    if not math.isfinite(distance):
+        return err("不执行沿轴移动：distance 必须是有穷数值（拒绝 NaN/Infinity），收到 %s"
+                   % distance, "BADARG", {"ip": ip, "distance": distance})
     robot, _ = ensure_connected(ip)
     _assert_remote_control(ip, "沿轴移动")
     pose = [float(x) for x in robot.get_actual_tcp_pose()]
@@ -1911,6 +2026,10 @@ def _tool_axis_move(p, axis):
     """
     ip = str(p["ip"])
     distance = float(p["distance"])
+    # C7：与 `_axis_move` 同一条 isfinite 防线（NaN/Infinity 不得进入目标位姿）。
+    if not math.isfinite(distance):
+        return err("不执行沿工具轴移动：distance 必须是有穷数值（拒绝 NaN/Infinity），收到 %s"
+                   % distance, "BADARG", {"ip": ip, "distance": distance})
     robot, _ = ensure_connected(ip)
     _assert_remote_control(ip, "沿工具轴移动")
     pose = [float(x) for x in robot.get_actual_tcp_pose()]
@@ -2141,6 +2260,51 @@ def _load_failed(resp):
     return ("not found" in r) or ("no such" in r) or ("no program loaded" in r)
 
 
+# load 命令的**失败判定**不能直接复用 `_dashboard_ok`：后者按任意位置出现 "error"/"failed"
+# 判失败，而成功应答会把程序路径原样回显（`Loading program: /programs/error_pick.urp`），
+# 文件名里带 "error" 就会被误判成加载失败。这里先认成功前缀，再只匹配明确的失败措辞。
+_LOAD_SUCCESS_PREFIX = "loading program"
+_LOAD_FAILURE_WORDS = ("could not", "cannot", "unable", "not allowed", "failed",
+                       "not understand", "invalid")
+
+
+def _load_reply_failed(resp):
+    """load 的 dashboard 应答是否明确表示失败（"File not found" / "Could not load program"…）。"""
+    text = (resp or "").strip().lower()
+    if not text:
+        return False
+    if text.startswith(_LOAD_SUCCESS_PREFIX):
+        return False
+    if _load_failed(text):
+        return True
+    return any(word in text for word in _LOAD_FAILURE_WORDS)
+
+
+# `get loaded program` 的应答是 `Program loaded: <path>`（或 `No program loaded`）。
+# 比对"是不是同一个程序"时先剥掉这个标签，再取 basename —— dashboard 可能回绝对路径，
+# 而模型给的是 `pick.urp`（相对 programs_dir），整串比较会把正确加载判成不匹配。
+_LOADED_LABEL_RE = re.compile(r"^\s*program\s+loaded\s*:\s*", re.IGNORECASE)
+
+
+def _remote_program_basename(path):
+    """取机器人程序路径的 basename（剥掉 dashboard 的 `Program loaded:` 前缀）。"""
+    text = str(path if path is not None else "").strip()
+    match = _LOADED_LABEL_RE.match(text)
+    if match is not None:
+        text = text[match.end():].strip()
+    text = text.replace("\\", "/").rstrip("/")
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text.strip()
+
+
+def _program_paths_match(loaded, target):
+    """C6：已加载程序与请求目标是否同一个文件（按 basename 比对）。"""
+    loaded_name = _remote_program_basename(loaded)
+    target_name = _remote_program_basename(target)
+    return bool(loaded_name) and bool(target_name) and loaded_name == target_name
+
+
 # dashboard 对 stop/pause/play 的失败应答关键词。缺少这层检查时，"命令被拒"与"命令生效"
 # 都只回一句原始应答，工具则一律回报成功。
 _DASHBOARD_FAILURE_WORDS = (
@@ -2169,36 +2333,75 @@ def _loaded_program(d):
 
 
 def op_load_program(p):
+    """加载一个 UR 程序；`confirmed` 只在**有正向证据**时为 True（C6）。
+
+    - `sent`（load 命令拿到自己的应答）为真，且 dashboard 报的已加载程序与 target 的 basename
+      一致 ⇒ `confirmed=True`；
+    - 控制器明确说加载失败（"not found" / "no such" / "could not ..." 等）或已加载的是**另一个**
+      程序 ⇒ 直接 `err`，不谎报成功；
+    - 应答丢失 / 读不到已加载程序 ⇒ `confirmed=None`（"无法判定"，不等于成功）。
+    """
     ip = str(p["ip"])
     name = _sanitize_path(p.get("program_name", ""), "program_name")
     ensure_connected(ip)
     if not name:
-        return err("未指定要加载的程序名 program_name。")
+        return err("未指定要加载的程序名 program_name。", "BADARG")
     target = _build_program_target(p)
     # `ur_load` 需要参数，不能走无参的 _dashboard_cmd；但**必须**沿用同一套"只认本次应答"
     # 的做法（先清空 last_respond），否则 "File not found" 会被上一条应答顶掉。
     sent, resp = _dashboard_cmd_args(ip, "ur_load", target)
     loaded = _loaded_program(dashboard(ip))
-    confirmed = (not _load_failed(loaded)) and (not _load_failed(resp)) and loaded != ""
-    note = "" if confirmed else "；加载未确认，请检查程序名/路径或是否在对应的 UR 实例下"
-    return ok({"message": "加载程序：%s（已加载：%s%s）" % (name, loaded, note),
-               "data": {"program_name": name, "target": target, "loaded": loaded,
-                        "respond": resp, "sent": sent,
-                        "confirmed": confirmed, "ip": ip}})
+    matches = _program_paths_match(loaded, target)
+    resp_failed = _load_reply_failed(resp)
+    data = {"program_name": name, "target": target, "loaded": loaded, "respond": resp,
+            "sent": sent, "matched": matches, "confirmed": None, "ip": ip}
+    if _load_failed(resp) or _load_failed(loaded) or resp_failed:
+        return err("加载程序失败：控制器应答 %r（已加载：%r）⇒ 目标 %s 没有加载成功。"
+                   % (resp, loaded, target), "BADARG", data)
+    if sent and matches:
+        data["confirmed"] = True
+        return ok({"message": "加载程序：%s（已加载：%s，已确认与目标一致）" % (name, loaded),
+                   "data": data})
+    if loaded and not matches:
+        return err("加载未生效：控制器当前加载的是 %r，不是请求的 %s ⇒ 不当作成功。"
+                   % (loaded, target), "BADARG", data)
+    # sent=False 或者读不到已加载程序：没有正向证据，只能如实说"无法判定"，不宣称成功。
+    return ok({"message": "加载程序：%s（已下发，但**无法确认**：load 应答=%r，已加载=%r）"
+                          % (name, resp, loaded), "data": data})
 
 
 def op_run_program(p):
+    """加载（可选）并启动程序；**play 之前必须有正向证据**（C6）。
+
+    旧实现只看"当前已加载程序"是否像失败文案，于是加载失败/应答丢失/加载被忽略时仍会
+    `ur_play()` —— 跑的是控制器上原来加载的**另一个程序**（P0）。现在三条判据缺一不可：
+    load 拿到应答、已加载程序非空且与 target 同 basename、应答不是失败文案；任一不满足直接
+    返回 err，**绝不 play**。
+    """
     ip = str(p["ip"])
     name = _sanitize_path(p.get("program_name", ""), "program_name")
     ensure_connected(ip)
     d = dashboard(ip)
+    load_data = {}
     if name:
         target = _build_program_target(p)
-        d.last_respond = None
-        d.ur_load(target)
+        sent, load_resp = _dashboard_cmd_args(ip, "ur_load", target)
         loaded = _loaded_program(d)
-        if _load_failed(loaded):
-            return err("无法运行：加载程序 %s 未确认（%s）。请检查程序名/路径，或确认该程序在当前 UR 实例的程序目录下。" % (name, loaded))
+        matches = _program_paths_match(loaded, target)
+        resp_failed = _load_reply_failed(load_resp)
+        load_data = {"target": target, "load_respond": load_resp, "sent": sent,
+                     "loaded": loaded, "matched": matches}
+        if not sent:
+            return err("未启动：加载程序 %s 的指令没有得到控制器应答（无法确认已加载）⇒ 不执行 play。"
+                       % name, "NOT_EXECUTED", load_data)
+        if _load_failed(load_resp) or _load_failed(loaded) or resp_failed:
+            return err("未启动：加载程序 %s 失败（控制器应答 %r；已加载 %r）⇒ 不执行 play。"
+                       % (name, load_resp, loaded), "BADARG", load_data)
+        if not loaded:
+            return err("未启动：无法读取控制器当前加载的程序 ⇒ 不执行 play。", "NOT_EXECUTED", load_data)
+        if not matches:
+            return err("未启动：控制器当前加载的是 %r，与请求的 %r 不符 ⇒ 不执行 play"
+                       "（否则会运行控制器上原来的旧程序）。" % (loaded, target), "BADARG", load_data)
     play_ok, resp = _dashboard_cmd(ip, "ur_play")
     # 只回报"已下发"，并且**同时给出运行状态**：dashboard 说 play 了、但机器人可能因安全
     # 停止/未使能而根本没启动。把 running 一并返回，调用方（与模型）才有依据下判断。
@@ -2207,9 +2410,11 @@ def op_run_program(p):
         return err("启动程序失败：%s" % resp, "TIMEOUT")
     if not _dashboard_ok(resp):
         return err("启动程序被控制器拒绝：%s" % resp)
+    data = {"program_name": name, "respond": resp, "running": running, "ip": ip}
+    data.update(load_data)
     return ok({"message": "已下发启动程序 %s（控制器应答：%s；运行状态：%s）"
                           % (name or "(当前加载)", resp, "运行中" if running else "未在运行"),
-               "data": {"program_name": name, "respond": resp, "running": running, "ip": ip}})
+               "data": data})
 
 
 def op_stop_program(p):
@@ -2489,6 +2694,15 @@ def op_set_tool_voltage(p):
 def op_set_tcp(p):
     ip = str(p["ip"])
     pose = _vec(p, "pose", 6, "set_tcp 的 pose")
+    # C7：TCP 决定此后所有运动的物理落点，但模型可以不经审批直接调它（门禁在宿主侧）。
+    # worker 侧再给一道幅值上限：位置 ≤ 1 m、旋转 ≤ 2π rad —— 超出必然是单位/幅值写错。
+    for index, value in enumerate(pose):
+        limit = 1.0 if index < 3 else (2.0 * math.pi)
+        if abs(value) > limit:
+            return err("不执行 set_tcp：pose[%d]=%s 超出上限 %s（|xyz| ≤ 1 m，|r| ≤ 2π rad）"
+                       % (index, value, limit), "BADARG",
+                       {"tcp": [float(x) for x in pose], "index": index,
+                        "limit": limit, "ip": ip})
     robot, _ = ensure_connected(ip)
     _assert_remote_control(ip, "set_tcp")
     if not _send_program(robot, "set_tcp(p[%.6f,%.6f,%.6f,%.6f,%.6f,%.6f])\n" % tuple(pose)):

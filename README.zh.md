@@ -6,7 +6,7 @@
 
 > ⚠️ **安全提示**：本插件会直接驱动真实机械臂。使用时务必保证机器人可见、急停按钮触手可及、工作区无障碍物与人员。请把它当作授予模型 `bash` 工具一样慎重对待。你（或模型）对任何运动指令负全责。
 
-> 🛡️ **运动审批门禁**：**49** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**、**改写/删除机器人上已存程序**、**通过 Modbus 驱动现场总线设备**，以及**在力控下顶住工件**的指令，在真正下发前会**暂停等待人工确认**：
+> 🛡️ **运动审批门禁**：**53** 个会驱动机器人运动、执行程序、**让机械臂脱离程序控制或失去刚性支撑**、**改写/删除机器人上已存程序**、**通过 Modbus 驱动现场总线设备**、**改变 TCP / 工具电气配置或切换数字量/模拟量输出**，以及**在力控下顶住工件**的指令，在真正下发前会**暂停等待人工确认**：
 >
 > | 分组 | 工具 |
 > |---|---|
@@ -14,14 +14,17 @@
 > | 绘图 | `ur_draw_circle` `ur_draw_square` `ur_draw_rectangle` `ur_draw_star` |
 > | 程序与脚本 | `ur_load_program` `ur_run_program` `ur_send_script` `ur_reset_error` |
 > | 控制模式 / 电源 / 安全 | `ur_set_freedrive` `ur_set_teach_mode` `ur_power_on` `ur_power_off` `ur_brake_release` `ur_unlock_protective_stop` `ur_shutdown` |
-> | 力控与速度 | `ur_force_mode` `ur_end_force_mode` `ur_force_mode_settings` `ur_speedj` `ur_speedl` `ur_stopj` `ur_stopl` |
+> | 力控与速度 | `ur_force_mode` `ur_force_mode_settings` `ur_speedj` `ur_speedl` |
+> | 工具与 I/O 配置 | `ur_set_tcp` `ur_set_tool_voltage` `ur_set_tool_output_mode` `ur_set_tool_communication` `ur_set_digital_out` `ur_set_analog_out` `ur_set_conveyor_tick` |
 > | 程序存储 | `ur_upload_program` `ur_delete_program` |
 > | 物理状态变更 | `ur_set_payload` `ur_set_payload_inertia` `ur_set_gravity` `ur_zero_ftsensor` `ur_motion_version` `ur_set_speed_scaling` `ur_set_conveyor_tracking` |
 > | Modbus 写类 | `ur_modbus_add_signal` `ur_modbus_delete_signal` `ur_modbus_send_custom_command` `ur_modbus_set_output_register` `ur_modbus_set_output_signal` |
 >
+> 减速与退出类（`ur_stopj`、`ur_stopl`、`ur_end_force_mode`）**刻意不进门禁**：它们是操作员（或取消后的模型）让机械臂停下来的手段，给它们加确认只会拖慢"停下来"。门禁名单只有一处来源（`lib/index.js` 的 `APPROVAL_OPS`），由 `scripts/check-approval-gate.py` 与 `test/approval-gate.test.mjs` 断言。
+>
 > 交互式部署（审批策略为 `ask`）会在界面上弹出确认框。未组合审批服务、无代理、或应答不是 `allowed-once` 的调用都会**以拒绝方式安全关闭**（fail-closed）—— 指令被拒绝，绝不会到达机器人。默认值写在**代码**里（`config.requireApprovalForMotion ?? true`），因此"调用方跳过 schema 解析"也不会把门禁关掉；可用配置 `requireApprovalForMotion: false` 显式关闭。`test/approval-gate.test.mjs` 驱动真实工具注册表逐条验证上述行为，包括"多传一个 `op` 参数无法把调用改派到别的指令"。
 
-> 🧭 **预飞安全闸**：在审批门禁之外，再加一层"**单条指令最多能要求多少**"的物理上限。上限项：`safetyMaxStepM`（0.5 m，轴位移）、`safetyMaxLinearSpeed`（0.5 m/s）、`safetyMaxJointSpeed`（1.05 rad/s）、`safetyMaxDurationS`（60 s）、力控的 `safetyMaxForceN` / `safetyMaxTorqueNm`（40 N / 10 N·m），以及可选的 `safetyWorkspace` 包围盒（`"x:-1,1 y:-1,1 z:0,1.2"`，只针对显式笛卡尔目标）。它在**审批之前**判定 —— 一个物理上不可能的请求不该拿去打扰人 —— 并且与审批**解耦**：`requireApprovalForMotion: false` 只关掉人工确认，绝不会顺手关掉这些物理上限（那需要显式设 `safetyGate: false`）。`safetyWorkspace` 写错时 **fail closed**（拒绝一切运动指令），而不是被静默忽略。它是"防手滑 / 防单位写错"的一层，**不是**安全边界（安全边界仍是控制器自己的安全配置）；也刻意不覆盖 `ur_send_script` —— 那是任意 URScript 文本，本闸不解析脚本。
+> 🧭 **预飞安全闸**：在审批门禁之外，再加一层"**单条指令最多能要求多少**"的物理上限。上限项：`safetyMaxStepM`（0.5 m —— 轴位移**与绘图尺寸**）、`safetyMaxLinearSpeed`（0.5 m/s）、`safetyMaxJointSpeed`（1.05 rad/s）、`safetyMaxAccel`（2.0 m/s²）、`safetyMaxDurationS`（60 s）、力控的 `safetyMaxForceN` / `safetyMaxTorqueNm`（40 N / 10 N·m），以及可选的 `safetyWorkspace` 包围盒（`"x:-1,1 y:-1,1 z:0,1.2"`，针对显式笛卡尔目标 —— 包括四个 `ur_draw_*` 的 `center`/`origin`；它们的 `r` / `border` / `width` / `height` / `side` 受 `safetyMaxStepM` 限幅）。它在**审批之前**判定 —— 一个物理上不可能的请求不该拿去打扰人 —— 并且与审批**解耦**：`requireApprovalForMotion: false` 只关掉人工确认，绝不会顺手关掉这些物理上限（那需要显式设 `safetyGate: false`）。`safetyWorkspace` 写错时 **fail closed**（拒绝一切运动指令），而不是被静默忽略。它是"防手滑 / 防单位写错"的一层，**不是**安全边界（安全边界仍是控制器自己的安全配置）；也刻意不覆盖 `ur_send_script` —— 那是任意 URScript 文本，本闸不解析脚本。
 >
 > 📝 **动作审计账本**：每条受门禁的指令都会追加一行 NDJSON（默认 `<DSH_HOME>/nonead-ur/audit.ndjson`；`auditLogPath` 换位置、`auditLog: false` 关掉、`auditLogAll: true` 连不受门禁的读取也记），字段为 `{ts, ip, op, tool_name, args, decision, reason}`，`decision ∈ {approved, denied, blocked, unchecked}` —— 事后能回答"模型到底对机器人做了什么"。写日志**绝不影响下发路径**：失败只回报，不抛异常。
 
@@ -163,7 +166,7 @@ pip install -r requirements.txt
 
 ```sh
 npm run test:python   # python ur_worker.py --selfcheck：校验 Python/numpy/paramiko/URBasic/RTDE 配置
-npm test              # 51 项：37 个测试文件 + 9 条门禁 + 5 个离线探针，最后汇总
+npm test              # 56 项：42 个测试文件 + 9 条门禁 + 5 个离线探针，最后汇总
 npm run test:node     # 只跑 Node 侧：跳过需要 Python 的测试文件**与门禁**
 npm run check         # 只跑静态 + 跨语言门禁，不跑测试文件
 npm run verify:host   # 用宿主真实的 schema DSL 校验全部工具注册与 peer 版本
@@ -172,8 +175,9 @@ npm run verify:models # 校验 14 个 GLB 的结构契约
 
 `npm test` 跑两类东西，两类都必须过：
 
-- **37 个测试文件**（端到端协议自检、审批门禁、孪生路由、客户端状态机、FK、vendored 库回归）。名单来自 `test/test-manifest.json`，并由 `check:manifest` 保证"会调用 Python 的用例"不会被漏登记。
+- **42 个测试文件**（端到端协议自检、审批门禁、孪生路由、客户端状态机、FK、vendored 库回归）。名单来自 `test/test-manifest.json`，并由 `check:manifest` 保证"会调用 Python 的用例"不会被漏登记。
 - **9 条门禁** 加上 **5 个离线探针**：`check-test-manifest` / `check-package-metadata` / `check-client-bundle` / `check-doc-tools`（Node），`check-worker-ops` / `check-tool-params` / `check-rtde-recipe` / `check-approval-gate` / `check-new-ops`（Python），随后是 `scripts/probe-*.mjs` 那几个孪生/SSE 探针。
+- **宿主兼容检查**也会被尝试（`check-host-compat --allow-missing-host`）。它是**环境项**，因此在汇总里单独占一行、**不计入上面的 56 项**：没装 DSH Desktop 的机器得到一条带原因的响亮 `SKIP`（绝不静默放行）；提供了宿主的机器/CI 会变成 `PASS`。
 
 **被跳过不等于通过。** 只要有项目被跳过，整轮就以非零退出 —— 想接受跳过必须显式要求（`--allow-skip`，或 Node-only 的 `--skip-python`），而**全部被跳过时无论如何都算失败**。两个探针需要全局 `EventSource`，用 `--experimental-eventsource` 运行（Node ≥22.3）；再加上 `module.registerHooks`（Node ≥22.15），真实的开发下限记录在 `devEngines` 里。
 
@@ -189,9 +193,15 @@ UR_PYTHON=C:\\Python312\\python.exe npm test
 npm run verify:host                                # 严格模式：找不到已装宿主时 exit 2
 npm run check:host                                 # 同一检查，但缺宿主时给一条响亮的 SKIP
 node scripts/check-host-compat.mjs <node_modules>  # 也可显式指定宿主
+node scripts/check-host-compat.mjs --host-asar "<...>/resources/app.asar"  # DSH Desktop 安装形态
+npm run check:host:strict                          # prepublishOnly 用的严格模式：缺宿主即 exit 2
 ```
 
-它会用宿主实装版本核对 peer 范围、用宿主**真实**的 value-schema DSL 编译**每一个**工具参数 schema（被拒的 schema 会让该工具静默消失）、驱动宿主路由注册，并校验 `dsh.client` 声明与客户端 bundle 的 `__ModuleLoader__` 注册 id。退出码 `0` 表示与该宿主兼容；报告里会写清"声明了多少个、注册成功多少个"（例如 `83/83`）。
+它会用宿主实装版本核对 peer 范围、用宿主**真实**的 value-schema DSL 编译**每一个**工具参数 schema（被拒的 schema 会让该工具静默消失）、驱动宿主路由注册，并校验 `dsh.client` 声明与客户端 bundle 的 `__ModuleLoader__` 注册 id。退出码 `0` 表示与该宿主兼容；报告里会写清"声明了多少个、注册成功多少个"（当前 `104/104`）。
+
+`--host-asar` 直接读 Electron 的 `app.asar`（DSH Desktop 的标准安装形态：`node_modules` 打包在 asar 内、磁盘上没有目录）：按需把用到的包懒解包到临时目录，宿主的真实 DSL 仍然会执行。`prepublishOnly` 现在是 `npm run check && npm run check:host:strict && npm test`，因此**发布不可能再绕过真实宿主检查与测试套件**。
+
+CI（`.github/workflows/ci.yml`）在 Node 22.15/24 × Python 3.9/3.12 上跑同样的两条命令，并做完整检出（14 个 GLB 是普通 git 对象，模型测试真的会读它们）。
 
 > 首次连接到某机器人时，`ur_connect` 有约 20 s 的 RTDE 就绪等待，超时会返回清晰错误而非卡死。
 
@@ -247,14 +257,15 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 - **连接持久性**：worker 进程在插件生命周期内常驻，机器人连接按 IP 保留；worker 崩溃或 DSH 重启后需重新 `connect`。
 - **远程控制模式**：部分 UR 机器人需处于「远程控制」才能执行运动/程序指令，`ur_connect` 会报告该状态。**URSoftware 3.1–3.20 之间的 CB3 机器人默认就允许远程控制**；但 `remote_control: false` 仍说明控制器**当前**不在远程模式 —— 本地/示教模式下 URScript 与运动指令会被静默丢弃，需在示教器上切到远程控制。其他固件（e-Series，或不在该区间的 CB3）则需先在 PolyScope 中开启 Remote Control。状态读不到时按"未知"处理，而不是假装是 `false`。
 - **读不到就不假装读到**：没有回读通道的设置型指令只回报 `verified: false`；控制器拒绝 RTDE 会话时报"未运行"而不是"已连接"；孪生某一帧刷新不出来会标 `stale`。
-- **本地文件访问**：`ur_upload_program` 会**读**本地文件、`ur_download_program` 会**写**本地文件，因此两者都被锁在 `programDir`（默认 `<DSH_HOME>/nonead-ur/programs`，可用 `programDir` 配置改）内。路径必须在该目录内 —— 判据是 `realpath` **之后**的结果，所以软链也带不出去；只传输 `.urp`；`maxProgramBytes`（1 MiB）限大小。**未配置或目录不存在的 `programDir` 一律 fail closed**：不读也不写任何本地文件。这与"把 shell 交给模型"是同一类暴露面，所以这里是设围栏，而不是靠信任。
+- **本地文件访问**：`ur_upload_program` 会**读**本地文件、`ur_download_program` 会**写**本地文件，因此两者都被锁在 `programDir`（默认 `<DSH_HOME>/nonead-ur/programs`，可用 `programDir` 配置改）内。**宿主**负责在 `realpath` 之后判围栏（软链/junction 都带不出去）、检查 `.urp` 与 `maxProgramBytes`（1 MiB），通过后才把绝对路径以 `_local_path` / `_remote_path` 注入 worker；模型自己无法设置这些下划线协议字段（`sanitizeArgs` 只保留 schema 声明过的键），worker 侧也会拒绝非绝对的 `_local_path`。空 `programDir` 落到默认目录；目录缺失或不可用时 **fail closed**：不读也不写任何本地文件。这与"把 shell 交给模型"是同一类暴露面，所以这里是设围栏，而不是靠信任。
+- **SSH 口令在审批与审计中脱敏**：`password` / `passphrase` / `token` / `secret` / `known_hosts` 的值在审批提示与 NDJSON 审计账本里一律替换为 `***`，因此确认上传/下载时口令不会出现在界面或 `audit.ndjson` 里；worker 仍会收到 SFTP 所需的真实值。
 - **程序传输不是"发出去就算完"**：上传与下载都比对另一侧的字节数，删除会在删完之后再 `stat` 一次。不一致就报失败（`VERIFY_FAILED`），绝不报成功 —— 因为调用方的下一步很可能就是去运行那个程序。
-- **命名位姿是本机数据，不是机器人状态**：`ur_save_pose` / `ur_get_pose` / `ur_list_poses` / `ur_delete_pose` 只在 `poseDir` 下按"一位姿一文件"读写 JSON，不碰控制器（除非让 `ur_save_pose` 捕获当前姿态，那需要 `ip`）。目录在首次保存时自动创建；未配置 `poseDir` 则 fail closed。真要走到某个保存过的位姿，请**分两步**（先 `ur_get_pose` 再 `ur_movel`），让门禁看到真实数字。
+- **命名位姿是本机数据，不是机器人状态**：`ur_save_pose` / `ur_get_pose` / `ur_list_poses` / `ur_delete_pose` 只在 `poseDir` 下按"一位姿一文件"读写 JSON，不碰控制器（除非让 `ur_save_pose` 捕获当前姿态，那需要 `ip`）。空 `poseDir` 使用默认目录（`<DSH_HOME>/nonead-ur/poses`），目录在首次保存时自动创建；目录建不出来或读不了时 **fail closed**。真要走到某个保存过的位姿，请**分两步**（先 `ur_get_pose` 再 `ur_movel`），让门禁看到真实数字。
 - **长时间运动绝不能让孪生冻结**：孪生唯一不受命令队列影响的数据源是 worker 的遥测推送线程，而那个线程与 RTDE、Dashboard 装在**同一个 Python 子进程**里。因此单次工具调用**绝不能**因为"运动合法地超出了调用预算"就杀掉这个子进程：运动指令的预算现在**按参数推算**（`t=` / `timeout_s`，力控引导运动另给宽兜底），并且一律 `killOnTimeout: false` —— 超时仍会如实报超时，只是不再毁掉会话（以及孪生）。
 - **遥测走独立通道**：推送帧走 **stderr + 魔数前缀**并用自己的锁，不再排在响应写锁后面的 stdout 上。共用 stdout 意味着：一条大响应写（或 stdout 背压）能把那把锁占住超过 300 ms，推送一停，路由就回退到显式读 —— 而那次读正好排在运行中的运动指令后面。普通 stderr（traceback 等）仍原样进诊断尾巴；宿主**两路都收**，旧版 Python 侧也能工作。
 - **工具端数字 I/O**：`ur_get_digital_in` / `ur_set_digital_out` 的 `which="tool"` 用于工具端（法兰侧）数字 I/O。工具端数字信号**不经 RTDE**，因此读取工具输入会发送一段短的 URScript 程序，**可能打断正在运行的程序**。**工具端数字输出的读回不支持**（没有可靠的 `read_tool_digital_out` 表达式）。
 - **关节电流**：接收配方里本来就有 `actual_current`，`ur_get_runtime_telemetry` 会以 `joint_currents` 返回它；缺的只是一个**单独的** `ur_get_joint_current` 工具，而不是这个值本身。
-- **线程/取消**：运动指令为阻塞到位的轮询，`commandTimeoutMs` 内完成；对长时间轨迹，请在描述中提醒模型设置合理超时或分步执行。
+- **取消 / 超时 ≠ 让机器人停下**：取消一次工具调用（或让它超时）只是不再等待回复，**不会**发送 `stopj`/`stopl`，机械臂可能仍在运动。调用会以 `WORKER_ABORTED` / `WORKER_TIMEOUT` 错误码失败；只要还有运动在飞（或结果未知），worker 会被刻意**保留**而不是杀掉。收尾请用 `ur_stopj` / `ur_stopl`（力控引导运动之后用 `ur_stopl`），再假定机械臂已静止。
 - **非安全边界**：此插件与 bash 工具同级，可驱动物理设备，务必在真实机器人上充分测试后再用于生产。
 - **未知型号回退**：若某机器人没有内置网格（未知或定制型号字符串），会**回退到近似几何体渲染而不报错**，数字孪生不会因未知型号失败。
 - **资产**：14 个 `assets/models/*.glb` 网格（约 21 MB，几乎就是整个发布包）由 `python scripts/convert-meshes.py` 生成，其结构契约由 `python scripts/verify-models.py` 校验（即 `npm run verify:models`）。它们的体积构成与许可来源见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)；`npm run analyze:models` 可看字节都花在哪里。
@@ -276,9 +287,9 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 - **BSD-3-Clause**（9 款）：`ur3`、`ur5`、`ur10`、`ur3e`、`ur5e`、`ur7e`、`ur10e`、`ur12e`、`ur16e` —— 同时涵盖 `assets/kinematics.json` 所派生的运动学与关节限位配置。
 - **UR「Graphical Documentation」条款**（5 款）：`ur8long`、`ur15`、`ur18`、`ur20`、`ur30`。这 5 款的网格**不是** BSD-3-Clause，而属于 UR 的「Graphical Documentation」，其使用受 UR 的 *Terms and Conditions for use of Graphical Documentation* 约束 —— 该条款不符合 OSI 开源定义，但**允许**在若干限制下使用、修改与分享。相关疑问请联系 <legal@universal-robots.com>。
 
-客户端 3D 渲染基于 [three.js](https://threejs.org/)（MIT）；[esbuild](https://esbuild.github.io/)（MIT）仅用于构建期。
+客户端 3D 渲染基于 [three.js](https://threejs.org/)（MIT）；[esbuild](https://esbuild.github.io/)（MIT）仅用于构建期。**发布产物 `lib/client.js` 内嵌了 three.js 代码**（esbuild 会把客户端半打进同一个 bundle），因此 three.js 的 MIT 声明也必须随包分发。
 
-逐型号派生清单、转换参数与许可全文见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)。
+逐型号派生清单、转换参数与许可全文见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)。该文件现在**会随 npm 包发布**（`package.json` 的 `files` 白名单），并包含 vendored `URBasic` 与内嵌于 `lib/client.js` 的 three.js 的完整 MIT 全文。
 
 ---
 

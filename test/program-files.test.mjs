@@ -161,12 +161,16 @@ test('checkProgramTransfer：把"远端形状 + 本地牢笼 + 大小上限"串�
   const { root } = await makeRoot(t);
   const upload = { local_path: 'pick.urp', remote_path: '/programs/pick.urp' };
 
-  assert.equal(checkProgramTransfer('upload_program', upload, { root }), null, '合法上传应放行');
-  assert.equal(
-    checkProgramTransfer('download_program', { local_path: 'new.urp', remote_path: '/programs/pick.urp' }, { root }),
-    null,
-    '合法下载应放行（写模式允许目标不存在）',
+  const uploadResult = checkProgramTransfer('upload_program', upload, { root });
+  assert.ok(uploadResult && uploadResult.localPath && uploadResult.remotePath, '合法上传应放行并给出绝对路径');
+  assert.equal(uploadResult.localPath, join(root, 'pick.urp'), '必须注入 realpath 后的绝对路径');
+  assert.equal(uploadResult.remotePath, '/programs/pick.urp');
+  const downloadResult = checkProgramTransfer(
+    'download_program',
+    { local_path: 'new.urp', remote_path: '/programs/pick.urp' },
+    { root },
   );
+  assert.ok(downloadResult && downloadResult.localPath, '合法下载应放行（写模式允许目标不存在）');
 
   assert.match(
     checkProgramTransfer('upload_program', { ...upload, remote_path: 'pick.urp' }, { root }).reason,

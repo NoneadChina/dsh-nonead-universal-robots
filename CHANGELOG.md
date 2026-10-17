@@ -2,6 +2,23 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.7.5] - 2026-10
+
+### Fixed
+- **`ur_run_program` could run a program other than the one that was approved**: `play` now requires a confirmed load — the load command was sent, the loaded program is non-empty, its basename matches the requested target, and the reply is not a failure. `ur_load_program` reports `confirmed: true` only with positive evidence.
+- **Motion calls no longer kill the worker on timeout**: `MOTION_OPS` is now separate from `APPROVAL_OPS`; `ur_wait_steady` gets a `timeout_s`-based budget and `killOnTimeout: false`, and while a motion is in flight (or its state is unknown) no timeout/abort kills the Python worker, so the RTDE/Dashboard session, the digital twin and the ability to stop the arm survive.
+- **Pre-flight safety gate coverage**: `draw_*` radius/edge/center/origin, acceleration (`safetyMaxAccel`), force-mode `limits` / `task_frame` / `wrench` / `selection_vector`, and `speedj`/`speedl` shapes are checked; a parameter that is present but invalid is rejected instead of being treated as absent.
+- **Approval coverage**: `set_tcp`, digital/analog outputs, tool voltage/output-mode/communication and conveyor tick are now gated (53 ops); `stopj` / `stopl` / `end_force_mode` are no longer gated — a stopping action must not require human approval.
+- **`ur_delete_program`** validates the remote path on both the host and the worker side; **`programDir`** now injects the realpath'd absolute path instead of letting Python resolve it against its own cwd; downloads are size-capped.
+- **Approval / audit**: `ur_send_script` shows the full script with its sha256 (64 KiB cap); SSH passwords are redacted in the approval text and the audit ledger; gated ops are still audited when approval is disabled.
+- **Numeric hardening**: axis-move `distance` rejects NaN/Infinity; `set_tcp` is bounded.
+- **Digital twin**: a shared per-robot frame pump (no N-times worker amplification), at most 4 concurrent streams (429 beyond that), write backpressure, idle timeout, and pending-motion preview scoped per robot.
+- **Engineering**: CI workflow; `--host-asar` / `--strict` for the real-host compatibility gate; peer ranges accept the current host; `THIRD_PARTY_NOTICES.md` is shipped; README counts corrected.
+
+### Changed
+- Approval gate: 49 -> 53 ops; README tables and `check-approval-gate.py` updated.
+- Cancellation/timeout now states that the robot may still be moving and that `ur_stopj` / `ur_stopl` should be used to stop it; the plugin no longer tears down the worker session for that.
+
 ## [0.7.4] - 2026-10
 
 ### Changed

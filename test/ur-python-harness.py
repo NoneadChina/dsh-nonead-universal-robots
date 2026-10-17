@@ -1261,5 +1261,235 @@ def probe_conveyor_set_contract():
 out['conveyor_set_contract'] = probe_conveyor_set_contract()
 
 
+# ---------------------------------------------------------------------------
+# 24. FIX_PLAN_074 C5/C6/C7：程序确认、远端路径牢笼、注入路径、数值防线
+#
+# 这一组都是**行为**探针：把真实的 handler 跑在假 dashboard / 假 SSH 上，观察它
+# "有没有 play"、"有没有先 stat"、"有没有拒绝"。只读源码字符串钉不住这些语义 ——
+# 例如 P0 的根因不是少了一行判断，而是判断用了错的对象（看的是 loaded，不是 load 应答）。
+# ---------------------------------------------------------------------------
+
+def probe_program_confirmation_contract():
+    """C5/C6/C7 的行为回归：三坏路径不 play、delete 路径牢笼、注入路径、NaN/幅值。"""
+    import types
+
+    results = {}
+    errors = {}
+    originals = {name: getattr(ur_worker, name) for name in (
+        'ensure_connected', 'dashboard', '_dashboard_cmd_args', '_loaded_program',
+        '_dashboard_cmd', '_program_running', '_ssh_client', '_assert_remote_control',
+        '_movel_confirm')}
+
+    class FakeDash:
+        def __init__(self, load_reply=None, loaded='', play_reply='Starting program'):
+            self.load_reply = load_reply
+            self.loaded = loaded
+            self.play_reply = play_reply
+            self.played = False
+            self.last_respond = None
+            self.respond_seq = 0
+
+    def wire(dash, load_sent=True, play_ok=True):
+        ur_worker.ensure_connected = lambda ip: (types.SimpleNamespace(), types.SimpleNamespace())
+        ur_worker.dashboard = lambda ip: dash
+        ur_worker._dashboard_cmd_args = lambda ip, cmd, *args: (load_sent, dash.load_reply or '')
+        ur_worker._loaded_program = lambda d: dash.loaded
+
+        def cmd_side_effect(ip, cmd):
+            if cmd == 'ur_play':
+                dash.played = play_ok
+                return play_ok, dash.play_reply
+            return True, ''
+
+        ur_worker._dashboard_cmd = cmd_side_effect
+        ur_worker._program_running = lambda ip: False
+
+    try:
+        # --- P0：三种坏路径都不得 play ---
+        bad_run = {
+            'file_not_found': (FakeDash('File not found: NEW.urp',
+                                        'Program loaded: /programs/OLD.urp'), True),
+            'no_reply': (FakeDash(None, 'Program loaded: /programs/OLD.urp'), False),
+            'load_ignored': (FakeDash('Loading program: NEW.urp',
+                                      'Program loaded: /programs/OLD.urp'), True),
+        }
+        for name, (dash, sent) in bad_run.items():
+            wire(dash, load_sent=sent)
+            res = ur_worker.op_run_program({'ip': 'ip', 'program_name': 'NEW.urp'})
+            results['run_rejects_' + name] = ('error' in res and dash.played is False)
+
+        good = FakeDash('Loading program: /programs/NEW.urp', 'Program loaded: /programs/NEW.urp')
+        wire(good)
+        res = ur_worker.op_run_program({'ip': 'ip', 'program_name': 'NEW.urp'})
+        results['run_plays_only_with_evidence'] = ('error' not in res and good.played is True)
+
+        # --- load_program confirmed 语义 ---
+        match = FakeDash('Loading program: NEW.urp', 'Program loaded: /programs/NEW.urp')
+        wire(match)
+        res = ur_worker.op_load_program({'ip': 'ip', 'program_name': 'NEW.urp'})
+        results['load_confirmed_true_with_evidence'] = (
+            'error' not in res and (res.get('data') or {}).get('confirmed') is True)
+        # 成功应答会回显程序路径：文件名里带 "error" 不得被当成加载失败。
+        tricky = FakeDash('Loading program: /programs/error_pick.urp',
+                          'Program loaded: /programs/error_pick.urp')
+        wire(tricky)
+        res = ur_worker.op_load_program({'ip': 'ip', 'program_name': 'error_pick.urp'})
+        results['load_not_fooled_by_error_in_program_name'] = (
+            'error' not in res and (res.get('data') or {}).get('confirmed') is True)
+        results['load_reply_failure_words'] = (
+            ur_worker._load_reply_failed('Could not load program: x.urp') is True
+            and ur_worker._load_reply_failed('Loading program: error_pick.urp') is False
+            and ur_worker._load_reply_failed('') is False)
+        mismatch = FakeDash('Loading program: NEW.urp', 'Program loaded: /programs/OLD.urp')
+        wire(mismatch)
+        res = ur_worker.op_load_program({'ip': 'ip', 'program_name': 'NEW.urp'})
+        results['load_errs_on_mismatch'] = 'error' in res
+        unknown = FakeDash(None, '')
+        wire(unknown, load_sent=False)
+        res = ur_worker.op_load_program({'ip': 'ip', 'program_name': 'NEW.urp'})
+        results['load_confirmed_none_when_unknown'] = (
+            'error' not in res and (res.get('data') or {}).get('confirmed') is None)
+
+        # --- basename 比对（dashboard 带标签/绝对路径） ---
+        results['basename_match_handles_label_and_relative'] = (
+            ur_worker._program_paths_match('Program loaded: /programs/pick.urp', 'pick.urp')
+            and ur_worker._program_paths_match('/programs/pick.urp', 'pick.urp'))
+        results['basename_match_rejects_other_program'] = not ur_worker._program_paths_match(
+            'Program loaded: /programs/old.urp', 'pick.urp')
+
+        # --- delete 远端路径牢笼（必须在 SSH 之前拒绝） ---
+        ssh_calls = {'n': 0}
+
+        def ssh_factory(ip, username, password, known_hosts):
+            ssh_calls['n'] += 1
+            raise AssertionError('SSH 不应被调用')
+
+        ur_worker._ssh_client = ssh_factory
+        for bad in ('/etc/passwd', 'etc/passwd', '/programs/../etc/passwd', '/programs/x.txt', ''):
+            res = ur_worker.op_delete_program({'ip': 'ip', 'remote_path': bad})
+            results['delete_rejects_' + (bad.replace('/', '_').replace('.', '_') or 'empty')] = (
+                'error' in res)
+        results['delete_rejected_before_ssh'] = ssh_calls['n'] == 0
+
+        # --- upload：注入路径优先；_local_path 必须绝对 ---
+        import tempfile as _tempfile
+        work = _tempfile.mkdtemp(prefix='ur-harness-')
+        local_file = os.path.join(work, 'pick.urp')
+        with open(local_file, 'w', encoding='utf-8') as fh:
+            fh.write('<urp/>')
+
+        class FakeSftp:
+            def __init__(self):
+                self.calls = []
+                self.local = None
+                self.remote_size = None
+
+            def put(self, local, remote):
+                self.local = local
+                self.calls.append(('put', local, remote))
+
+            def stat(self, remote):
+                self.calls.append(('stat', remote))
+                size = self.remote_size
+                if size is None:
+                    size = os.path.getsize(self.local) if self.local else 0
+                return types.SimpleNamespace(st_size=size)
+
+            def get(self, remote, local):
+                self.calls.append(('get', remote, local))
+                with open(local, 'wb') as fh:
+                    fh.write(b'x' * (self.remote_size or 1))
+
+            def remove(self, remote):
+                self.calls.append(('remove', remote))
+
+            def close(self):
+                pass
+
+        class FakeSSH:
+            def __init__(self):
+                self.sftp = FakeSftp()
+
+            def open_sftp(self):
+                return self.sftp
+
+            def close(self):
+                pass
+
+        upload_ssh = FakeSSH()
+        ur_worker._ssh_client = lambda ip, u, pw, kh: (upload_ssh, 'test-policy')
+        res = ur_worker.op_upload_program({
+            'ip': 'ip', 'local_path': local_file, 'remote_path': '/programs/pick.urp',
+            '_local_path': local_file, '_remote_path': '/programs/pick.urp'})
+        results['upload_uses_injected_paths'] = (
+            'error' not in res
+            and upload_ssh.sftp.calls[:2] == [('put', local_file, '/programs/pick.urp'),
+                                              ('stat', '/programs/pick.urp')])
+        results['upload_reports_host_path_source'] = (
+            (res.get('data') or {}).get('path_source', {}).get('local') == 'host')
+
+        ssh_calls['n'] = 0
+        ur_worker._ssh_client = ssh_factory
+        res = ur_worker.op_upload_program({
+            'ip': 'ip', 'local_path': local_file, 'remote_path': '/programs/pick.urp',
+            '_local_path': 'relative/pick.urp', '_remote_path': '/programs/pick.urp'})
+        results['upload_rejects_relative_injected_local_path'] = (
+            'error' in res and ssh_calls['n'] == 0)
+
+        # --- download：大小上限在动本地文件之前生效 ---
+        download_dir = os.path.join(work, 'out')
+        os.makedirs(download_dir, exist_ok=True)
+        target = os.path.join(download_dir, 'dl.urp')
+        big_ssh = FakeSSH()
+        big_ssh.sftp.remote_size = ur_worker.PROGRAM_FILE_MAX_BYTES + 1
+        ur_worker._ssh_client = lambda ip, u, pw, kh: (big_ssh, 'test-policy')
+        res = ur_worker.op_download_program({
+            'ip': 'ip', 'local_path': target, 'remote_path': '/programs/big.urp',
+            '_local_path': target, '_remote_path': '/programs/big.urp'})
+        results['download_rejects_oversized_remote'] = ('error' in res)
+        results['download_size_check_precedes_local_write'] = (
+            not os.path.exists(target) and not os.path.exists(target + '.bak'))
+
+        # --- _axis_move 的 NaN/Inf 防线 ---
+        moved = []
+        fake_robot = types.SimpleNamespace(
+            robotConnector=types.SimpleNamespace(RealTimeClient=types.SimpleNamespace(
+                SendProgram=lambda prg: True, Send=lambda prg: True)),
+            get_actual_tcp_pose=lambda: [0.3, 0.0, 0.4, 0.0, 3.1416, 0.0],
+            movel=lambda pose, **kw: moved.append(pose))
+        ur_worker.ensure_connected = lambda ip: (fake_robot, None)
+        ur_worker._assert_remote_control = lambda ip, what: None
+        ur_worker._movel_confirm = lambda ip, pose, t: (False, 'stub')
+        results['axis_move_rejects_nan'] = all(
+            'error' in ur_worker.op_move_x({'ip': 'ip', 'distance': bad})
+            for bad in (float('nan'), float('inf'), float('-inf')))
+        results['axis_move_rejects_nan_tool_frame'] = all(
+            'error' in ur_worker.op_move_tool_x({'ip': 'ip', 'distance': bad})
+            for bad in (float('nan'), float('inf')))
+        results['axis_move_never_sent_nan'] = moved == []
+
+        # --- set_tcp 幅值上限 ---
+        results['set_tcp_rejects_xyz_over_1m'] = 'error' in ur_worker.op_set_tcp(
+            {'ip': 'ip', 'pose': [1.5, 0, 0, 0, 0, 0]})
+        results['set_tcp_rejects_rotation_over_2pi'] = 'error' in ur_worker.op_set_tcp(
+            {'ip': 'ip', 'pose': [0, 0, 0, 0, 0, 7.0]})
+        results['set_tcp_accepts_in_range'] = 'error' not in ur_worker.op_set_tcp(
+            {'ip': 'ip', 'pose': [0.1, 0.2, 0.3, 0, 0, 1.0]})
+
+        # --- 105 个 op 不变 ---
+        results['handlers_still_105'] = len(ur_worker.HANDLERS) == 105
+    except Exception as exc:  # noqa: BLE001  —— 探针自身异常要让调用方看见，而不是静默 False
+        errors['unexpected'] = '%s: %s' % (type(exc).__name__, exc)
+    finally:
+        for name, fn in originals.items():
+            setattr(ur_worker, name, fn)
+
+    results['_errors'] = errors
+    return results
+
+
+out['program_confirmation_contract'] = probe_program_confirmation_contract()
+
+
 ur_worker._PROTOCOL_OUT.write(json.dumps(out, ensure_ascii=False) + '\n')
 ur_worker._PROTOCOL_OUT.flush()

@@ -24,6 +24,9 @@ import { UrWorker } from '../lib/worker.js'
 
 const PYTHON = process.env.PYTHON ?? 'python'
 
+/** 等一小会儿（用真实的定时器驱动真实子进程的行为，不 mock 时间）。 */
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 /** 假 worker：`echo` 正常回包；`die` 直接退出（模拟崩溃）；`hang` 永不回包。 */
 const FAKE_WORKER = `
 import json, os, sys, time
@@ -55,6 +58,10 @@ for line in sys.stdin:
         sys.exit(3)
     elif op == "hang":
         time.sleep(30)
+    elif op == "slow":
+        time.sleep(float(req.get("ms", 1000)) / 1000.0)
+        sys.stdout.write(json.dumps({"id": req["id"], "ok": True, "data": {"slow": True}}) + "\\n")
+        sys.stdout.flush()
     elif op == "push":
         # 先推一行**没有 id** 的主动推送（模拟孪生遥测），再回一条正常响应。
         sys.stdout.write(json.dumps({"push": "telemetry", "ip": "1.2.3.4", "ts": 111,
@@ -362,6 +369,167 @@ test('dispose() 取消已排队的重启退避：拆卸之后绝不再 spawn，�
     assert.equal(worker.respawnCount, spawnsBefore, '拆卸后不得再 spawn 子进程')
     assert.equal(worker.proc, null, '拆卸后不得留下子进程引用')
     assert.equal(worker._respawnTimer, null, '退避定时器必须已被取消（不是等它自己烧完）')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+// ── C2：运动在飞 / 运动状态未知时，超时与取消都不得杀 worker ────────────────
+//
+// 背景（真机）：worker 是单线程的，运动指令要跑几十秒。此时任何**别的**调用超时（孪生、
+// 下一条读、甚至 wait_steady 自己的预算到点）若杀掉子进程，机械臂仍会在控制器上继续运动，
+// 而 RTDE/Dashboard 会话与孪生推送线程随进程一起消失 —— 宿主既看不见也停不了。
+// 判据：`mayKill = killOnTimeout && activeMotions === 0 && !motionUnknown`。
+
+test('★ C2 坏行守卫：JSON 合法但不是对象（null / 数字 / 字符串 / 数组）不得抛', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    const before = worker.stats().droppedLines
+    for (const line of ['null', '123', '"x"', '[]', 'true', 'null']) {
+      assert.doesNotThrow(() => worker._onLine(line), `_onLine(${JSON.stringify(line)}) 不得抛`)
+    }
+    assert.equal(worker.stats().droppedLines, before + 6, '非对象行按"坏行"计数')
+    worker.dispose()
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('★ C2 wait_steady 场景：运动请求超时只让本次失败，不杀 worker（会话与孪生必须活着）', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await worker.call('echo', { v: 'warm' })
+    const proc = worker.proc
+    assert.equal(worker.stats().activeMotions, 0)
+
+    const error = await worker.call('hang', {}, 250, undefined, { motion: true, killOnTimeout: false })
+      .then(() => null, (e) => e)
+    assert.ok(error, '超时必须 reject 调用方')
+    assert.equal(error.code, 'WORKER_TIMEOUT')
+
+    await delay(200)
+    assert.equal(worker.proc, proc, '★ 不得换/杀子进程：机械臂可能仍在动')
+    assert.equal(worker.stats().running, true, '子进程必须仍然活着')
+    assert.equal(worker.stats().activeMotions, 0, '超时后运动计数归零')
+    assert.equal(worker.stats().motionUnknown, true, '没收到应答 ⇒ 运动状态未知')
+    worker.dispose()
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('★ C2 只读调用超时，但运动在飞：不得杀 worker', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await worker.call('echo', { v: 'warm' })
+    const proc = worker.proc
+
+    const motion = worker.call('hang', {}, 4000, undefined, { motion: true, killOnTimeout: false })
+    await delay(100)
+    assert.equal(worker.stats().activeMotions, 1, '运动请求必须处于在飞状态')
+
+    const readError = await worker.call('echo', { v: 'queued' }, 200).then(() => null, (e) => e)
+    assert.equal(readError?.code, 'WORKER_TIMEOUT', '只读调用自己照常超时')
+    assert.equal(worker.proc, proc, '★ 只读超时不得杀掉正在运动的 worker')
+    assert.equal(worker.stats().running, true)
+    worker.dispose()
+    await Promise.allSettled([motion])
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('★ C2 运动自身超时即使没传 killOnTimeout:false 也不杀（判据同时看 activeMotions 与未知态）', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await worker.call('echo', { v: 'warm' })
+    const proc = worker.proc
+    await assert.rejects(() => worker.call('hang', {}, 250, undefined, { motion: true }), /timed out/)
+    await delay(200)
+    assert.equal(worker.proc, proc, '运动请求自身超时后也不得杀进程')
+    assert.equal(worker.stats().motionUnknown, true)
+    worker.dispose()
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('★ C2 运动状态未知期间：任何调用超时都不杀；收到迟到应答后恢复"可杀"语义', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await worker.call('echo', { v: 'warm' })
+    const proc = worker.proc
+    assert.equal(worker.stats().motionUnknown, false)
+
+    // 假 worker 的 slow 400 ms 后才回包；给 100 ms 预算 ⇒ 超时且状态未知。
+    await assert.rejects(
+      () => worker.call('slow', { ms: 400 }, 100, undefined, { motion: true, killOnTimeout: false }),
+      /timed out/,
+    )
+    await delay(50)
+    assert.equal(worker.stats().motionUnknown, true)
+
+    // 状态未知期间，一条普通读超时也不得杀进程。
+    await assert.rejects(() => worker.call('slow', { ms: 300 }, 100), /timed out/)
+    assert.equal(worker.proc, proc, '★ motionUnknown 期间不得杀进程')
+
+    // 那条运动的迟到应答到达 ⇒ 状态恢复已知。
+    await delay(600)
+    assert.equal(worker.stats().motionUnknown, false, '收到该运动的迟到应答后应清除未知标志')
+
+    // 状态已知后，普通调用超时恢复旧语义（杀进程以解救单线程 worker）。
+    await assert.rejects(() => worker.call('hang', {}, 200), /timed out/)
+    await delay(200)
+    assert.equal(worker.proc, null, '状态已知后普通超时应恢复杀进程语义')
+    worker.dispose()
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('★ C2 取消在飞的运动：只失败本次调用并记为状态未知，不杀 worker', async () => {
+  const fixture = fakeWorkerFixture()
+  try {
+    const worker = fixture.worker()
+    await worker.call('echo', { v: 'warm' })
+    const proc = worker.proc
+    const controller = new AbortController()
+    const pending = worker.call('hang', {}, 30000, controller.signal, { motion: true, killOnTimeout: false })
+    await delay(100)
+    controller.abort()
+    await assert.rejects(() => pending, /aborted/)
+    await delay(100)
+    assert.equal(worker.proc, proc, '取消运动不得杀进程（机器人可能仍在动）')
+    assert.equal(worker.stats().motionUnknown, true, '取消且未收到应答 ⇒ 状态未知')
+    assert.equal(worker.stats().activeMotions, 0)
+    worker.dispose()
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('★ C2 进程重建后运动状态归零（不留下"永远不敢杀"的粘滞态）', async () => {
+  const fixture = fakeWorkerFixture({ restartDelayMs: 100 })
+  try {
+    const worker = fixture.worker()
+    await worker.call('echo', { v: 'warm' })
+    await assert.rejects(
+      () => worker.call('hang', {}, 100, undefined, { motion: true, killOnTimeout: false }),
+      /timed out/,
+    )
+    assert.equal(worker.stats().motionUnknown, true)
+
+    worker._killFor('test')
+    assert.equal(worker.stats().motionUnknown, false, '杀掉/重建之后旧的运动状态必须作废')
+    assert.deepEqual(await worker.call('echo', { v: 'rebuilt' }), { echo: 'rebuilt' })
+    assert.equal(worker.stats().motionUnknown, false)
+    assert.equal(worker.stats().activeMotions, 0)
+    worker.dispose()
   } finally {
     fixture.cleanup()
   }

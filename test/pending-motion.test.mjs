@@ -149,3 +149,54 @@ test('store：重叠审批时先结束的那次不得抹掉后一次的预览（
   assert.doesNotThrow(() => store.end(undefined))
   assert.doesNotThrow(() => store.end({}))
 })
+
+// ── C8（0.7.5）：审批预览按机器人 ip 归属 ──────────────────────────────────
+//
+// 背景（`.audit/client-twin.md` P2-3）：store 只有一条全局记录、不带 ip，孪生会把
+// "机器人 B 待审批"的橙色幽灵臂画在机器人 A 上 —— 而"先看后动"的全部意义就是让操作员
+// 看清**哪台**机器人要往哪动。以下三条钉住"记录 ip / 按 ip 过滤 / legacy 兼容"。
+
+test('store（C8）：begin 记录 ip，read(ip) 只返回该机器人的预览', () => {
+  const store = createPendingMotionStore()
+  const token = store.begin('ur_movej', { q: Q }, '192.168.1.10')
+  try {
+    assert.ok(store.read('192.168.1.10'), '目标机必须读到')
+    assert.equal(store.read('192.168.1.11'), null, '★ 另一台机器人必须读不到')
+    // 不传 ip（单机/旧调用方）保持旧行为；空白 ip 等同不传。
+    assert.ok(store.read(), '不传 ip 时必须保持旧行为')
+    assert.ok(store.read('   '), '空白 ip 等同不传')
+  } finally {
+    store.end(token)
+  }
+})
+
+test('store（C8）：ip 可省略（回退 args.ip）、trim 后比较、显式第三参数优先', () => {
+  const store = createPendingMotionStore()
+  const token = store.begin('ur_movel', { ip: ' 192.168.1.10 ', pose: POSE })
+  try {
+    assert.ok(store.read('192.168.1.10'), 'args.ip 应作为兜底来源，且两端都 trim')
+    assert.equal(store.read('192.168.1.11'), null)
+  } finally {
+    store.end(token)
+  }
+
+  const token2 = store.begin('ur_movel', { ip: '10.0.0.1', pose: POSE }, '10.0.0.2')
+  try {
+    assert.ok(store.read('10.0.0.2'), '显式第三参数优先')
+    assert.equal(store.read('10.0.0.1'), null, '★ args.ip 不得盖过显式参数')
+  } finally {
+    store.end(token2)
+  }
+})
+
+test('store（C8）：legacy 记录（无 ip）不会被任何 read(ip) 过滤掉', () => {
+  const store = createPendingMotionStore()
+  // 既没传第三参数，args 里也没有 ip —— 典型旧调用方/单机场景。
+  const token = store.begin('ur_movej', { q: Q })
+  try {
+    assert.ok(store.read('192.168.1.10'), '旧记录没有归属信息，不能凭空判定"不是你的"')
+    assert.ok(store.read('10.0.0.9'))
+  } finally {
+    store.end(token)
+  }
+})
