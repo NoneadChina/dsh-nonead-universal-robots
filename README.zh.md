@@ -297,8 +297,8 @@ ur_draw_circle(ip="192.168.1.199", center=[0.3,-0.2,0.4,0,3.14,0], r=0.05)
 
 本项目采用**区分用户的双重许可 (User-Segmented Dual Licensing)** 模式：
 
-- **AGPLv3**：适用于**个人用户**及**10 人及以下企业/组织**（开源；详见 <https://www.gnu.org/licenses/agpl-3.0.html>）。
-- **商业许可证（必须）**：适用于**超过 10 人**的组织，或任何需要规避 AGPLv3 源代码公开义务（如 SaaS / 闭源分发）的用户。
+- **AGPLv3**：适用于**个人用户**及**3 人及以下企业/组织**（开源；详见 <https://www.gnu.org/licenses/agpl-3.0.html>）。
+- **商业许可证（必须）**：适用于**超过 3 人**的组织，或任何需要规避 AGPLv3 源代码公开义务（如 SaaS / 闭源分发）的用户。
 
 完整条款见 [LICENSE](./LICENSE)。商业授权请联系 [service@nonead.com](mailto:service@nonead.com)。
 

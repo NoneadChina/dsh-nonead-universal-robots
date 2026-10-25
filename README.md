@@ -298,8 +298,8 @@ See [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) for the per-model deriv
 
 This project adopts a **User-Segmented Dual Licensing** model:
 
-- **AGPLv3** for individual users and organizations with **≤10 people** (open source; see <https://www.gnu.org/licenses/agpl-3.0.html>).
-- **Commercial license (required)** for organizations with **>10 people**, or for anyone who needs to avoid the AGPLv3 source-disclosure obligation (e.g. SaaS / closed distribution).
+- **AGPLv3** for individual users and organizations with **≤3 people** (open source; see <https://www.gnu.org/licenses/agpl-3.0.html>).
+- **Commercial license (required)** for organizations with **>3 people**, or for anyone who needs to avoid the AGPLv3 source-disclosure obligation (e.g. SaaS / closed distribution).
 
 See [LICENSE](./LICENSE) for the full agreement. For a commercial license, contact [service@nonead.com](mailto:service@nonead.com).
 
