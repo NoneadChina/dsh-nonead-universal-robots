@@ -84,9 +84,46 @@ host 侧路由（均限定 loopback 调用方）：
 
 ---
 
+## 语言（界面文案）
+
+自 **0.8.0** 起，孪生面板与右栏入口卡片已本地化为**八种语言**：
+
+> 简体中文 · English · 日本語 · Español · Français · Deutsch · Русский · Português (Brasil)
+
+语言**跟随 DSH 桌面程序的语言**：八份字典通过宿主自带的 `@deepseek-ai/dsh-client-locale` 注册
+（`dsh.client.inject` + `ctx.locale.register('ur-twin', …)`），由宿主的 `locale.preference` 决定用哪份。
+在**设置 → 界面语言**里切换，面板**无需刷新页面**即生效。宿主没有 locale 服务时，回退顺序是
+`navigator.languages` → `navigator.language` → 简体中文。
+
+所有用户可见文案都集中在一张表里（[`src/client/strings.js`](./src/client/strings.js)），
+新增一种语言＝新增一份字典；键集合的对称性由测试钉住。
+
+---
+
 ## 安装到 DSH profile
 
-> 📦 **尚未发布到 npm**，因此没有可写进 `dependencies` 的版本号。请从插件市场/插件页安装，或从本仓库安装（本地检出目录或它的 GitHub 地址）。
+> 📦 **已发布到 npm**：[`dsh-nonead-universal-robots`](https://www.npmjs.com/package/dsh-nonead-universal-robots)
+> —— 当前版本 **0.8.0**。最快的是下面的「方式零」：不需要从 GitHub 下 tarball，也不需要本地检出。
+
+### 方式零：从 npm 安装（推荐）
+
+```sh
+# DSH Desktop 会为每个 profile 生成一个 CLI 包装器，它会自己补上 --profile：
+dsh.cmd plugin add dsh-nonead-universal-robots
+# 需要锁定版本时：
+dsh.cmd plugin add dsh-nonead-universal-robots@0.8.0
+# 其他环境：dsh plugin --profile <profile> add dsh-nonead-universal-robots
+```
+
+也可以直接写进 profile 的 `package.json` —— 默认就从注册表取：
+
+```jsonc
+"dependencies": { "dsh-nonead-universal-robots": "^0.8.0" }
+```
+
+如果要把 tarball 内联进别的包，`npm install dsh-nonead-universal-robots` 同样可用。安装进来的副本包含
+`lib/`、`python/`（worker 与 vendored `URBasic`）、`assets/`、`cordis.patch.yml`、两份 CHANGELOG 与
+`THIRD_PARTY_NOTICES.md`。
 
 ### 方式一：插件市场 / 插件页（GUI）
 
@@ -118,7 +155,8 @@ dsh.cmd plugin add "file:D:/path/to/dsh-nonead-universal-robots"
    // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "file:D:/path/to/dsh-nonead-universal-robots"
+       "dsh-nonead-universal-robots": "^0.8.0"
+       // 离线/内网环境的退路："file:D:/path/to/dsh-nonead-universal-robots"
        // 或（GitHub 可达时）："github:NoneadChina/dsh-nonead-universal-robots"
      },
      "dsh": {

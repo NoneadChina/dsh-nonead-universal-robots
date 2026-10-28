@@ -84,9 +84,48 @@ Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_c
 
 ---
 
+## Languages (UI copy)
+
+Since **0.8.0** the twin panel and the right-dock entry are localised into **eight languages**:
+
+> 简体中文 · English · 日本語 · Español · Français · Deutsch · Русский · Português (Brasil)
+
+The language **follows the DSH Desktop app language**: the eight dictionaries are registered with the
+host's `@deepseek-ai/dsh-client-locale` (`dsh.client.inject` + `ctx.locale.register('ur-twin', …)`),
+and the host's `locale.preference` decides which one is used. Switching the language in
+**Settings → 界面语言 / Language** updates the panel **without a reload**. Without a host locale
+service the plugin falls back to `navigator.languages` → `navigator.language` → Simplified Chinese.
+
+Every user-visible string lives in one table ([`src/client/strings.js`](./src/client/strings.js)), so
+adding a language means adding one dictionary — the key set is enforced by tests.
+
+---
+
 ## Install into a DSH profile
 
-> 📦 **Not published to npm (yet)**, so there is no version range to write into `dependencies`. Install from the plugin market / plugin page or from this repository (a local checkout or its GitHub URL).
+> 📦 **Published on npm** as [`dsh-nonead-universal-robots`](https://www.npmjs.com/package/dsh-nonead-universal-robots)
+> — current release **0.8.0**. The npm route (Option 0) is the simplest: no GitHub tarball download
+> and no local checkout.
+
+### Option 0 — from npm (recommended)
+
+```sh
+# DSH Desktop ships a CLI wrapper per profile; it adds --profile itself:
+dsh.cmd plugin add dsh-nonead-universal-robots
+# pin an exact version if you prefer:
+dsh.cmd plugin add dsh-nonead-universal-robots@0.8.0
+# on other setups: dsh plugin --profile <profile> add dsh-nonead-universal-robots
+```
+
+Or write the range into the profile's `package.json` yourself — the registry is the default source:
+
+```jsonc
+"dependencies": { "dsh-nonead-universal-robots": "^0.8.0" }
+```
+
+`npm install dsh-nonead-universal-robots` also works if you want to vendor the tarball into another
+package. The installed copy contains `lib/`, `python/` (worker + vendored `URBasic`), `assets/`,
+`cordis.patch.yml`, the changelogs and `THIRD_PARTY_NOTICES.md`.
 
 ### Option 1 — plugin market / plugin page (GUI)
 
@@ -118,7 +157,8 @@ This is the same path the plugin page uses: it writes the dependency **and** the
    // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "file:D:/path/to/dsh-nonead-universal-robots"
+       "dsh-nonead-universal-robots": "^0.8.0"
+       // offline / air-gapped fallbacks: "file:D:/path/to/dsh-nonead-universal-robots"
        // or, once GitHub is reachable: "github:NoneadChina/dsh-nonead-universal-robots"
      },
      "dsh": {

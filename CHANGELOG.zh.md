@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.1] - 2026-10-29
+
+### 文档 —— 按「已发布到 npm」的口径重写安装说明
+
+- 两份 README（中/英）的安装章节新增 **「方式零 / Option 0：从 npm 安装」**
+  （`dsh.cmd plugin add dsh-nonead-universal-robots`，或 `dependencies` 里写 `^0.8.0`），
+  并删掉「尚未发布到 npm」那句已过时的说明。
+- 手动 bundle 方式里，`dependencies` 的**首选**改为注册表版本范围 `^0.8.0`；`file:` 与 `github:`
+  降级为离线/内网环境的退路。
+- 新增 **「语言（界面文案）」** 章节：说明 0.8.0 起的 8 种语言、跟随 DSH 桌面程序语言
+  （`locale.preference`）、免刷新切换，以及无宿主 locale 服务时的回退顺序。
+- **仅文档变更**，`lib/`、`python/`、`src/` 未改动；`lib/client.js` 重新构建以保持与 `src/` 一致。
+
 ## [0.8.0] - 2026-10-29
 
 ### 新增 —— 客户端文案支持 8 种语言，并跟随桌面程序语言

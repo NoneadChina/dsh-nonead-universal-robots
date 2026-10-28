@@ -2,6 +2,21 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] - 2026-10-29
+
+### Docs — installation rewritten for an npm-published package
+
+- Both READMEs gained **"Option 0 — from npm"**
+  (`dsh.cmd plugin add dsh-nonead-universal-robots`, or `"dsh-nonead-universal-robots": "^0.8.0"`
+  in `dependencies`), and the stale "not published to npm (yet)" note is gone.
+- In the hand-written bundle route the **primary** dependency is now the registry range `^0.8.0`;
+  `file:` and `github:` are documented as offline / air-gapped fallbacks.
+- New **"Languages (UI copy)"** section: the eight languages shipped since 0.8.0, the fact that they
+  follow the DSH Desktop app language (`locale.preference`) and switch without a reload, and the
+  fallback order when no host locale service is present.
+- **Documentation only** — `lib/`, `python/` and `src/` are untouched; `lib/client.js` was rebuilt so
+  it still matches `src/` byte for byte.
+
 ## [0.8.0] - 2026-10-29
 
 ### Added — client copy in 8 languages, following the desktop app language
