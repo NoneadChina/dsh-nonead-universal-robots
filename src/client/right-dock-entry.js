@@ -45,7 +45,7 @@
  */
 
 import { subscribeMutations } from './mutation-hub.js'
-import { activeStrings } from './strings.js'
+import { liveStrings } from './strings.js'
 
 /* ------------------------------------------------------------------ *
  * 真实锚点与标记常量
@@ -75,10 +75,15 @@ export const RIGHT_CLOSE_ATTRIBUTE = 'data-dsh-ur-twin-right-close'
 /** 覆盖层内面板宿主（`mountPanel` 收到的容器）的标记属性。 */
 export const RIGHT_PANEL_HOST_ATTRIBUTE = 'data-dsh-ur-twin-right-panel'
 
-/** 入口卡片文案（与左栏入口保持一致）。 */
-const S = activeStrings()
+/**
+ * 入口卡片文案（跟随当前语言）。
+ *
+ * ⚠️ 这三个导出常量是**模块求值期**取到的值（默认语言），只用于对外断言/测试；界面上的
+ * 文案一律在构造 DOM 时读 `S.*`（`liveStrings` 的 Proxy），这样宿主切换语言后能立即生效。
+ */
+const S = liveStrings()
 
-/** 入口标题（跟随当前语言）。 */
+/** 入口标题（默认语言下的取值，仅供外部断言）。 */
 export const RIGHT_ENTRY_LABEL = S.dockLabel
 
 /** 入口卡片描述（对齐原生卡片的「浏览网页」「在会话工作区运行命令」语气）。 */
@@ -235,9 +240,9 @@ function cloneNativeEntry(doc) {
   const icon = clone.querySelector('[class*="entryIcon"]')
   if (icon) icon.innerHTML = CARD_ICON
   const title = clone.querySelector('[class*="entryTitle"]')
-  if (title) title.textContent = RIGHT_ENTRY_LABEL
+  if (title) title.textContent = S.dockLabel
   const description = clone.querySelector('[class*="entryDescription"]')
-  if (description) description.textContent = RIGHT_ENTRY_DESCRIPTION
+  if (description) description.textContent = S.dockDescription
 
   clone.removeAttribute?.('data-sidebar-right-guide-entry')
   clone.removeAttribute?.('aria-keyshortcuts')
@@ -262,10 +267,10 @@ function buildEntryElement(doc) {
   const text = doc.createElement('span')
   setStyle(text, FALLBACK_TEXT_STYLE)
   const title = doc.createElement('span')
-  title.textContent = RIGHT_ENTRY_LABEL
+  title.textContent = S.dockLabel
   setStyle(title, FALLBACK_TITLE_STYLE)
   const description = doc.createElement('span')
-  description.textContent = RIGHT_ENTRY_DESCRIPTION
+  description.textContent = S.dockDescription
   setStyle(description, FALLBACK_DESCRIPTION_STYLE)
   text.appendChild(title)
   text.appendChild(description)
@@ -287,8 +292,8 @@ function createEntryElement(doc) {
   const entry = cloned ?? buildEntryElement(doc)
   entry.setAttribute(RIGHT_ENTRY_ATTRIBUTE, '')
   entry.setAttribute('data-dsh-plugin', 'ur-digital-twin')
-  entry.setAttribute('aria-label', RIGHT_ENTRY_LABEL)
-  entry.setAttribute('title', RIGHT_ENTRY_LABEL)
+  entry.setAttribute('aria-label', S.dockLabel)
+  entry.setAttribute('title', S.dockLabel)
   entry.setAttribute('aria-pressed', 'false')
   return { element: entry, cloned: cloned !== undefined }
 }

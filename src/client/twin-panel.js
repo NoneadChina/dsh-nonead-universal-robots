@@ -79,18 +79,20 @@ import { interpolateAt } from './robot/interpolate.js'
 import { pushSample, trajectoryColors, trajectoryCsv, trajectoryPoints } from './robot/trajectory.js'
 import { injectStyles } from './styles.js'
 import { isDarkTheme, observeTheme, twin3dPalette } from './theme.js'
-import { activeStrings } from './strings.js'
+import { liveNested, liveStrings } from './strings.js'
 
 /**
  * 当前语言的文案表（清单第 15 条）。
  *
- * ⚠️ **必须定义在模块最前面**：下面的 `SAFETY_TEXT = S.safetyMode` 等映射表在**模块求值期**
+ * ⚠️ **必须定义在模块最前面**：下面的 `SAFETY_TEXT = …` 等映射表在**模块求值期**
  * 就会读它，放到后面会直接 TDZ 报错（`Cannot access 'S' before initialization`）。
  *
- * 模块级只取一次：面板是长期驻留的，运行期不会换语言。`STATUS_*` 等导出常量刻意保持
- * 中文原样 —— 它们是大量既有测试的断言目标，而运行时一律走这里。
+ * 用 `liveStrings()` 而不是加载时取一次的 `activeStrings()`：宿主支持**免刷新切换语言**
+ * （`locale.preference`），这个 Proxy 每次取属性都按"当前语言"解析。同样地，下面三个
+ * 嵌套表用 `liveNested(...)` 而不是 `S.safetyMode` —— 后者会把语言冻结在求值那一刻。
+ * `STATUS_*` 等导出常量刻意保持中文原样 —— 它们是大量既有测试的断言目标，运行时一律走这里。
  */
-const S = activeStrings()
+const S = liveStrings()
 import { captureTwinPng, downloadDataUrl, screenshotFileName } from './robot/screenshot.js'
 
 /* ------------------------------------------------------------------ *
@@ -286,13 +288,13 @@ export function formatTcp(tcp) {
  * 安全模式原始串 → 中文。**未知值原样返回**：宁可显示 `SOMETHING_NEW` 也不要显示空白，
  * 否则固件新增一个模式时界面会假装"一切正常"。
  */
-const SAFETY_TEXT = S.safetyMode
+const SAFETY_TEXT = liveNested('safetyMode')
 
 /** 机器人模式原始串 → 中文（未知值原样返回）。 */
-const ROBOT_MODE_TEXT = S.robotMode
+const ROBOT_MODE_TEXT = liveNested('robotMode')
 
 /** 程序状态原始串 → 中文（未知值原样返回）。 */
-const PROGRAM_STATE_TEXT = S.programState
+const PROGRAM_STATE_TEXT = liveNested('programState')
 
 /**
  * dashboard 查询失败时 host 给的哨兵值（见 `python/ur_worker.py` 的 `dash()`）：

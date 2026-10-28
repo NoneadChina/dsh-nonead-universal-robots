@@ -2,6 +2,31 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-10-29
+
+### Added — client copy in 8 languages, following the desktop app language
+
+- **Languages**: Simplified Chinese, English, Japanese, Spanish, French, German, Russian and
+  Brazilian Portuguese (`zh` / `en` / `ja` / `es` / `fr` / `de` / `ru` / `pt`). All eight
+  dictionaries have **exactly the same key set**, including the `safetyMode` / `robotMode` /
+  `programState` enum tables.
+- **Follows the desktop app language**: the client now uses the host's own
+  `@deepseek-ai/dsh-client-locale` (declared in `dsh.client.inject`): the eight dictionaries are
+  registered with `ctx.locale.register('ur-twin', …)` and the host's `locale.preference` is read,
+  so switching the language in DSH Settings updates the panel and the dock entry **without a page
+  reload**. Without a locale service it falls back to `navigator.languages` → `navigator.language`
+  → Chinese.
+- **Region tags are normalised**: `pt-BR` / `pt-PT` → `pt`, `es-419` → `es`, `ja-JP` → `ja`,
+  traditional `zh-TW` / `zh-Hant` → `zh`; an unknown language falls back to **Chinese, never to
+  English**.
+- **Fixed a real defect**: the panel used to do `const S = activeStrings()` at module evaluation,
+  which **froze the language at load time** — the host supports switching without a reload, but the
+  UI could not follow. It now uses two proxies (`liveStrings()` / `liveNested()`) so every read
+  resolves against the current language, including module-level maps such as `SAFETY_TEXT`.
+- **Tests**: `test/strings.test.mjs` grew to 12 cases — key/type parity across all eight locales,
+  non-empty enums, no Chinese leaking into non-CJK locales, host language taking precedence over the
+  browser, live switching, registration and disposal, and registration failures not throwing.
+
 ## [0.7.6] - 2026-10-28
 
 > **`npm publish` failed with `npm error code 9009` before it even reached npm.** That code is

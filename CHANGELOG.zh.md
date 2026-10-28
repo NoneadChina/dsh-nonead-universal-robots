@@ -2,6 +2,27 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0] - 2026-10-29
+
+### 新增 —— 客户端文案支持 8 种语言，并跟随桌面程序语言
+
+- **语言**：简体中文、English、日本語、Español、Français、Deutsch、Русский、Português (Brasil)
+  （`zh` / `en` / `ja` / `es` / `fr` / `de` / `ru` / `pt`，8 套词条**键集合完全对称**，含
+  `safetyMode` / `robotMode` / `programState` 三张枚举表）。
+- **与桌面程序语言一致**：接入宿主自带的 `@deepseek-ai/dsh-client-locale`
+  （`package.json` 的 `dsh.client.inject` 已声明该包）：把 8 份字典通过
+  `ctx.locale.register('ur-twin', …)` 注册给宿主，并读取宿主的 `locale.preference`
+  —— 用户在 DSH 设置里换语言，面板与入口卡片**无需刷新页面**即生效。
+  宿主不可用时按 `navigator.languages` → `navigator.language` → 中文 回退。
+- **区域标签归一**：`pt-BR` / `pt-PT` → `pt`、`es-419` → `es`、`ja-JP` → `ja`、繁体
+  `zh-TW` / `zh-Hant` → `zh`；**认不出的语言一律回退中文，绝不因为认不出就退回英文**。
+- **修掉一个真缺陷**：面板原先在模块求值期就 `const S = activeStrings()`，语言被**冻结在加载
+  那一刻**（宿主支持免刷新切换，界面却不跟着变）。现在改用 `liveStrings()` / `liveNested()`
+  两个 Proxy：每次取文案都按当前语言解析，`SAFETY_TEXT` 这类模块级常量也随之"活"起来。
+- **测试**：`test/strings.test.mjs` 扩到 12 项 —— 8 语言键/类型对称、枚举表非空、
+  非中日文词条不得混入中文字符（抓漏翻）、宿主语言优先于浏览器、热切换、注册与退订、
+  注册失败不抛。
+
 ## [0.7.6] - 2026-10-28
 
 > **`npm publish` 在还没走到 npm 之前就报 `npm error code 9009`。** 这是 Windows 的"找不到命令"，

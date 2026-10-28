@@ -31,6 +31,7 @@
 import { createTwinState } from './state.js'
 import { mountRightDockEntry } from './right-dock-entry.js'
 import { mountTwinPanel } from './twin-panel.js'
+import { bindHostLocale } from './strings.js'
 
 export const name = 'ur-digital-twin-client'
 
@@ -63,6 +64,15 @@ export function resolveRobotIp(config, globalScope = globalThis) {
 export function apply(ctx, config) {
   const doc = globalThis.document
   const ip = resolveRobotIp(config)
+  /*
+   * 语言（i18n）：把本插件的 8 份字典注册到**宿主 locale 服务**，并让本地文案表跟随桌面
+   * 程序语言（`locale.preference`），语言切换免刷新。绑定必须在挂载面板**之前** —— 这样
+   * 第一次渲染就是宿主语言，不会先闪一下中文。
+   *
+   * 宿主没有 locale 服务时（独立浏览器/旧宿主）`bindHostLocale` 内部全部容错，回退
+   * `navigator.languages`，再回退中文。
+   */
+  const unbindLocale = bindHostLocale(ctx)
   /*
    * SSE 实时流（清单第 20 条）：**默认启用**。
    *
@@ -106,6 +116,11 @@ export function apply(ctx, config) {
   }
 
   return () => {
+    try {
+      unbindLocale?.()
+    } catch {
+      /* 忽略 */
+    }
     try {
       entryHandle?.dispose?.()
     } catch {
