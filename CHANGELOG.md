@@ -2,6 +2,16 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.8.2] - 2026-10-29
+
+### Fixed
+- **Desktop startup could report `web boot: 1 entry did not activate` / `dsh-nonead-universal-robots: loading`**: the locale binding read `ctx.locale` directly, which the cordis context proxy rejects for services not declared via `inject`. Locale is now resolved through `ctx.get('locale')` with a guarded fallback, and the binding is wrapped in `try/catch` so a locale problem can never take down the digital-twin entry.
+- **Removed the `dsh.client.inject` module-graph edge** to `@deepseek-ai/dsh-client-locale`. The locale service is discovered at runtime instead, so a host that does not expose that client-module row no longer leaves the entry stuck in `loading`.
+
+### Changed
+- Rebuilt `lib/client.js` from `src/client/**` (the bundle is now byte-reproducible again).
+- Added a regression test for the cordis strict-context case (`ctx.get` only, property access throws).
+
 ## [0.8.1] - 2026-10-29
 
 ### Docs — installation rewritten for an npm-published package

@@ -72,7 +72,16 @@ export function apply(ctx, config) {
    * 宿主没有 locale 服务时（独立浏览器/旧宿主）`bindHostLocale` 内部全部容错，回退
    * `navigator.languages`，再回退中文。
    */
-  const unbindLocale = bindHostLocale(ctx)
+  let unbindLocale = () => {}
+  try {
+    unbindLocale = bindHostLocale(ctx) ?? unbindLocale
+  } catch (error) {
+    // 语言绑定只是增强项：宿主 locale 服务形态不符时绝不能拖垮整个客户端 entry
+    // （否则桌面启动会报 `1 entry did not activate`）。
+    ctx.logger?.warn?.(
+      `[ur-twin] 宿主 locale 绑定失败，回退浏览器语言：${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
   /*
    * SSE 实时流（清单第 20 条）：**默认启用**。
    *

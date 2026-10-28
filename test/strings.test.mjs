@@ -240,3 +240,31 @@ test('注册失败不抛（宿主接口形态不匹配时面板必须照常工�
   }
   assert.equal(registerWithLocale(ctx), false)
 })
+
+
+test('cordis 严格上下文：locale 只能经 ctx.get 取，属性读取抛错也不能让 entry 失败（0.8.2 回归）', () => {
+  const registered = []
+  const locale = {
+    register: (ns, dict) => registered.push([ns, Object.keys(dict)]),
+    getSnapshot: () => ({ active: 'en' }),
+    subscribe: () => () => {},
+  }
+  const base = {
+    logger: { warn() {}, info() {}, error() {} },
+    get: (name) => (name === 'locale' ? locale : undefined),
+    on: () => () => {},
+    effect: () => () => {},
+  }
+  // cordis 的上下文代理：未 inject 的服务属性读取直接抛错（这正是桌面启动失败的原因）。
+  const strict = new Proxy(base, {
+    get(target, key) {
+      if (key in target) return target[key]
+      throw new Error(`cannot get property "${String(key)}" without inject`)
+    },
+  })
+  assert.equal(registerWithLocale(strict), true, '必须经 ctx.get 拿到服务并注册成功')
+  assert.deepEqual(registered[0][0], 'ur-twin')
+  assert.equal(useHostLocale(strict), 'en')
+  assert.doesNotThrow(() => bindHostLocale(strict), '语言绑定失败不得拖垮客户端 entry')
+  assert.equal(registerWithLocale(undefined), false)
+})

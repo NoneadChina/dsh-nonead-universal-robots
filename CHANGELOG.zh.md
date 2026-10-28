@@ -2,6 +2,16 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.2] - 2026-10-29
+
+### 修复
+- **桌面启动可能报 `web boot: 1 entry did not activate` / `dsh-nonead-universal-robots: loading`**：语言绑定直接读取 `ctx.locale`，而 cordis 上下文代理对未经 `inject` 声明的服务会在属性读取时抛错。现在改为经 `ctx.get('locale')` 获取并带回退，同时用 `try/catch` 包住绑定 —— 语言服务异常不再拖垮数字孪生 entry。
+- **移除 `dsh.client.inject` 指向 `@deepseek-ai/dsh-client-locale` 的模块图边**：改为运行时发现 locale 服务，宿主即使没有对应的 client-module row，也不会让 entry 停在 `loading`。
+
+### 变更
+- 由 `src/client/**` 重建 `lib/client.js`（bundle 恢复可逐字节重建）。
+- 新增 cordis 严格上下文回归测试（只允许 `ctx.get`，属性读取抛错）。
+
 ## [0.8.1] - 2026-10-29
 
 ### 文档 —— 按「已发布到 npm」的口径重写安装说明

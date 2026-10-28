@@ -839,17 +839,46 @@ export function activeLocale(env) {
 }
 
 /**
+ * 取宿主 locale 服务。
+ *
+ * ⚠️ **不能**直接用 `ctx.locale`：cordis 的上下文代理对未经 `inject` 声明的服务读取会抛
+ * `cannot get property "locale" without inject`；一旦在客户端 `apply` 里抛出，整个 entry 就会
+ * 卡在 loading/failed —— 桌面启动时表现为 `web boot: 1 entry did not activate`
+ * + `<plugin>: loading`。`ctx.get(name)` 是 cordis 的**非严格**访问器（宿主自己也用它探测
+ * 注入服务），服务不存在时只返回 `undefined`，因此优先用它；兜底再试属性读取。
+ *
+ * @param {object} ctx cordis 上下文
+ * @returns {object|undefined} locale 服务（`register`/`getSnapshot`/`subscribe`）
+ */
+function getLocaleService(ctx) {
+  if (ctx === null || typeof ctx !== 'object') return undefined
+  try {
+    if (typeof ctx.get === 'function') {
+      const service = ctx.get('locale')
+      if (service) return service
+    }
+  } catch {
+    /* 没有 get 或服务未提供：继续尝试属性读取 */
+  }
+  try {
+    return ctx.locale ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * 把 8 份字典注册进宿主 locale 服务（宿主可用时调用一次）。
  *
- * 契约见 `@deepseek-ai/dsh-client-locale` 的 README：`ctx.locale.register(ns, { zh, en, … })`
+ * 契约见 `@deepseek-ai/dsh-client-locale` 的 README：`locale.register(ns, { zh, en, … })`
  * —— `zh`/`en` 是强制基线，其余可选；切换语言由宿主推送 `locale/change`，**无需重载页面**。
  *
- * @param {object} ctx cordis 上下文（需已 `inject: ['locale']`）
+ * @param {object} ctx cordis 上下文（locale 服务经 `ctx.get('locale')` 探测，无需声明 inject）
  * @param {string} [namespace='ur-twin'] 字典命名空间
  * @returns {boolean} 是否注册成功（宿主没有 locale 服务时返回 false，调用方继续用本地表）
  */
 export function registerWithLocale(ctx, namespace = 'ur-twin') {
-  const locale = ctx?.locale
+  const locale = getLocaleService(ctx)
   if (!locale || typeof locale.register !== 'function') return false
   try {
     locale.register(namespace, LOCALES)
@@ -871,7 +900,7 @@ export function registerWithLocale(ctx, namespace = 'ur-twin') {
  * @returns {string|undefined}
  */
 export function useHostLocale(ctx) {
-  const locale = ctx?.locale
+  const locale = getLocaleService(ctx)
   if (!locale) return undefined
   try {
     const snapshot = typeof locale.getSnapshot === 'function' ? locale.getSnapshot() : undefined
@@ -1016,7 +1045,7 @@ export function bindHostLocale(ctx, namespace = 'ur-twin') {
     if (typeof locale === 'string' && locale.trim() !== '') setHostLocale(locale)
   }
   const disposers = []
-  const locale = ctx?.locale
+  const locale = getLocaleService(ctx)
   if (typeof locale?.subscribe === 'function') {
     try {
       const off = locale.subscribe((snapshot) => {
