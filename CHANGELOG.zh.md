@@ -2,6 +2,45 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.6] - 2026-10-28
+
+> **`npm publish` 在还没走到 npm 之前就报 `npm error code 9009`。** 这是 Windows 的"找不到命令"，
+> 来源是 `python scripts/check-worker-ops.py` —— 发布门禁假定了 `PATH` 上有一个裸 `python`。本机
+> `python` 是 Microsoft Store 的占位别名（根本执行不起来），`py` 又指向一个已被删除的
+> `C:\Python314` —— 于是一个干净的仓库无法发布，而报错信息里连"是解释器的问题"都没有。
+
+### 修复 —— 发布门禁不再依赖裸名 `python`
+
+- **新增 `scripts/python-bin.mjs`**：按"**真的能启动**"解析解释器（`-c "import sys; print(sys.executable)"`），
+  顺序为 `UR_PYTHON` → `PYTHON` → 项目 `.venv`/`venv` → `python3` → `python` → `py -3` →
+  `py -0p` 列出的每个已注册安装（不存在的路径跳过）→ 常见安装目录。每个候选失败都单独报告，并把
+  "**没能启动**"（`EPERM`、沙箱拒建管道）与"启动了但退出码非 0"（`9009`、`101`）分开，而不是
+  笼统地报 `exit null`。
+- **新增 `scripts/run-py.mjs`**：用解析出的解释器执行 Python 脚本（`node scripts/run-py.mjs
+  scripts/check-ops.py`）；`node scripts/run-py.mjs --which`（亦即 `npm run python:where`）打印选中的是谁。
+  它给子进程钉住 `PYTHONUTF8` / `PYTHONIOENCODING`，门禁里的中文输出不再是乱码。
+- **`check:ops`、`test:python`、`verify:models`** 全部改走 `run-py`；`scripts/run-tests.mjs` 与
+  `scripts/check-host-compat.mjs` 使用同一个解析器，且 `run-tests` 把解析到的 `sys.executable` 写进
+  `PYTHON` / `UR_PYTHON` 再跑子测试 —— 11 个需要 Python 的测试文件不再各自猜名字。
+- **`scripts/check-package-metadata.mjs`** 原来不跳过本地构建目录：被 gitignore 的 `.venv` 里
+  `numpy/__config__.py` 记录了绝对路径，于是"硬编码作者路径"门禁在一个干净仓库上失败。现在跳过
+  `.venv`、`venv`、`.pytest_cache`、`Release`、`dist`、`build`，并加了一条自检：必需条目少一个就失败。
+
+### 修复 —— 发布时可用环境变量指定宿主
+
+- **`DSH_HOST_ASAR`** 现在与既有的 `--host-asar` 参数等效。`prepublishOnly` 传不了命令行参数，而宿主
+  装在 `Program Files` 之外时（本机是 `D:\Software\Nonead DSH Desktop`，asar 形态，磁盘上没有
+  `resources\app\node_modules`）`check:host:strict` 必然失败。自动发现同时补上了 `%LOCALAPPDATA%\Programs`。
+- **peer 范围**补上当前实际安装的宿主版本族：`^0.2.2-alpha.2`（`@deepseek-ai/dsh`、
+  `@deepseek-ai/dsh-tools`）、`^4.0.6-alpha.1`（`@deepseek-ai/cordis`）、`^3.18.6-alpha.1`
+  （`@deepseek-ai/schemastery`）—— 预发布范围只匹配自身版本三元组，宿主升级后必须显式补一条。
+
+### 验证
+
+- `npm run check` → 全部通过；`npm run check:host:strict`（带 `DSH_HOST_ASAR`）→ 全部通过，
+  peer 4/4、104/104 个工具 schema 用宿主真实 DSL 注册成功。
+- `npm test` → **56/56 通过、0 失败、0 跳过**（11 个需要 Python 的用例全部真的执行了）。
+
 ## [0.7.5] - 2026-10
 
 ### 修复

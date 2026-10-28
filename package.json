@@ -1,6 +1,6 @@
 {
   "name": "dsh-nonead-universal-robots",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "一个让 DSH 用自然语言直接控制 Universal Robots（UR）机械臂的插件，由拓德科技（Nonead）基于自研的 nUR MCP Server 同源逻辑开发。",
   "type": "module",
   "main": "lib/index.js",
@@ -32,16 +32,17 @@
     "prepublishOnly": "npm run check && npm run check:host:strict && npm test",
     "check": "npm run check:static && npm run check:ops && npm run check:docs && npm run check:manifest && npm run check:host",
     "check:static": "node --check lib/index.js && node --check lib/worker.js && node scripts/check-package-metadata.mjs && node scripts/check-client-bundle.mjs",
-    "check:ops": "python scripts/check-worker-ops.py && python scripts/check-new-ops.py && python scripts/check-approval-gate.py && python scripts/check-tool-params.py && python scripts/check-rtde-recipe.py",
+    "check:ops": "node scripts/run-py.mjs scripts/check-worker-ops.py && node scripts/run-py.mjs scripts/check-new-ops.py && node scripts/run-py.mjs scripts/check-approval-gate.py && node scripts/run-py.mjs scripts/check-tool-params.py && node scripts/run-py.mjs scripts/check-rtde-recipe.py",
     "check:docs": "node scripts/check-doc-tools.mjs",
     "check:manifest": "node scripts/check-test-manifest.mjs",
     "check:host": "node scripts/check-host-compat.mjs --allow-missing-host",
     "check:host:strict": "node scripts/check-host-compat.mjs --strict",
     "test": "node scripts/run-tests.mjs",
     "test:node": "node scripts/run-tests.mjs --skip-python",
-    "test:python": "python python/ur_worker.py --selfcheck",
+    "test:python": "node scripts/run-py.mjs python/ur_worker.py --selfcheck",
+    "python:where": "node scripts/run-py.mjs --which",
     "build:client": "node scripts/build-client.mjs",
-    "verify:models": "python scripts/verify-models.py",
+    "verify:models": "node scripts/run-py.mjs scripts/verify-models.py",
     "analyze:models": "node scripts/analyze-models.mjs",
     "compress:models": "node scripts/compress-models.mjs --write",
     "compress:models:textures": "node scripts/compress-models.mjs --write --texture-size 1024",
@@ -89,10 +90,10 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2 || ^4.0.5-alpha.2",
-    "@deepseek-ai/dsh": "^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.2 || ^0.2.1-alpha.5",
-    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.2 || ^0.2.1-alpha.5",
-    "@deepseek-ai/schemastery": "^3.18.2 || ^3.18.5-alpha.2"
+    "@deepseek-ai/cordis": "^4.0.2 || ^4.0.5-alpha.2 || ^4.0.6-alpha.1",
+    "@deepseek-ai/dsh": "^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.2 || ^0.2.1-alpha.5 || ^0.2.2-alpha.2",
+    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1 || ^0.1.7-rc.2 || ^0.2.0-rc.2 || ^0.2.1-alpha.5 || ^0.2.2-alpha.2",
+    "@deepseek-ai/schemastery": "^3.18.2 || ^3.18.5-alpha.2 || ^3.18.6-alpha.1"
   },
   "engines": {
     "node": ">=20"

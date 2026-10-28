@@ -2,6 +2,52 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.7.6] - 2026-10-28
+
+> **`npm publish` failed with `npm error code 9009` before it even reached npm.** That code is
+> Windows' "command not found", and it came from `python scripts/check-worker-ops.py`: the release
+> gate assumed a bare `python` on `PATH`. On this machine `python` is the Microsoft Store alias
+> (which cannot execute at all) and `py` pointed at a `C:\Python314` that no longer exists — so a
+> clean repository could not publish, and the message said nothing about the interpreter.
+
+### Fixed — release gates no longer depend on the bare name `python`
+
+- **New `scripts/python-bin.mjs`**: resolves an interpreter by *proving it starts*
+  (`-c "import sys; print(sys.executable)"`), in this order — `UR_PYTHON`, `PYTHON`, the project
+  `.venv`/`venv`, `python3`, `python`, `py -3`, every install listed by `py -0p` (skipping paths that
+  no longer exist), then the usual install directories. Failures are reported per candidate, and
+  "could not start" (`EPERM`, sandbox pipe denial) is separated from "started but exited non-zero"
+  (`9009`, `101`) instead of collapsing to `exit null`.
+- **New `scripts/run-py.mjs`**: runs a Python script through the resolved interpreter (`node
+  scripts/run-py.mjs scripts/check-ops.py`), and `node scripts/run-py.mjs --which` (also `npm run
+  python:where`) prints what was chosen. It pins `PYTHONUTF8` / `PYTHONIOENCODING` for the child, so
+  the gates' Chinese output is no longer mojibake.
+- **`check:ops`, `test:python` and `verify:models`** now go through `run-py`; `scripts/run-tests.mjs`
+  and `scripts/check-host-compat.mjs` use the same resolver, and `run-tests` exports the resolved
+  `sys.executable` to `PYTHON` / `UR_PYTHON` so the 11 Python-dependent test files stop guessing the
+  name themselves.
+- **`scripts/check-package-metadata.mjs`** skipped no local build directories: `.venv` (gitignored)
+  ships `numpy/__config__.py`, which records absolute paths, so the "hardcoded author path" gate
+  failed on a clean tree. `.venv`, `venv`, `.pytest_cache`, `Release`, `dist` and `build` are skipped,
+  and a self-check now fails if any of the essential entries is removed from the list.
+
+### Fixed — the host can be named by environment variable during publishing
+
+- **`DSH_HOST_ASAR`** now works like the existing `--host-asar` flag. `prepublishOnly` cannot pass
+  command-line arguments, and `check:host:strict` failed on machines where DSH Desktop is installed
+  outside `Program Files` (here: `D:\Software\Nonead DSH Desktop`, asar layout, no
+  `resources\app\node_modules` on disk). Auto-discovery also covers `%LOCALAPPDATA%\Programs`.
+- **Peer ranges** gained the host families that are actually installed today:
+  `^0.2.2-alpha.2` (`@deepseek-ai/dsh`, `@deepseek-ai/dsh-tools`), `^4.0.6-alpha.1`
+  (`@deepseek-ai/cordis`), `^3.18.6-alpha.1` (`@deepseek-ai/schemastery`). Pre-release ranges only
+  match their own version triplet, so a host upgrade requires an explicit entry.
+
+### Verified
+
+- `npm run check` → 全部通过; `npm run check:host:strict` (with `DSH_HOST_ASAR`) → 全部通过,
+  peers 4/4, 104/104 tool schemas registered against the real host DSL.
+- `npm test` → **56/56 passed, 0 failed, 0 skipped** (all 11 Python-dependent cases really executed).
+
 ## [0.7.5] - 2026-10
 
 ### Fixed

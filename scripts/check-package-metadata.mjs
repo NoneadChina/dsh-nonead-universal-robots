@@ -61,6 +61,11 @@ const SKIP_DIRS = new Set([
   // Not shipped, not tracked: the PDFs and their extracted text, the generated meshes,
   // and the gitignored `.superpowers/` design scratch all legitimately mention local paths.
   'ScriptManual', 'assets', 'docs', '.superpowers', '.pnpm-store', '.dsh-project-memory',
+  // Local-only directories that are gitignored but **do** sit inside the working tree:
+  // a project virtualenv ships third-party packages whose config files record absolute
+  // paths (numpy's `__config__.py` is the one that caught this), and build output is
+  // machine-specific. Scanning them made the release gate fail on a perfectly clean repo.
+  '.venv', 'venv', '.pytest_cache', 'Release', 'dist', 'build',
 ]);
 const walk = (dir) => {
   for (const entry of readdirSync(dir)) {
@@ -83,5 +88,14 @@ const ALLOWED = new Set(['python/sitecustomize.py', 'CHANGELOG.md', 'CHANGELOG.z
 const real = offenders.filter((f) => !ALLOWED.has(f));
 if (real.length === 0) ok(`没有源文件硬编码作者机器的绝对路径（允许的例外：${[...ALLOWED].join(', ')}）`);
 else bad(`以下文件硬编码了绝对路径：${real.join(', ')}`);
+
+// 自检：这些「本机性目录」必须始终留在跳过名单里。少一个，发布门槛就会因为**本地** venv /
+// 构建产物而误报（真实案例：`.venv/Lib/site-packages/numpy/__config__.py` 记录了绝对路径，
+// 于是一个干净的仓库被判成"硬编码了作者机器路径"）。名单被谁删掉，这里就会立刻失败。
+const REQUIRED_SKIPS = ['.git', 'node_modules', '.venv', 'venv', '__pycache__'];
+const missingSkips = REQUIRED_SKIPS.filter((name) => !SKIP_DIRS.has(name));
+if (missingSkips.length > 0) {
+  bad(`SKIP_DIRS 缺少本机性目录：${missingSkips.join(', ')}（否则本地 venv / 构建产物会让本门禁误报）`);
+}
 
 process.exit(failed ? 1 : 0);

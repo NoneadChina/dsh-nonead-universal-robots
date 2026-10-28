@@ -69,13 +69,20 @@ const note = (text) => console.log(`note  ${text}`)
 const ARGV = process.argv.slice(2)
 const HOST_ASAR_INDEX = ARGV.indexOf('--host-asar')
 const HOST_ASAR = (() => {
-  if (HOST_ASAR_INDEX < 0) return undefined
-  const value = ARGV[HOST_ASAR_INDEX + 1]
-  if (value === undefined || value.startsWith('--')) {
-    console.error('--host-asar 需要一个 asar 路径：node scripts/check-host-compat.mjs --host-asar <resources/app.asar>')
-    process.exit(2)
+  if (HOST_ASAR_INDEX >= 0) {
+    const value = ARGV[HOST_ASAR_INDEX + 1]
+    if (value === undefined || value.startsWith('--')) {
+      console.error('--host-asar 需要一个 asar 路径：node scripts/check-host-compat.mjs --host-asar <resources/app.asar>')
+      process.exit(2)
+    }
+    return value
   }
-  return value
+  // `DSH_HOST_ASAR`：**发布门禁必须支持这条**，因为 `npm publish` 的 `prepublishOnly` 是固定命令，
+  // 传不了命令行参数；而宿主若装在 `Program Files` 之外（例如 `D:\Software\…`，本机就是这样），
+  // 自动发现也找不到它。显式环境变量是唯一"既不硬编码机器路径、又能让 publish 通过"的口子。
+  const fromEnv = process.env.DSH_HOST_ASAR
+  if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv.trim()
+  return undefined
 })()
 const STRICT = ARGV.includes('--strict')
 const ALLOW_MISSING_HOST = ARGV.includes('--allow-missing-host')
@@ -239,7 +246,14 @@ function createAsarHost(asarPath) {
  */
 function desktopCandidates() {
   const found = []
-  for (const base of ['C:\\Program Files', 'C:\\Program Files (x86)']) {
+  // `%LOCALAPPDATA%\Programs` 是 Electron 应用**按用户安装**时的标准位置；只扫 `Program Files`
+  // 会把这类安装漏掉（于是门禁"找不到宿主"）。两个都扫，仍然不写死任何厂商目录名。
+  const roots = [
+    'C:\\Program Files',
+    'C:\\Program Files (x86)',
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs') : undefined,
+  ].filter((root) => typeof root === 'string' && root !== '')
+  for (const base of roots) {
     let entries = []
     try {
       entries = readdirSync(base, { withFileTypes: true })
@@ -502,9 +516,16 @@ if (declaration === undefined) {
 }
 
 // ── 运行时前置（不是宿主兼容问题，但决定工具能否真的动起来）────────────────
-const python = spawnSync('python', ['--version'], { stdio: 'ignore' })
-if (python.status === 0) note('系统 python 可用：worker 可以启动（首次调用工具时才会 spawn）')
-else note('未检测到可用的系统 python：工具会注册成功，但调用时会失败；需安装 Python 与 requirements.txt 的依赖（宿主不自带解释器）')
+// 用和 `run-tests` / `run-py` 相同的解析器：裸名字 `python` 在 Windows 上可能是 Microsoft Store
+// 的占位别名（执行报 exit 9009），按名字判断会误报"没有 Python"，而项目 `.venv` 里明明有。
+const { resolvePython } = await import('./python-bin.mjs')
+const resolvedPython = resolvePython()
+if (resolvedPython.ok) {
+  note(`Python 可用（${resolvedPython.label} → ${resolvedPython.executable ?? resolvedPython.command}）：worker 可以启动（首次调用工具时才会 spawn）`)
+} else {
+  note('找不到可用的 Python 解释器：工具会注册成功，但调用时会失败。建项目虚拟环境并装依赖：'
+    + 'python -m venv .venv 然后 .venv\\Scripts\\python.exe -m pip install -r requirements.txt（见 README）')
+}
 
 console.log('')
 if (failures.length === 0) {

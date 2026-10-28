@@ -58,11 +58,31 @@ const PYTHON_DEPENDENT = new Set(manifest.pythonDependent);
  * 旧探针只有一级（numpy），于是 4 条根本不需要 numpy 的门禁被一并跳过；`needsDeps` 字段虽然
  * 写着却从没被读过。paramiko 单独探测：只有 `ur_list_programs` 的 SSH 用例需要它。
  */
-function probePython() {
-  // `UR_PYTHON` 在前：README 与 test/selftest.test.mjs 一直是这样约定的
-  // （`UR_PYTHON || PYTHON || 'python'`）。`cwd` 锚定仓库根：解释器垫片/相对路径不该依赖调用者站哪。
-  const bin = process.env.UR_PYTHON ?? process.env.PYTHON ?? 'python';
-  const run = (code) => spawnSync(bin, ['-c', code], { encoding: 'utf8', cwd: root });
+async function probePython() {
+  // 解释器**按"真的能启动"解析**（见 scripts/python-bin.mjs）：`UR_PYTHON` 仍最优先，
+  // 其次是项目内 `.venv`、PATH 上的 `python3` / `python`、`py` 启动器与已注册安装。
+  // 为什么不能按名字判断：Windows 上 `python` 常是 Microsoft Store 的占位别名，执行报
+  // exit 9009（cmd 找不到可执行体），`py` 也可能指向一个已删除的版本。
+  const { resolvePython } = await import('./python-bin.mjs');
+  const resolved = resolvePython();
+  const bin = resolved.ok ? resolved.command : (process.env.UR_PYTHON ?? process.env.PYTHON ?? 'python');
+  /*
+   * 把解析结果**交给子测试进程**：11 个测试文件自己 `spawn(process.env.PYTHON || 'python')`，
+   * 它们不该各自再猜一遍名字。用 `resolved.executable`（解释器自己报的 `sys.executable`）而不是
+   * `command`，因为后者可能是带前缀参数的启动器（`py -3`），而环境变量表达不了参数。
+   */
+  if (resolved.ok && resolved.executable) {
+    process.env.PYTHON = resolved.executable;
+    process.env.UR_PYTHON = resolved.executable;
+  }
+  const run = (code) => spawnSync(
+    bin,
+    [...(resolved.ok ? resolved.prefixArgs : []), '-c', code],
+    { encoding: 'utf8', cwd: root },
+  );
+  if (!resolved.ok) {
+    console.log(`note  Python 解释器解析失败 —— 解析器的完整诊断：\n${resolved.reason}\n`);
+  }
   if (run('import sys').status !== 0) {
     console.log(
       `note  找不到可用的 Python 解释器（${bin}）：**所有** Python 门禁与用例都会被跳过。\n` +
@@ -98,7 +118,7 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const python = probePython();
+const python = await probePython();
 const results = [];
 
 for (const file of files) {

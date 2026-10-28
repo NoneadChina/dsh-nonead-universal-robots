@@ -42,3 +42,6 @@ python/sitecustomize.py
 ScriptManual/*.pdf
 ScriptManual/_fonts/
 
+# 项目内虚拟环境（python -m venv .venv 的产物；不属于仓库内容）
+.venv/
+venv/
