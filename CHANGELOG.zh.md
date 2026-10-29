@@ -2,6 +2,17 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.3] - 2026-10-29
+
+### 修复 —— HUD 数据详情行仍有四个硬编码中文前缀
+
+- `formatDetail()` 里 `安全 / 模式 / 程序 / 速度` 四个前缀写成了模板字符串，**没有走文案表** ——
+  而 `src/client/strings.js` 里 `detailSafety` / `detailRobotMode` / `detailProgram` /
+  `detailSpeed` 四个键早已存在，紧邻的 `S.detailRunning` 也已是本地化的，属 0.8.0 i18n 的漏改。
+- 现在这四项统一走 `S.*`：中文界面输出**逐字不变**（测试仍通过），德/俄/日/西/法/葡用户不再
+  在实时读数行里看到中文前缀。
+- 由 `src/client/**` 重建 `lib/client.js`。
+
 ## [0.8.2] - 2026-10-29
 
 ### 修复

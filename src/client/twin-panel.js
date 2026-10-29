@@ -411,11 +411,14 @@ export function formatDetail(detail) {
     // detail 通道自己报错（host 把 dashboard 失败包成 `{error}`）：如实说，不冒充"没有异常"。
     return { status: d?.error ? S.detailStatusFailed(d.error) : '', temps: '', power: '', hazard: false }
   }
+  // ⚠️ 四个前缀**必须**走文案表：表里早有 detailSafety / detailRobotMode / detailProgram /
+  // detailSpeed，而这里曾写成硬编码 `安全 ${…}` 模板 —— 德/俄/日用户的数据详情行会夹着四个
+  // 中文前缀（紧邻的 `S.detailRunning` 却是本地化的，属典型漏改）。
   const bits = [
-    `安全 ${describeSafetyMode(d.safety_mode)}`,
-    `模式 ${describeRobotMode(d.robot_mode)}`,
-    `程序 ${describeProgramState(d.program_state)}`,
-    `速度 ${formatSpeedScaling(d.speed_scaling)}`,
+    S.detailSafety(describeSafetyMode(d.safety_mode)),
+    S.detailRobotMode(describeRobotMode(d.robot_mode)),
+    S.detailProgram(describeProgramState(d.program_state)),
+    S.detailSpeed(formatSpeedScaling(d.speed_scaling)),
   ]
   if (d.running === true) bits.push(S.detailRunning)
   return {

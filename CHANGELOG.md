@@ -2,6 +2,19 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.8.3] - 2026-10-29
+
+### Fixed — four hardcoded Chinese prefixes remained in the HUD detail line
+
+- `formatDetail()` built the `安全 / 模式 / 程序 / 速度` prefixes as template literals instead of
+  going through the string table, even though `detailSafety` / `detailRobotMode` / `detailProgram` /
+  `detailSpeed` already existed in `src/client/strings.js` and the adjacent `S.detailRunning` was
+  already localised — an oversight from the 0.8.0 i18n work.
+- All four now go through `S.*`: the Chinese output is **byte-for-byte unchanged** (the existing
+  tests still pass), while German/Russian/Japanese/Spanish/French/Portuguese users no longer see
+  Chinese prefixes inside the live-readout line.
+- `lib/client.js` rebuilt from `src/client/**`.
+
 ## [0.8.2] - 2026-10-29
 
 ### Fixed
