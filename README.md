@@ -242,6 +242,8 @@ It checks the peer ranges against the installed versions, compiles **every** too
 
 `--host-asar` reads the Electron `app.asar` directly (DSH Desktop's normal install shape, where `node_modules` is packed inside the archive): the needed packages are extracted lazily to a temp directory and the real host DSL still runs. `prepublishOnly` is `npm run check && npm run check:host:strict && npm test`, so a release can no longer be made without a real host check or without the test suite.
 
+When `--host-asar` is omitted, the script auto-discovers a DSH Desktop install (`Program Files`, `%LOCALAPPDATA%\Programs`, and `<drive>:\Software\<vendor>` are scanned; candidates whose directory name contains `dsh` win, so an unrelated Electron app that happens to bundle `@deepseek-ai/dsh-tools` is not picked first). Set `DSH_HOST_ASAR=<...>/resources/app.asar` to pin an archive explicitly.
+
 CI (`.github/workflows/ci.yml`) runs the same two commands on Node 22.15/24 × Python 3.9/3.12 with a full checkout (the 14 GLB assets are regular git objects and are really read by the model tests).
 
 > The first `ur_connect` to a robot has an ~20 s RTDE readiness wait; on timeout it returns a clear error rather than hanging.

@@ -268,6 +268,64 @@ function desktopCandidates() {
   return found
 }
 
+/**
+ * 从常见安装位置推导 DSH Desktop 的 **app.asar**（Electron 打包形态，磁盘上没有 `node_modules`）。
+ *
+ * 背景：DSH Desktop 默认把宿主依赖打进 `resources/app.asar`。只扫 `resources/app/node_modules`
+ * 会让 `--strict` 在这类安装上永远报"找不到宿主"（发布门禁直接卡死）。这里按以下顺序收集候选：
+ *   1. 环境变量 `DSH_HOST_ASAR` / `DSH_DESKTOP_ASAR` / `DSH_ASAR`（显式优先，发布机可固定）；
+ *   2. `%Program Files%`、`%Program Files (x86)%`、`%LOCALAPPDATA%\Programs` 下的
+ *      `<厂商目录>\resources\app.asar`；
+ *   3. 非系统盘常见目录 `<X>:\Software\<厂商目录>\resources\app.asar`（本机即 `D:\Software\Nonead DSH Desktop`）。
+ *
+ * 只返回**真实存在**的文件；是否真的是 DSH 宿主由 `createAsarHost()` 的完整性校验决定
+ * （缺 `@deepseek-ai/dsh-tools` 等包会抛错，调用方跳过该候选）。
+ */
+function desktopAsarCandidates() {
+  const explicit = []
+  const discovered = []
+  const push = (list, candidate) => {
+    if (typeof candidate === 'string' && candidate !== '' && !list.includes(candidate)) list.push(candidate)
+  }
+  for (const key of ['DSH_HOST_ASAR', 'DSH_DESKTOP_ASAR', 'DSH_ASAR']) push(explicit, process.env[key])
+
+  const roots = [
+    'C:\\Program Files',
+    'C:\\Program Files (x86)',
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs') : undefined,
+    // 安装到非系统盘的自定义目录（例如 D:\Software\<厂商>\...）。
+    'C:\\Software',
+    'D:\\Software',
+    'E:\\Software',
+    'F:\\Software',
+  ].filter((root) => typeof root === 'string' && root !== '')
+
+  for (const base of roots) {
+    let entries = []
+    try {
+      entries = readdirSync(base, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      push(discovered, join(base, entry.name, 'resources', 'app.asar'))
+    }
+  }
+
+  /*
+   * ⚠️ 机器上可能装着别的 Electron 应用，其 asar 里也带 `@deepseek-ai/dsh-tools`（例如把 DSH
+   * 内核集成进去的客户端）。按目录名字母序取第一个会选错宿主，得到旧版本 peer 与误导性结论。
+   * 因此：显式环境变量最优先；其余候选**先按目录名是否含 `dsh` 排序**（DSH Desktop 一定命中），
+   * 同组内保持发现顺序。
+   */
+  const explicitFound = explicit.filter((candidate) => existsSync(candidate))
+  const rest = discovered
+    .filter((candidate) => existsSync(candidate) && !explicitFound.includes(candidate))
+    .sort((a, b) => Number(!/dsh/i.test(a)) - Number(!/dsh/i.test(b)))
+  return [...explicitFound, ...rest]
+}
+
 /** 定位宿主 node_modules（含 @deepseek-ai/dsh-tools 的那个）。 */
 function findHostModules(explicit) {
   const candidates = [
@@ -318,14 +376,32 @@ function hostEntry(hostModules, specifier) {
   return typeof relative === 'string' ? pathToFileURL(join(packageDir, relative)).href : undefined
 }
 
+/**
+ * 选择宿主：显式 `--host-asar` 优先；否则自动探测 DSH Desktop 的 asar 安装；
+ * 都没有才退回磁盘上的 `node_modules` 形态（`findHostModules`）。
+ *
+ * 自动探测的意义：发布门禁 `check:host:strict` 在"已安装 DSH Desktop 的普通发布机"上必须能跑，
+ * 而不是要求发布者手工传一个随机器而变的 asar 路径。
+ */
 const asarHost = (() => {
-  if (HOST_ASAR === undefined) return undefined
-  try {
-    return createAsarHost(HOST_ASAR)
-  } catch (cause) {
-    console.error(`--host-asar 失败：${cause instanceof Error ? cause.message : String(cause)}`)
-    process.exit(2)
+  if (HOST_ASAR !== undefined) {
+    try {
+      return createAsarHost(HOST_ASAR)
+    } catch (cause) {
+      console.error(`--host-asar 失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      process.exit(2)
+    }
   }
+  for (const candidate of desktopAsarCandidates()) {
+    try {
+      const host = createAsarHost(candidate)
+      console.log(`note  自动探测到宿主 asar：${candidate}`)
+      return host
+    } catch {
+      // 不是 DSH 宿主（或 asar 不完整）：继续试下一个候选。
+    }
+  }
+  return undefined
 })()
 
 const hostModules = asarHost !== undefined ? asarHost.modulesDir : findHostModules(EXPLICIT_HOST)
@@ -333,7 +409,8 @@ if (hostModules === undefined) {
   const message =
     '找不到宿主 node_modules（需要含 @deepseek-ai/dsh-tools 的那一份）；' +
     '请显式传路径：node scripts/check-host-compat.mjs <host node_modules>，' +
-    '或用 --host-asar <resources/app.asar> 读取 DSH Desktop 的 asar 安装'
+    '或用 --host-asar <resources/app.asar> 读取 DSH Desktop 的 asar 安装，' +
+    '或设置环境变量 DSH_HOST_ASAR=<...\\resources\\app.asar>（会自动探测常见安装位置）'
   // 优先级：`--strict`（发布门禁，缺宿主即失败）> `--allow-missing-host`（本地 check，响亮 SKIP）
   // > 默认（exit 2，环境错误必须与"检查通过"区分开）。
   if (!STRICT && ALLOW_MISSING_HOST) {
@@ -341,7 +418,7 @@ if (hostModules === undefined) {
     process.exit(0)
   }
   console.error(message)
-  if (STRICT) console.error('--strict：发布门禁不允许缺宿主 —— 先安装 DSH Desktop（或用 --host-asar 指定 app.asar）。')
+  if (STRICT) console.error('--strict：发布门禁不允许缺宿主 —— 先安装 DSH Desktop（或用 --host-asar / DSH_HOST_ASAR 指定 app.asar）。')
   process.exit(2)
 }
 console.log(`plugin  ${PLUGIN_ROOT}`)

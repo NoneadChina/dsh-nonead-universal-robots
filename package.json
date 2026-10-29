@@ -46,7 +46,7 @@
     "analyze:models": "node scripts/analyze-models.mjs",
     "compress:models": "node scripts/compress-models.mjs --write",
     "compress:models:textures": "node scripts/compress-models.mjs --write --texture-size 1024",
-    "verify:host": "node scripts/check-host-compat.mjs"
+    "verify:host": "node scripts/check-host-compat.mjs --strict"
   },
   "dsh": {
     "bundle": {

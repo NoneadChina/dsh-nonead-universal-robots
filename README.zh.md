@@ -239,6 +239,8 @@ npm run check:host:strict                          # prepublishOnly 用的严格
 
 `--host-asar` 直接读 Electron 的 `app.asar`（DSH Desktop 的标准安装形态：`node_modules` 打包在 asar 内、磁盘上没有目录）：按需把用到的包懒解包到临时目录，宿主的真实 DSL 仍然会执行。`prepublishOnly` 现在是 `npm run check && npm run check:host:strict && npm test`，因此**发布不可能再绕过真实宿主检查与测试套件**。
 
+省略 `--host-asar` 时，脚本会自动探测 DSH Desktop 安装（扫描 `Program Files`、`%LOCALAPPDATA%\Programs` 与 `<盘符>:\Software\<厂商>`；目录名含 `dsh` 的候选优先，避免把恰好也打包了 `@deepseek-ai/dsh-tools` 的其他 Electron 应用当成宿主）。需要固定某个归档时设置 `DSH_HOST_ASAR=<...>/resources/app.asar`。
+
 CI（`.github/workflows/ci.yml`）在 Node 22.15/24 × Python 3.9/3.12 上跑同样的两条命令，并做完整检出（14 个 GLB 是普通 git 对象，模型测试真的会读它们）。
 
 > 首次连接到某机器人时，`ur_connect` 有约 20 s 的 RTDE 就绪等待，超时会返回清晰错误而非卡死。
