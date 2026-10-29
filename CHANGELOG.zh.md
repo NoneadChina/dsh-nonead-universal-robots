@@ -2,6 +2,20 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.4] - 2026-10-29
+
+### 修复 —— 孪生「数据停更 / 通道重连」整行文案本地化（审核 P1）
+
+- 新增 5 个词条键，8 份字典（zh/en/ja/es/fr/de/ru/pt）各补齐：`feedStale`、`feedRetrying`、
+  `feedRetryWord`、`feedNoEventSource`、`feedFrames(frames, errors)`。
+- `describeFeedHealth()` 整行走 `S.*`：这行提示是**外文用户最需要看懂的一行**（"数据停了/正在
+  自己重连"），此前三处是硬编码中文模板。
+- HUD 的 `data-ur-twin-feed-state` 分类改为与本地化前缀比较（`S.feedRetrying`），否则换语言后
+  "retrying/stale" 判定会失效。
+- 导出的 `FEED_STALE_PREFIX` / `FEED_RETRYING_TEXT` 常量保留（大量既有断言以它们为准，默认语言
+  为中文时输出逐字不变）。
+- 由 `src/client/**` 重建 `lib/client.js`。
+
 ## [0.8.3] - 2026-10-29
 
 ### 修复 —— HUD 数据详情行仍有四个硬编码中文前缀

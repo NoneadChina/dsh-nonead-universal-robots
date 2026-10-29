@@ -2,6 +2,22 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.8.4] - 2026-10-29
+
+### Fixed — the twin's "data stalled / reconnecting" line is now localised (audit P1)
+
+- Five new string keys, added to all eight dictionaries (zh/en/ja/es/fr/de/ru/pt): `feedStale`,
+  `feedRetrying`, `feedRetryWord`, `feedNoEventSource`, `feedFrames(frames, errors)`.
+- `describeFeedHealth()` now goes entirely through `S.*`. This is **the line a non-Chinese user most
+  needs to read** ("the feed stopped" / "it is reconnecting by itself"); three of its parts were
+  hardcoded Chinese templates before.
+- The HUD's `data-ur-twin-feed-state` classification now compares against the localised prefix
+  (`S.feedRetrying`) — otherwise the retrying/stale decision would break as soon as the language
+  changes.
+- The exported `FEED_STALE_PREFIX` / `FEED_RETRYING_TEXT` constants stay (many existing assertions
+  use them; with the default Chinese locale the output is byte-for-byte unchanged).
+- `lib/client.js` rebuilt from `src/client/**`.
+
 ## [0.8.3] - 2026-10-29
 
 ### Fixed — four hardcoded Chinese prefixes remained in the HUD detail line

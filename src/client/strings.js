@@ -60,6 +60,13 @@ export const zh = {
 
   overLimit: (joints) => `⚠ 超限 ${joints}`,
 
+  /* ---- 数据通道健康（孪生「停更/重连」，出现在 HUD 顶部那一行） ---- */
+  feedStale: '数据已停止更新',
+  feedRetrying: '数据通道重连中…',
+  feedRetryWord: '正在重试',
+  feedNoEventSource: '当前环境没有 EventSource',
+  feedFrames: (frames, errors) => `（已收 ${frames} 帧${errors > 0 ? `，失败 ${errors} 帧` : ''}）`,
+
   safetyMode: {
     NORMAL: '正常',
     REDUCED: '缩减模式',
@@ -150,6 +157,12 @@ export const en = {
   detailBus: (voltage, current) => `Bus ${voltage} V  ${current} A`,
 
   overLimit: (joints) => `⚠ over limit ${joints}`,
+
+  feedStale: 'Data has stopped updating',
+  feedRetrying: 'Reconnecting the data channel…',
+  feedRetryWord: 'retrying',
+  feedNoEventSource: 'EventSource is unavailable here',
+  feedFrames: (frames, errors) => ` (${frames} frames${errors > 0 ? `, ${errors} failed` : ''})`,
 
   safetyMode: {
     NORMAL: 'Normal',
@@ -242,6 +255,12 @@ export const ja = {
 
   overLimit: (joints) => `⚠ 上限超過 ${joints}`,
 
+  feedStale: 'データの更新が停止しました',
+  feedRetrying: 'データチャネルを再接続中…',
+  feedRetryWord: '再試行中',
+  feedNoEventSource: 'この環境には EventSource がありません',
+  feedFrames: (frames, errors) => `（受信 ${frames} フレーム${errors > 0 ? `、失敗 ${errors} フレーム` : ''}）`,
+
   safetyMode: {
     NORMAL: '正常',
     REDUCED: '縮小モード',
@@ -332,6 +351,12 @@ export const es = {
   detailBus: (voltage, current) => `Bus ${voltage} V  ${current} A`,
 
   overLimit: (joints) => `⚠ fuera de límite ${joints}`,
+
+  feedStale: 'Los datos dejaron de actualizarse',
+  feedRetrying: 'Reconectando el canal de datos…',
+  feedRetryWord: 'reintentando',
+  feedNoEventSource: 'EventSource no está disponible aquí',
+  feedFrames: (frames, errors) => ` (${frames} tramas${errors > 0 ? `, ${errors} con error` : ''})`,
 
   safetyMode: {
     NORMAL: 'Normal',
@@ -424,6 +449,12 @@ export const fr = {
 
   overLimit: (joints) => `⚠ hors limite ${joints}`,
 
+  feedStale: 'Les données ne se mettent plus à jour',
+  feedRetrying: 'Reconnexion du canal de données…',
+  feedRetryWord: 'nouvelle tentative',
+  feedNoEventSource: "EventSource n'est pas disponible ici",
+  feedFrames: (frames, errors) => ` (${frames} trames${errors > 0 ? `, ${errors} en échec` : ''})`,
+
   safetyMode: {
     NORMAL: 'Normal',
     REDUCED: 'Réduit',
@@ -514,6 +545,12 @@ export const de = {
   detailBus: (voltage, current) => `Bus ${voltage} V  ${current} A`,
 
   overLimit: (joints) => `⚠ über Grenzwert ${joints}`,
+
+  feedStale: 'Die Daten werden nicht mehr aktualisiert',
+  feedRetrying: 'Datenkanal wird neu verbunden…',
+  feedRetryWord: 'erneuter Versuch',
+  feedNoEventSource: 'EventSource ist hier nicht verfügbar',
+  feedFrames: (frames, errors) => ` (${frames} Frames${errors > 0 ? `, ${errors} fehlgeschlagen` : ''})`,
 
   safetyMode: {
     NORMAL: 'Normal',
@@ -606,6 +643,12 @@ export const ru = {
 
   overLimit: (joints) => `⚠ за пределом ${joints}`,
 
+  feedStale: 'Данные перестали обновляться',
+  feedRetrying: 'Переподключение канала данных…',
+  feedRetryWord: 'повторная попытка',
+  feedNoEventSource: 'EventSource здесь недоступен',
+  feedFrames: (frames, errors) => ` (кадров: ${frames}${errors > 0 ? `, ошибок: ${errors}` : ''})`,
+
   safetyMode: {
     NORMAL: 'Норма',
     REDUCED: 'Ограниченный режим',
@@ -696,6 +739,12 @@ export const pt = {
   detailBus: (voltage, current) => `Barramento ${voltage} V  ${current} A`,
 
   overLimit: (joints) => `⚠ acima do limite ${joints}`,
+
+  feedStale: 'Os dados pararam de ser atualizados',
+  feedRetrying: 'Reconectando o canal de dados…',
+  feedRetryWord: 'tentando novamente',
+  feedNoEventSource: 'EventSource não está disponível aqui',
+  feedFrames: (frames, errors) => ` (${frames} quadros${errors > 0 ? `, ${errors} com erro` : ''})`,
 
   safetyMode: {
     NORMAL: 'Normal',

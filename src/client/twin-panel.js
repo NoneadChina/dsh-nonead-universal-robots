@@ -329,15 +329,17 @@ export function describeFeedHealth(input = {}) {
   const status = typeof input.status === 'string' ? input.status : ''
   const frames = Number.isFinite(input.frames) ? input.frames : 0
   const errors = Number.isFinite(input.frameErrors) ? input.frameErrors : 0
-  const diag = `（已收 ${frames} 帧${errors > 0 ? `，失败 ${errors} 帧` : ''}）`
-  if (status === 'unsupported') return `当前环境没有 EventSource：${FEED_STALE_PREFIX}${diag}`
+  // ⚠️ 整行都走文案表：这是「数据停更 / 通道重连」提示，恰是外文用户最需要看懂的一行。
+  // 分隔符（`：` / ` · `）沿用中文写法，宁可标点不够地道，也不要让句子夹着中文动词。
+  const diag = S.feedFrames(frames, errors)
+  if (status === 'unsupported') return `${S.feedNoEventSource}：${S.feedStale}${diag}`
   // "正在重连"优先展示：这时用户最需要知道的是"它在自己恢复"，而不是"画面为什么不动"。
-  if (status === 'retrying' || status === 'connecting') return `${FEED_RETRYING_TEXT}${diag}`
+  if (status === 'retrying' || status === 'connecting') return `${S.feedRetrying}${diag}`
   const ageMs = Number.isFinite(input.ageMs) ? Math.max(0, input.ageMs) : 0
   if (input.feedStale === true || ageMs > FEED_STALE_MS) {
     // 未连接时"数据停滞"已经是状态行的语义（未连接机器人），这里不重复刷屏。
     if (input.connected !== true) return ''
-    return `${FEED_STALE_PREFIX} ${(ageMs / 1000).toFixed(1)}s · 正在重试${diag}`
+    return `${S.feedStale} ${(ageMs / 1000).toFixed(1)}s · ${S.feedRetryWord}${diag}`
   }
   return ''
 }
@@ -1048,7 +1050,7 @@ export function mountTwinPanel({
       hudFeed.style.display = text === '' ? 'none' : ''
       hudFeed.setAttribute(
         'data-ur-twin-feed-state',
-        text === '' ? 'ok' : (text.startsWith(FEED_RETRYING_TEXT) ? 'retrying' : 'stale'),
+        text === '' ? 'ok' : (text.startsWith(S.feedRetrying) ? 'retrying' : 'stale'),
       )
     }
     // 停滞过久 ⇒ 强制重建。浏览器对后台窗口的定时器节流会让"退避重连"迟迟不触发，
