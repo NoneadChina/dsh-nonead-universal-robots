@@ -133,6 +133,56 @@ test('★ write 模式：目标文件自己是指向外面的链接也要挡住'
   assert.match(out.reason, /programDir 之外/);
 });
 
+/*
+ * P2（2026-10-29 审核）：上面那条用例在 Windows 非特权用户下**必然跳过**（文件级软链要特权），
+ * 而"目标文件是指向外面的链接"正是历史漏洞所在 —— 于是它成了长期测试盲区。
+ * `checkLocalPath` 支持注入 `deps`，把同一条分支搬到**全平台都能跑**的注入式用例里：
+ * 不碰真实文件系统、不需要任何权限，Windows 也真的执行。
+ */
+test('★ write 模式（注入 deps）：目标已存在但 realpath 落在外面 → 拒绝（全平台可跑）', () => {
+  const rootReal = join(process.cwd(), 'fake-root');
+  const candidate = join(rootReal, 'planted.urp');
+  const outside = join(process.cwd(), 'outside-dir', 'hijacked.urp');
+  const deps = {
+    realpath: (p) => (p === rootReal ? rootReal : p === candidate ? outside : p),
+    lstat: () => ({}), // 目标"存在"（不跟链接）
+    stat: () => ({ isFile: () => true, size: 5 }),
+  };
+  const out = checkLocalPath('planted.urp', { root: rootReal, mode: 'write', deps });
+  assert.equal(out.ok, false, '目标文件的 realpath 落在 programDir 之外必须拒绝');
+  assert.match(out.reason, /programDir 之外/);
+});
+
+test('★ 悬空链接（注入 deps）：realpath 抛错 → 拒绝，而不是当作"新文件"放行', () => {
+  const rootReal = join(process.cwd(), 'fake-root');
+  const candidate = join(rootReal, 'dangling.urp');
+  const deps = {
+    realpath: (p) => {
+      if (p === candidate) throw new Error('ENOENT');
+      return rootReal;
+    },
+    lstat: () => ({}),
+    stat: () => ({ isFile: () => true, size: 0 }),
+  };
+  const out = checkLocalPath('dangling.urp', { root: rootReal, mode: 'write', deps });
+  assert.equal(out.ok, false, '跟着悬空链接写入等于在目录外新建文件，必须拒绝');
+  assert.match(out.reason, /悬空链接/);
+});
+
+test('★ read 模式（注入 deps）：stat 跟着链接读到外面 → 拒绝（全平台可跑）', () => {
+  const rootReal = join(process.cwd(), 'fake-root');
+  const candidate = join(rootReal, 'link', 'leak.urp');
+  const outside = join(process.cwd(), 'outside-dir', 'leak.urp');
+  const deps = {
+    realpath: (p) => (p === rootReal ? rootReal : p === candidate ? outside : p),
+    lstat: () => ({}),
+    stat: () => ({ isFile: () => true, size: 7 }),
+  };
+  const out = checkLocalPath('link/leak.urp', { root: rootReal, mode: 'read', deps });
+  assert.equal(out.ok, false, '文件 realpath 落在 programDir 之外必须拒绝');
+  assert.match(out.reason, /programDir 之外/);
+});
+
 test('远端路径：绝对、无 ..、且必须是 .urp', () => {
   assert.equal(checkRemotePath('/programs/pick.urp').ok, true);
   assert.equal(checkRemotePath('  /programs/pick.urp  ').path, '/programs/pick.urp', '两侧空白应被裁掉');
