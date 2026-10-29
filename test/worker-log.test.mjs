@@ -19,7 +19,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, existsSync, statSync } from 'node:fs'
+import { readFileSync, existsSync, statSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
@@ -33,10 +34,10 @@ import json, os, sys, tempfile
 sys.path.insert(0, ${JSON.stringify(pythonDir)})
 import ur_worker
 
-tmp = tempfile.mkdtemp(prefix="ur-log-test-")
-# P5：同上 —— 本机 gettempdir() 会静默回退到仓库根，所以用完（进程退出时）必须删掉。
-import atexit as _atexit, shutil as _shutil
-_atexit.register(_shutil.rmtree, tmp, ignore_errors=True)
+# P5：临时根由 JS 侧创建并删除（argv[1]）。**不能用 tempfile.mkdtemp()** —— 本机
+# tempfile.gettempdir() 会因候选目录被判不可写而静默回退到 os.getcwd()，把目录留在仓库根，
+# 而且 TMPDIR/TEMP/TMP 重定向也救不回来。所有权交给 JS 是最可靠的：与子进程怎么退出无关。
+tmp = sys.argv[1]
 path = os.path.join(tmp, "test.log")
 cap = 1024
 log = ur_worker._CappedLog(path, cap)
@@ -69,11 +70,33 @@ ur_worker._PROTOCOL_OUT.flush()
 `
 
 test('_CappedLog：写满即滚动，且只保留一代旧日志', () => {
-  const child = spawnSync(process.env.PYTHON ?? 'python', ['-u', '-c', HARNESS], {
-    encoding: 'utf8',
-    timeout: 60000,
-    env: { ...process.env, PYTHONPATH: pythonDir, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
-  })
+  /*
+   * P5：给子进程一个**我们自己拥有**的临时根。
+   *
+   * 本机实测两个事实：①`%TEMP%` 对 Python 子进程**不可写**（`PermissionError [Errno 13]`），所以
+   * `tempfile.gettempdir()` 会（正确地）回退到 `os.getcwd()`，把 mkdtemp 目录留在仓库根 ——
+   * 清点过 102 个；②给 Python 侧加 atexit 清理并不可靠：经过套件跑仍会留一个（子进程结束时
+   * atexit 来不及执行）。TMPDIR/TEMP/TMP 重定向也救不回来，因为目标目录本身就不可写。
+   *
+   * 所以：临时根建在**可写的工作区**里（`.tmp-log-root-*`，已进 .gitignore），由 JS 自己建、
+   * 自己删 —— 与子进程怎么退出无关，也不再依赖任何临时目录判定。
+   */
+  const ownedTmp = mkdtempSync(join(process.cwd(), '.tmp-log-root-'))
+  let child
+  try {
+    child = spawnSync(process.env.PYTHON ?? 'python', ['-u', '-c', HARNESS, ownedTmp], {
+      encoding: 'utf8',
+      timeout: 60000,
+      env: {
+        ...process.env,
+        PYTHONPATH: pythonDir,
+        PYTHONUNBUFFERED: '1',
+        PYTHONIOENCODING: 'utf-8',
+      },
+    })
+  } finally {
+    rmSync(ownedTmp, { recursive: true, force: true })
+  }
   assert.equal(child.status, 0, `探针失败：${child.stderr}`)
 
   const line = child.stdout.split('\n').map((l) => l.trim()).find((l) => l.startsWith('{'))

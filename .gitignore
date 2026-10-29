@@ -48,3 +48,4 @@ venv/
 ur-harness-*/
 ur-log-test-*/
 ur-*/
+.tmp-log-root-*/
