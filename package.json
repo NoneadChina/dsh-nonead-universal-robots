@@ -32,7 +32,7 @@
     "prepublishOnly": "npm run check && npm run check:host:strict && npm test",
     "check": "npm run check:static && npm run check:ops && npm run check:docs && npm run check:manifest && npm run check:host",
     "check:static": "node --check lib/index.js && node --check lib/worker.js && node scripts/check-package-metadata.mjs && node scripts/check-client-bundle.mjs",
-    "check:ops": "node scripts/run-py.mjs scripts/check-worker-ops.py && node scripts/run-py.mjs scripts/check-new-ops.py && node scripts/run-py.mjs scripts/check-approval-gate.py && node scripts/run-py.mjs scripts/check-tool-params.py && node scripts/run-py.mjs scripts/check-rtde-recipe.py",
+    "check:ops": "node scripts/run-ops-gates.mjs",
     "check:docs": "node scripts/check-doc-tools.mjs",
     "check:manifest": "node scripts/check-test-manifest.mjs",
     "check:host": "node scripts/check-host-compat.mjs --allow-missing-host",
