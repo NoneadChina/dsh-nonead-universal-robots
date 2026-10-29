@@ -29,7 +29,7 @@ const config = readFileSync(join(pythonDir, 'URBasic', 'rtdeConfiguration.xml'),
 const HARNESS = `
 import json, os, sys, tempfile, ur_worker
 
-ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.mkdtemp(prefix="ur-rb-"), "t.log"), 4096)
+ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.gettempdir(), f"ur-rb-{os.getpid()}.log"), 4096)
 sys.stdout = ur_worker._LOG
 
 IP = "1.2.3.4"

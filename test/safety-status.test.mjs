@@ -43,7 +43,7 @@ const HARNESS = `
 import json, os, sys, tempfile, ur_worker
 from URBasic.robotModel import RobotModel
 
-ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.mkdtemp(prefix="ur-ss2-"), "t.log"), 4096)
+ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.gettempdir(), f"ur-ss2-{os.getpid()}.log"), 4096)
 sys.stdout = ur_worker._LOG
 
 class Stub:

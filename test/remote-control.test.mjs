@@ -97,7 +97,7 @@ test('契约：op_connect 分档提示，且不再无条件让人去开启 Remot
 const CONNECT_HARNESS = `
 import json, os, sys, tempfile, ur_worker
 
-ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.mkdtemp(prefix="ur-rc-"), "t.log"), 4096)
+ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.gettempdir(), f"ur-rc-{os.getpid()}.log"), 4096)
 sys.stdout = ur_worker._LOG
 
 class FakeDashboard:

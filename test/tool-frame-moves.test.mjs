@@ -29,7 +29,7 @@ const hostSource = readFileSync(join(packageRoot, 'lib', 'index.js'), 'utf8').re
 const HARNESS = `
 import json, math, os, sys, tempfile, ur_worker
 
-ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.mkdtemp(prefix="ur-tf-"), "t.log"), 4096)
+ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.gettempdir(), f"ur-tf-{os.getpid()}.log"), 4096)
 sys.stdout = ur_worker._LOG
 
 START_POSE = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0]

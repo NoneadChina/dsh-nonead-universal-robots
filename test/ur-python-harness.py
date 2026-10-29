@@ -1373,7 +1373,13 @@ def probe_program_confirmation_contract():
 
         # --- upload：注入路径优先；_local_path 必须绝对 ---
         import tempfile as _tempfile
+        import atexit as _atexit
+        import shutil as _shutil
         work = _tempfile.mkdtemp(prefix='ur-harness-')
+        # P5：临时目录必须自己收拾。Python 的 tempfile 在候选临时目录**不可写**时会静默回退到
+        # `os.getcwd()` —— 本机实测 `tempfile.gettempdir()` 就返回仓库根，于是每跑一次套件就在
+        # 仓库里留一个 `ur-harness-*` 目录。退出时删掉，无论中间控制流怎么走。
+        _atexit.register(_shutil.rmtree, work, ignore_errors=True)
         local_file = os.path.join(work, 'pick.urp')
         with open(local_file, 'w', encoding='utf-8') as fh:
             fh.write('<urp/>')

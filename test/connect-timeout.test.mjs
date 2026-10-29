@@ -37,7 +37,7 @@ import os, sys, tempfile, ur_worker
 
 # 别把测试输出写进插件真实的 ur_worker.log（导入 ur_worker 时会打开它）：
 # 把日志句柄换成临时文件，协议通道 _PROTOCOL_OUT 保持不变，断言照旧。
-ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.mkdtemp(prefix="ur-ct-"), "t.log"), 4096)
+ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.gettempdir(), f"ur-ct-{os.getpid()}.log"), 4096)
 sys.stdout = ur_worker._LOG
 
 class HangingConnector:

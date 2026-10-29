@@ -39,7 +39,7 @@ const workerSource = readFileSync(join(pythonDir, 'ur_worker.py'), 'utf8').repla
 const HARNESS = `
 import json, os, sys, tempfile, ur_worker
 
-ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.mkdtemp(prefix="ur-ss-"), "t.log"), 4096)
+ur_worker._LOG = ur_worker._CappedLog(os.path.join(tempfile.gettempdir(), f"ur-ss-{os.getpid()}.log"), 4096)
 sys.stdout = ur_worker._LOG
 
 SCRIPT_DEF = "def dance():\\n  movej([0,0,0,0,0,0],1,1,0,0)\\n  set_digital_out(3, True)\\nend\\ndance()\\n"

@@ -34,6 +34,9 @@ sys.path.insert(0, ${JSON.stringify(pythonDir)})
 import ur_worker
 
 tmp = tempfile.mkdtemp(prefix="ur-log-test-")
+# P5：同上 —— 本机 gettempdir() 会静默回退到仓库根，所以用完（进程退出时）必须删掉。
+import atexit as _atexit, shutil as _shutil
+_atexit.register(_shutil.rmtree, tmp, ignore_errors=True)
 path = os.path.join(tmp, "test.log")
 cap = 1024
 log = ur_worker._CappedLog(path, cap)
