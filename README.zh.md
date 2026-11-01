@@ -1,5 +1,11 @@
 # dsh-nonead-universal-robots
 
+[English](./README.md) · **简体中文**
+
+[![npm version](https://img.shields.io/npm/v/dsh-nonead-universal-robots.svg?logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/dsh-nonead-universal-robots) [![npm downloads](https://img.shields.io/npm/dm/dsh-nonead-universal-robots.svg?logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/dsh-nonead-universal-robots) [![CI](https://img.shields.io/github/actions/workflow/status/NoneadChina/dsh-nonead-universal-robots/ci.yml?branch=main&label=CI&logo=github)](https://github.com/NoneadChina/dsh-nonead-universal-robots/actions) [![tag](https://img.shields.io/github/v/tag/NoneadChina/dsh-nonead-universal-robots?label=tag&logo=git&logoColor=white)](https://github.com/NoneadChina/dsh-nonead-universal-robots/tags) [![stars](https://img.shields.io/github/stars/NoneadChina/dsh-nonead-universal-robots?logo=github)](https://github.com/NoneadChina/dsh-nonead-universal-robots/stargazers) [![license](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-orange)](./LICENSE)
+
+[![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org) [![python](https://img.shields.io/badge/python-3.9%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org) [![tools](https://img.shields.io/badge/tools-104-blue)](#工具命名与示例) [![languages](https://img.shields.io/badge/languages-8-8A2BE2)](./src/client/strings.js) [![robot](https://img.shields.io/badge/Universal%20Robots-UR3e%20~%20UR30-00A3E0)](#工具命名与示例) [![tests](https://img.shields.io/badge/tests-57%20items-brightgreen)](#健康检查--测试)
+
 **一个让 DSH 用自然语言直接控制 Universal Robots（UR）机械臂的插件，由拓德科技（Nonead）基于自研的 nUR MCP Server 同源逻辑开发。**（[Suzhou Nonead Robot Technology Co., Ltd.](https://www.nonead.com)）
 
 插件启动一个常驻的 Python worker（内部复用 vendored 的 `URBasic` 库），把机器人控制以**原生 DSH 工具**的形式接入：工具经由该 worker 与机器人通信，因此 `connect` 一次后即可在同一 IP 上持续发指令。仓库：<https://github.com/NoneadChina/dsh-nonead-universal-robots>

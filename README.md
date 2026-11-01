@@ -1,5 +1,11 @@
 # dsh-nonead-universal-robots
 
+**English** · [简体中文](./README.zh.md)
+
+[![npm version](https://img.shields.io/npm/v/dsh-nonead-universal-robots.svg?logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/dsh-nonead-universal-robots) [![npm downloads](https://img.shields.io/npm/dm/dsh-nonead-universal-robots.svg?logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/dsh-nonead-universal-robots) [![CI](https://img.shields.io/github/actions/workflow/status/NoneadChina/dsh-nonead-universal-robots/ci.yml?branch=main&label=CI&logo=github)](https://github.com/NoneadChina/dsh-nonead-universal-robots/actions) [![tag](https://img.shields.io/github/v/tag/NoneadChina/dsh-nonead-universal-robots?label=tag&logo=git&logoColor=white)](https://github.com/NoneadChina/dsh-nonead-universal-robots/tags) [![stars](https://img.shields.io/github/stars/NoneadChina/dsh-nonead-universal-robots?logo=github)](https://github.com/NoneadChina/dsh-nonead-universal-robots/stargazers) [![license](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-orange)](./LICENSE)
+
+[![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org) [![python](https://img.shields.io/badge/python-3.9%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org) [![tools](https://img.shields.io/badge/tools-104-blue)](#tool-naming--examples) [![languages](https://img.shields.io/badge/languages-8-8A2BE2)](./src/client/strings.js) [![robot](https://img.shields.io/badge/Universal%20Robots-UR3e%20~%20UR30-00A3E0)](#tool-naming--examples) [![tests](https://img.shields.io/badge/tests-57%20items-brightgreen)](#health-check--testing)
+
 **A DeepSeek Harness (DSH) plugin that lets you control Universal Robots (UR) collaborative arms directly from natural language, developed by Suzhou Nonead Robot Technology Co., Ltd. based on the same logic as the company's own nUR MCP Server.** ([Suzhou Nonead Robot Technology Co., Ltd.](https://www.nonead.com))
 
 The plugin starts a persistent Python worker (which internally reuses the vendored `URBasic` library) and exposes robot control as **native DSH tools**: the tools talk to the robot through that worker, so after a single `connect` you can keep issuing commands to the same IP. Repository: <https://github.com/NoneadChina/dsh-nonead-universal-robots>

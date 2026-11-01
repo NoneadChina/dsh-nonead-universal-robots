@@ -2,6 +2,22 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.5] - 2026-11-01
+
+### 文档 —— 两份 README 顶部加语言切换行与徽章
+
+- 标题下第一行是**语言切换**：`README.md` 显示 `**English** · [简体中文](./README.zh.md)`，
+  `README.zh.md` 显示 `[English](./README.md) · **简体中文**`（与 `dsh-nonead-ursim` 同款）。
+- 标题下新增两排徽章（与 `dsh-nonead-ursim` 对齐并取本仓库真值）：npm 版本 / npm 下载量 /
+  CI / tag / stars / license（AGPL-3.0 / Commercial）；node `>=20` / python `3.9 | 3.12` /
+  tools **104** / languages **8** / Universal Robots `UR3e ~ UR30` / tests **57 items**。
+- 徽章数值都取自可核对的真源：工具数由 `scripts/check-doc-tools.mjs` 钉住（104），语言数由
+  `src/client/strings.js` 的 `SUPPORTED_LOCALES` 决定（8），测试项数由 `npm test` 的汇总行决定（57），
+  node/python 取 `package.json` 的 `engines` 与 CI 矩阵。
+- ⚠️ 两个 npm 徽章在**包重新发布后**才会显示版本号：注册表上 `dsh-nonead-universal-robots`
+  目前处于"整包删除 + 账号发布封禁"状态（详见 0.8.4 之后的排查），徽章本身不会报错，只是暂无数据。
+- **仅文档变更**：`lib/`、`python/`、`src/` 未改动。
+
 ## [0.8.4] - 2026-10-29
 
 ### 修复 —— 孪生「数据停更 / 通道重连」整行文案本地化（审核 P1）

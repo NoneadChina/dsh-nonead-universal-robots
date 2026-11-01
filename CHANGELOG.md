@@ -2,6 +2,27 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.8.5] - 2026-11-01
+
+### Docs — language switcher and badges at the top of both READMEs
+
+- The first line under the title is now a **language switcher**: `README.md` shows
+  `**English** · [简体中文](./README.zh.md)`, `README.zh.md` shows
+  `[English](./README.md) · **简体中文**` (same shape as `dsh-nonead-ursim`).
+- Two badge rows added below the title (aligned with `dsh-nonead-ursim`, values taken from this
+  repository): npm version / npm downloads / CI / tag / stars / license (AGPL-3.0 / Commercial);
+  node `>=20` / python `3.9 | 3.12` / tools **104** / languages **8** /
+  Universal Robots `UR3e ~ UR30` / tests **57 items**.
+- Every badge value comes from a verifiable source: the tool count is pinned by
+  `scripts/check-doc-tools.mjs` (104), the language count by `SUPPORTED_LOCALES` in
+  `src/client/strings.js` (8), the test count by the `npm test` summary line (57), node/python from
+  `package.json` `engines` and the CI matrix.
+- ⚠️ The two npm badges only show a version **once the package is republished**: on the registry
+  `dsh-nonead-universal-robots` is currently in an "entire package deleted + account publishing
+  suspension" state (see the diagnosis after 0.8.4). The badges do not error — they simply have no
+  data yet.
+- **Docs-only change**: `lib/`, `python/` and `src/` are untouched.
+
 ## [0.8.4] - 2026-10-29
 
 ### Fixed — the twin's "data stalled / reconnecting" line is now localised (audit P1)
