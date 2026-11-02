@@ -109,7 +109,7 @@ host 侧路由（均限定 loopback 调用方）：
 ## 安装到 DSH profile
 
 > 📦 **已发布到 npm**：[`dsh-nonead-universal-robots`](https://www.npmjs.com/package/dsh-nonead-universal-robots)
-> —— 当前版本 **0.8.0**。最快的是下面的「方式零」：不需要从 GitHub 下 tarball，也不需要本地检出。
+> —— 当前版本 **0.8.5**。最快的是下面的「方式零」：不需要从 GitHub 下 tarball，也不需要本地检出。
 
 ### 方式零：从 npm 安装（推荐）
 
@@ -117,14 +117,14 @@ host 侧路由（均限定 loopback 调用方）：
 # DSH Desktop 会为每个 profile 生成一个 CLI 包装器，它会自己补上 --profile：
 dsh.cmd plugin add dsh-nonead-universal-robots
 # 需要锁定版本时：
-dsh.cmd plugin add dsh-nonead-universal-robots@0.8.0
+dsh.cmd plugin add dsh-nonead-universal-robots@0.8.5
 # 其他环境：dsh plugin --profile <profile> add dsh-nonead-universal-robots
 ```
 
 也可以直接写进 profile 的 `package.json` —— 默认就从注册表取：
 
 ```jsonc
-"dependencies": { "dsh-nonead-universal-robots": "^0.8.0" }
+"dependencies": { "dsh-nonead-universal-robots": "^0.8.5" }
 ```
 
 如果要把 tarball 内联进别的包，`npm install dsh-nonead-universal-robots` 同样可用。安装进来的副本包含
@@ -161,7 +161,7 @@ dsh.cmd plugin add "file:D:/path/to/dsh-nonead-universal-robots"
    // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.8.0"
+       "dsh-nonead-universal-robots": "^0.8.5"
        // 离线/内网环境的退路："file:D:/path/to/dsh-nonead-universal-robots"
        // 或（GitHub 可达时）："github:NoneadChina/dsh-nonead-universal-robots"
      },

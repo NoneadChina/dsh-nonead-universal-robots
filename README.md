@@ -110,7 +110,7 @@ adding a language means adding one dictionary — the key set is enforced by tes
 ## Install into a DSH profile
 
 > 📦 **Published on npm** as [`dsh-nonead-universal-robots`](https://www.npmjs.com/package/dsh-nonead-universal-robots)
-> — current release **0.8.0**. The npm route (Option 0) is the simplest: no GitHub tarball download
+> — current release **0.8.5**. The npm route (Option 0) is the simplest: no GitHub tarball download
 > and no local checkout.
 
 ### Option 0 — from npm (recommended)
@@ -119,14 +119,14 @@ adding a language means adding one dictionary — the key set is enforced by tes
 # DSH Desktop ships a CLI wrapper per profile; it adds --profile itself:
 dsh.cmd plugin add dsh-nonead-universal-robots
 # pin an exact version if you prefer:
-dsh.cmd plugin add dsh-nonead-universal-robots@0.8.0
+dsh.cmd plugin add dsh-nonead-universal-robots@0.8.5
 # on other setups: dsh plugin --profile <profile> add dsh-nonead-universal-robots
 ```
 
 Or write the range into the profile's `package.json` yourself — the registry is the default source:
 
 ```jsonc
-"dependencies": { "dsh-nonead-universal-robots": "^0.8.0" }
+"dependencies": { "dsh-nonead-universal-robots": "^0.8.5" }
 ```
 
 `npm install dsh-nonead-universal-robots` also works if you want to vendor the tarball into another
@@ -163,7 +163,7 @@ This is the same path the plugin page uses: it writes the dependency **and** the
    // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.8.0"
+       "dsh-nonead-universal-robots": "^0.8.5"
        // offline / air-gapped fallbacks: "file:D:/path/to/dsh-nonead-universal-robots"
        // or, once GitHub is reachable: "github:NoneadChina/dsh-nonead-universal-robots"
      },
