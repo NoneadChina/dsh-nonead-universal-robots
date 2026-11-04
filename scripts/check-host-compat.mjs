@@ -450,8 +450,41 @@ else {
     const installed = hostManifest(hostModules, name)?.version
     if (installed === undefined) { fail(`peer ${name}`, '宿主未安装该包'); continue }
     if (declared === undefined) { note(`${name} 未声明 peer，宿主 ${installed}`); continue }
-    if (semver.satisfies(installed, declared)) pass(`peer ${name}`, `宿主 ${installed} 满足 ${declared}`)
-    else fail(`peer ${name}`, `宿主 ${installed} 不满足 ${declared}（预发布范围只匹配自身版本三元组，需为该版本族补一条）`)
+    if (semver.satisfies(installed, declared)) {
+      pass(`peer ${name}`, `宿主 ${installed} 满足 ${declared}`)
+      continue
+    }
+    /*
+     * 失败时给**可直接粘贴**的修法。semver 对预发布的规则是：只有当范围里存在
+     * 显式带同一 major.minor.patch 的预发布比较器时，该三元组的预发布版本才可能被匹配。
+     * 所以把上界写宽（例如 `>=0.1.2-rc.1 <0.3.0`）**并不能**覆盖 0.2.2-alpha.3 ——
+     * 必须为每个预发布三元组补一段 `>=X.Y.Z-pre <X.Y.(Z+1)`；正式版则由大区间自动覆盖。
+     */
+    const parsed = semver.parse(installed)
+    const hint = parsed?.prerelease?.length
+      ? `预发布只被同三元组的比较器匹配 ⇒ 在 ${name} 的范围末尾追加 " || >=${parsed.version} <${parsed.major}.${parsed.minor}.${parsed.patch + 1}"`
+      : `宿主已超出声明上界 ⇒ 更新 ${name} 的上界（当前声明 ${declared}）`
+    fail(`peer ${name}`, `宿主 ${installed} 不满足 ${declared}。${hint}`)
+  }
+
+  /*
+   * ── 1b. 向后兼容矩阵 ────────────────────────────────────────────────────
+   * 「适配当前版本」不难，难的是**不弄丢之前能用的版本**：把历史上实际验证过的宿主版本
+   * 钉成矩阵，每次校验都确认声明范围仍然覆盖它们。以后有人把范围改窄、或换成不覆盖
+   * 预发布版本的纯区间时，这里立刻变红 —— 而不是等某个还在用旧宿主的用户装不上才发现。
+   */
+  const PEER_HISTORY = {
+    '@deepseek-ai/dsh': ['0.1.2-rc.1', '0.1.7-rc.2', '0.2.0-rc.2', '0.2.1-alpha.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2', '0.2.9'],
+    '@deepseek-ai/dsh-tools': ['0.1.2-rc.1', '0.1.7-rc.2', '0.2.0-rc.2', '0.2.1-alpha.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2', '0.2.9'],
+    '@deepseek-ai/cordis': ['4.0.2', '4.0.5-alpha.2', '4.0.6-alpha.1', '4.0.6-alpha.2', '4.0.6', '4.1.0'],
+    '@deepseek-ai/schemastery': ['3.18.2', '3.18.5-alpha.2', '3.18.6-alpha.1', '3.18.6-alpha.2', '3.18.6', '3.19.0'],
+  }
+  for (const [name, versions] of Object.entries(PEER_HISTORY)) {
+    const declared = manifest.peerDependencies?.[name]
+    if (declared === undefined) continue
+    const missed = versions.filter((v) => !semver.satisfies(v, declared))
+    if (missed.length === 0) pass(`向后兼容矩阵 ${name}`, `${versions.length} 个历史/当前宿主版本全部覆盖`)
+    else fail(`向后兼容矩阵 ${name}`, `声明范围漏掉了 ${missed.join('、')}（历史可用版本不能因为放宽或收紧范围而失效）`)
   }
 }
 
@@ -510,6 +543,38 @@ const effect = (callback) => {
 
 try {
   const plugin = await import(pathToFileURL(join(PLUGIN_ROOT, 'lib', 'index.js')).href)
+
+  /*
+   * ── 4. 旧配置向后兼容 ────────────────────────────────────────────────────
+   * 升级插件时，profile 里留着的是**上一个版本写的** cordis 配置。这里用宿主真实的
+   * schemastery 解析一份「旧版本形态」的最小配置（只有 pythonBin），确认新版本不会因为
+   * 缺少后来新增的字段而拒绝启动，并且这些字段都取到预期默认值 —— 这是「兼容之前的版本」
+   * 里唯一会被真实用户撞到的部分（位姿文件自带 version，审计账本只追加不读）。
+   */
+  try {
+    const parsed = plugin.Config({ pythonBin: 'python' })
+    const expected = {
+      pythonBin: 'python',
+      commandTimeoutMs: 60000,
+      connectTimeoutMs: 30000,
+      requireApprovalForMotion: true,
+      safetyGate: true,
+      auditLog: true,
+      auditLogAll: false,
+      safetyMaxAccel: 2.0,
+      maxPoses: 200,
+    }
+    const wrong = Object.entries(expected).filter(([key, value]) => parsed?.[key] !== value)
+    if (wrong.length === 0) {
+      pass('旧配置向后兼容', `仅给 pythonBin 的旧配置解析后取全 ${Object.keys(expected).length} 项默认值`)
+    } else {
+      fail('旧配置向后兼容',
+        `这些字段没取到预期默认值：${wrong.map(([key, value]) => `${key}(期望 ${JSON.stringify(value)}，实得 ${JSON.stringify(parsed?.[key])})`).join('、')}`)
+    }
+  } catch (cause) {
+    fail('旧配置向后兼容', `旧版本配置无法被新版本解析：${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+
   plugin.apply(
     {
       logger,

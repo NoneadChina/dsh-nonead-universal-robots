@@ -2,6 +2,16 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.8.6] - 2026-11-04
+
+### Compatibility — declare the current host explicitly, keep every older host working, and gate both
+
+- **`peerDependencies` moved from a list of `^`-pinned pre-releases to ranges plus pre-release triples**: stable releases are covered by the wide ranges (`>=0.1.2-rc.1 <0.3.0`, cordis `>=4.0.2 <5.0.0`, schemastery `>=3.18.2 <4.0.0`), while pre-releases get one clause per triple, as semver requires. The current host `0.2.2-alpha.3` and the historical `0.1.2-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.2` / `0.2.1-alpha.5` / `0.2.2-alpha.2` are all covered, and later stable releases such as `0.2.2`–`0.2.9` need no declaration change.
+- **`check-host-compat` now prints the exact clause to paste** when a peer check fails, derived from semver's pre-release rule (`>=X.Y.Z-pre <X.Y.(Z+1)`), instead of only saying "add one for that version family".
+- **New "backward-compatibility matrix" gate**: the historical host versions we actually validated are pinned in the checker (`@deepseek-ai/dsh` and `dsh-tools`: 8 each; `cordis` and `schemastery`: 6 each) and re-checked on every run — narrowing the range fails immediately, so adopting a new host cannot silently drop an old one.
+- **New "old config stays parseable" gate**: the checker parses a legacy config containing only `pythonBin` through the host's real schemastery and asserts that all 9 fields added later take their defaults.
+- **Docs**: both READMEs gained a "Host compatibility" section; pose files carry their own `version`, the audit ledger is append-only and `.urp` files are read/written verbatim — none of them need a migration.
+
 ## [0.8.5] - 2026-11-01
 
 ### Docs — language switcher and badges at the top of both READMEs

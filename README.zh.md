@@ -109,7 +109,7 @@ host 侧路由（均限定 loopback 调用方）：
 ## 安装到 DSH profile
 
 > 📦 **已发布到 npm**：[`dsh-nonead-universal-robots`](https://www.npmjs.com/package/dsh-nonead-universal-robots)
-> —— 当前版本 **0.8.5**。最快的是下面的「方式零」：不需要从 GitHub 下 tarball，也不需要本地检出。
+> —— 当前版本 **0.8.6**。最快的是下面的「方式零」：不需要从 GitHub 下 tarball，也不需要本地检出。
 
 ### 方式零：从 npm 安装（推荐）
 
@@ -117,14 +117,14 @@ host 侧路由（均限定 loopback 调用方）：
 # DSH Desktop 会为每个 profile 生成一个 CLI 包装器，它会自己补上 --profile：
 dsh.cmd plugin add dsh-nonead-universal-robots
 # 需要锁定版本时：
-dsh.cmd plugin add dsh-nonead-universal-robots@0.8.5
+dsh.cmd plugin add dsh-nonead-universal-robots@0.8.6
 # 其他环境：dsh plugin --profile <profile> add dsh-nonead-universal-robots
 ```
 
 也可以直接写进 profile 的 `package.json` —— 默认就从注册表取：
 
 ```jsonc
-"dependencies": { "dsh-nonead-universal-robots": "^0.8.5" }
+"dependencies": { "dsh-nonead-universal-robots": "^0.8.6" }
 ```
 
 如果要把 tarball 内联进别的包，`npm install dsh-nonead-universal-robots` 同样可用。安装进来的副本包含
@@ -161,7 +161,7 @@ dsh.cmd plugin add "file:D:/path/to/dsh-nonead-universal-robots"
    // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.8.5"
+       "dsh-nonead-universal-robots": "^0.8.6"
        // 离线/内网环境的退路："file:D:/path/to/dsh-nonead-universal-robots"
        // 或（GitHub 可达时）："github:NoneadChina/dsh-nonead-universal-robots"
      },
@@ -252,6 +252,15 @@ CI（`.github/workflows/ci.yml`）在 Node 22.15/24 × Python 3.9/3.12 上跑同
 > 首次连接到某机器人时，`ur_connect` 有约 20 s 的 RTDE 就绪等待，超时会返回清晰错误而非卡死。
 
 ---
+
+## 宿主兼容性
+
+兼容边界写在 `package.json` 的 `peerDependencies` 里，并由 `npm run check:host:strict` 用**宿主真实的 schema DSL** 校验 —— 它不只比版本号，而是真的把 104 个工具注册进宿主、驱动孪生路由、校验 `dsh.client` 声明。
+
+- **正式版**：`>=0.1.2-rc.1 <0.3.0`（`@deepseek-ai/dsh` / `dsh-tools`）、`>=4.0.2 <5.0.0`（`cordis`）、`>=3.18.2 <4.0.0`（`schemastery`）—— 区间内的正式版无需再改声明。
+- **预发布版**：semver 只允许「同一 major.minor.patch 且范围里显式写了该预发布」的版本，所以每个预发布三元组要单独一段（如 `>=0.2.2-alpha.2 <0.2.3`）。宿主发布新补丁号的预发布（如 `0.2.3-alpha.1`）时，`check:host:strict` 会失败，并**直接打印应该追加的那一段**。
+- **历史兼容矩阵**：`scripts/check-host-compat.mjs` 里钉了一组历史/当前宿主版本，每次校验都确认声明仍覆盖它们 —— 把范围改窄会立刻变红，避免「适配新版顺手弄丢旧版」。
+- **旧配置与旧数据**：cordis 配置的每个字段都有默认值，升级后 profile 里遗留的旧配置（哪怕只有 `pythonBin`）仍能解析并取到默认值；位姿文件自带 `version` 字段、审计账本是只追加的 NDJSON、程序文件是原样 `.urp`，都不需要迁移。
 
 ## 工作原理
 

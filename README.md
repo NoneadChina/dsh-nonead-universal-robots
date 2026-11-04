@@ -110,7 +110,7 @@ adding a language means adding one dictionary — the key set is enforced by tes
 ## Install into a DSH profile
 
 > 📦 **Published on npm** as [`dsh-nonead-universal-robots`](https://www.npmjs.com/package/dsh-nonead-universal-robots)
-> — current release **0.8.5**. The npm route (Option 0) is the simplest: no GitHub tarball download
+> — current release **0.8.6**. The npm route (Option 0) is the simplest: no GitHub tarball download
 > and no local checkout.
 
 ### Option 0 — from npm (recommended)
@@ -119,14 +119,14 @@ adding a language means adding one dictionary — the key set is enforced by tes
 # DSH Desktop ships a CLI wrapper per profile; it adds --profile itself:
 dsh.cmd plugin add dsh-nonead-universal-robots
 # pin an exact version if you prefer:
-dsh.cmd plugin add dsh-nonead-universal-robots@0.8.5
+dsh.cmd plugin add dsh-nonead-universal-robots@0.8.6
 # on other setups: dsh plugin --profile <profile> add dsh-nonead-universal-robots
 ```
 
 Or write the range into the profile's `package.json` yourself — the registry is the default source:
 
 ```jsonc
-"dependencies": { "dsh-nonead-universal-robots": "^0.8.5" }
+"dependencies": { "dsh-nonead-universal-robots": "^0.8.6" }
 ```
 
 `npm install dsh-nonead-universal-robots` also works if you want to vendor the tarball into another
@@ -163,7 +163,7 @@ This is the same path the plugin page uses: it writes the dependency **and** the
    // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.8.5"
+       "dsh-nonead-universal-robots": "^0.8.6"
        // offline / air-gapped fallbacks: "file:D:/path/to/dsh-nonead-universal-robots"
        // or, once GitHub is reachable: "github:NoneadChina/dsh-nonead-universal-robots"
      },
@@ -255,6 +255,15 @@ CI (`.github/workflows/ci.yml`) runs the same two commands on Node 22.15/24 × P
 > The first `ur_connect` to a robot has an ~20 s RTDE readiness wait; on timeout it returns a clear error rather than hanging.
 
 ---
+
+## Host compatibility
+
+The compatibility boundary lives in `package.json` → `peerDependencies`, and `npm run check:host:strict` validates it against the **host's real schema DSL** — not just version numbers: it actually registers all 104 tools into the host, drives the twin routes and checks the `dsh.client` declaration.
+
+- **Stable releases**: `>=0.1.2-rc.1 <0.3.0` (`@deepseek-ai/dsh` / `dsh-tools`), `>=4.0.2 <5.0.0` (`cordis`), `>=3.18.2 <4.0.0` (`schemastery`) — any stable release in those ranges is covered without touching the declaration.
+- **Pre-releases**: semver only matches a pre-release when the range explicitly names that same `major.minor.patch`. Each pre-release triple therefore needs its own clause (e.g. `>=0.2.2-alpha.2 <0.2.3`). When the host publishes a pre-release with a new patch number (say `0.2.3-alpha.1`), `check:host:strict` fails **and prints the exact clause to append**.
+- **Historical matrix**: `scripts/check-host-compat.mjs` pins a set of historical/current host versions and re-checks on every run that the declaration still covers them — narrowing the range turns this red immediately, so adopting a new host can't silently drop an old one.
+- **Old config and old data**: every cordis config field has a default, so a profile left with an older config (even just `pythonBin`) still parses and takes the defaults; pose files carry their own `version`, the audit ledger is an append-only NDJSON, and program files are plain `.urp` — none of them need a migration.
 
 ## How it works
 
