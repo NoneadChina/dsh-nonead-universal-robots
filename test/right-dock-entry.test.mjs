@@ -107,6 +107,17 @@ class FakeElement {
     return node
   }
 
+  insertBefore(node, reference) {
+    if (!reference) return this.appendChild(node)
+    const i = this.children.indexOf(reference)
+    if (i < 0) return this.appendChild(node)
+    node.parentNode?.removeChild(node)
+    this.children.splice(i, 0, node)
+    node.parentNode = this
+    if (!node.ownerDocument) node.ownerDocument = this.ownerDocument
+    return node
+  }
+
   removeChild(node) {
     const i = this.children.indexOf(node)
     if (i >= 0) this.children.splice(i, 1)
@@ -669,4 +680,45 @@ test('⑭ dispose 后语言变化不再触碰 DOM（订户已退订）', () => {
   // 卡片已摘除，不应被重新插回
   assert.equal(pluginEntry(dom), null)
   assert.equal(entry.isConnected, false)
+})
+
+test('⑮ 「更多」卡片存在时，UR 卡片插在它上面而不是网格末尾', () => {
+  const dom = createFakeDom()
+  // dsh-better-sidebar 溢出时的真实结构：
+  // root[data-dsh-guide-grid] > .FlLRca_guide > .FlLRca_grid > (card*, moreSlot > button[data-guide-more])
+  dom.guide.setAttribute('data-sidebar-right-guide', '')
+  dom.guide.setAttribute('data-dsh-guide-grid', 'true')
+  const guide = dom.document.createElement('div')
+  guide.className = 'FlLRca_guide'
+  for (const card of [...dom.guide.children]) guide.appendChild(card)
+  dom.guide.appendChild(guide)
+
+  const grid = dom.document.createElement('div')
+  grid.className = 'FlLRca_grid FlLRca_gridOne'
+  for (const card of [...guide.children]) grid.appendChild(card)
+  guide.appendChild(grid)
+
+  const moreSlot = dom.document.createElement('div')
+  moreSlot.className = 'FlLRca_moreSlot'
+  const moreButton = dom.document.createElement('button')
+  moreButton.className = 'FlLRca_card FlLRca_moreCard'
+  moreButton.setAttribute('data-guide-more', 'true')
+  moreButton.setAttribute('aria-label', '更多')
+  moreSlot.appendChild(moreButton)
+  grid.appendChild(moreSlot)
+
+  const handle = mountRightDockEntry({ doc: dom.document })
+  const entry = pluginEntry(dom)
+
+  assert.ok(entry, '卡片必须挂载')
+  assert.equal(entry.parentNode, grid, '插进网格本体，而不是列容器或 root')
+  assert.equal(grid.children.length, 5, '三张原生卡片 + UR 卡片 + 更多槽')
+  const index = grid.children.indexOf(entry)
+  const moreIndex = grid.children.indexOf(moreSlot)
+  assert.equal(index, 3, '排在三张原生卡片之后')
+  assert.equal(moreIndex, 4, '「更多」仍在最后')
+  assert.ok(index < moreIndex, '必须在「更多」上面')
+
+  handle.dispose()
+  assert.equal(grid.children.length, 4, 'dispose 后网格恢复原样')
 })

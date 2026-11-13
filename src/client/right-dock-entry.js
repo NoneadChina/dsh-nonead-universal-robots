@@ -396,7 +396,28 @@ export function mountRightDockEntry({
   }
 
   /**
-   * 入口卡片缺失或被 React 抹掉时重新插回（插在最后一张原生卡片之后）。
+   * 卡片该插到哪个位置。
+   *
+   * `dsh-better-sidebar` 会让引导列溢出时在网格末尾追加一张「更多」（`[data-guide-more]`，
+   * 外层是 `FlLRca_moreSlot`）。直接 append 到列容器会排到它**下面**；这里在有「更多」时
+   * 返回它前一个节点作为插入点，把本插件的卡片放到它**上面**。
+   *
+   * @returns {{container: object, before?: object}}
+   */
+  const entryMountPoint = (guide) => {
+    const host = entryHost(guide)
+    const more = host.querySelector?.('[data-guide-more]')
+    const moreSlot = more?.parentElement
+    const grid = moreSlot?.parentElement
+    if (moreSlot && grid && typeof grid.insertBefore === 'function') {
+      return { container: grid, before: moreSlot }
+    }
+    return { container: host }
+  }
+
+  /**
+   * 入口卡片缺失或被 React 抹掉时重新插回（默认排在最后一张原生卡片之后；
+   * 引导列溢出、末尾有「更多」卡片时排在它**上面**，见 `entryMountPoint()`）。
    *
    * 卡片**延迟到引导列就绪时才创建**：插件在客户端启动时就挂载，那时右栏往往还没渲染
    * （原生卡片取不到 ⇒ 只能退回自建卡片）。若首次创建时没有原生卡片可克隆，而之后引导列
@@ -437,7 +458,9 @@ export function mountRightDockEntry({
     }
 
     paintActive()
-    entryHost(guide).appendChild(entry)
+    const { container, before } = entryMountPoint(guide)
+    if (before) container.insertBefore(entry, before)
+    else container.appendChild(entry)
   }
 
   /* ---------------- 右栏 3D 面板 ---------------- */
