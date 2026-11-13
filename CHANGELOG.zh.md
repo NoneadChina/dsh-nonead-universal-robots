@@ -15,8 +15,11 @@
 ### 修复 —— 右栏入口在第三方侧边栏接管「开始」面板时不出现
 
 - **注入根选择器去掉值限定**：`[data-sidebar-right-guide="true"]` → `[data-sidebar-right-guide]`。同一个右栏引导列钩子有两种渲染形态：shell 自带的 `ShippedGuide` 用布尔属性（落成 `="true"`），而接管「开始」面板的第三方侧边栏（实测 `dsh-better-sidebar` 0.32.1 的 `GuideRoot`）写成 `=""`。带值的旧选择器只命中前者；后者下 `ensureEntry()` 静默返回 —— 界面既没有入口卡片，也没有任何报错（`apply()` 不抛错，client entry 仍显示"已激活"）。
-- **回归用例**：`test/right-dock-entry.test.mjs` 新增第 ⑪ 条，用空串属性的引导列断言卡片仍被插入。
-- **验证**：`node --test test/right-dock-entry.test.mjs` 11/11 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（`lib/client.js` 可由 `src/client/**` 逐字节重建）。
+- **克隆卡片兼容第三方卡片的类名**：旧白名单只保留 `entryIcon` / `entryText`，而 `dsh-better-sidebar` 的卡片结构是 `cardMain` > (`cardIcon`, `cardText` > `cardTitle` / `cardDesc`)。旧逻辑把唯一子节点 `cardMain` 当快捷键提示删掉，克隆结果是一张空的 56px 卡片。白名单与图标/标题/描述选择器都改为同时认两套命名。
+- **保留原生卡片的哈希类名**：旧逻辑在类名不含 `entry` 时把克隆结果改名为 `dsh-ur-twin-right-entry`，于是 `FlLRca_card` 上的背景、边框、圆角、内边距与悬停效果全丢；现在只在类名为空时补名。
+- **插入位置改为列容器**：`dsh-better-sidebar` 的结构是 `root[data-dsh-guide-grid] > 列容器 > card*`，且列容器带 `margin-block:auto` 参与垂直居中。旧逻辑把卡片追加到 `root` 上，会落在居中块之外被挤出可视区；现在识别 `data-dsh-guide-grid` 后追加到第一个子容器（列容器）内，与三张原生卡片同列同宽。
+- **回归用例**：`test/right-dock-entry.test.mjs` 新增第 ⑪ 条（空串属性的引导列仍能插入）与第 ⑫ 条（`card*` 结构：插入列容器、保留卡片类名、`cardMain` 不被删）。
+- **验证**：`node --test test/right-dock-entry.test.mjs` 12/12 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（`lib/client.js` 可由 `src/client/**` 逐字节重建）。
 
 ## [0.8.6] - 2026-11-04
 

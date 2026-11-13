@@ -562,3 +562,56 @@ test('⑪ 引导列渲染成空串属性（第三方侧边栏形态）时仍能�
 
   handle.dispose()
 })
+
+test('⑫ 第三方侧边栏的 card* 结构：插进列容器、保留卡片外观、cardMain 不被删', () => {
+  const dom = createFakeDom()
+  // dsh-better-sidebar 渲染成 `root[data-dsh-guide-grid] > GuideGrid(.guide) > card.FlLRca_card`；
+  // root 是 flex column + 列容器 margin-block:auto，卡片若插在 root 上会被居中块挤出可视区。
+  dom.guide.setAttribute('data-sidebar-right-guide', '')
+  dom.guide.setAttribute('data-dsh-guide-grid', 'true')
+  const inner = dom.document.createElement('div')
+  inner.className = 'FlLRca_guide'
+  for (const card of [...dom.guide.children]) inner.appendChild(card)
+  dom.guide.appendChild(inner)
+
+  // 卡片内部换成 better-sidebar 的命名，并带一个菜单按钮（克隆时必须被丢掉）。
+  for (const [id, card] of Object.entries(dom.nativeCards)) {
+    card.className = 'FlLRca_card'
+    for (const child of [...card.children]) card.removeChild(child)
+    const main = dom.document.createElement('button')
+    main.className = 'FlLRca_cardMain'
+    const icon = dom.document.createElement('span')
+    icon.className = 'FlLRca_cardIcon'
+    icon.innerHTML = '<svg id="native-icon"></svg>'
+    const text = dom.document.createElement('span')
+    text.className = 'FlLRca_cardText'
+    const title = dom.document.createElement('span')
+    title.className = 'FlLRca_cardTitle'
+    title.textContent = id
+    const description = dom.document.createElement('span')
+    description.className = 'FlLRca_cardDesc'
+    description.textContent = `${id} 描述`
+    text.appendChild(title)
+    text.appendChild(description)
+    main.appendChild(icon)
+    main.appendChild(text)
+    card.appendChild(main)
+    const menu = dom.document.createElement('button')
+    menu.className = 'FlLRca_cardMenuButton'
+    card.appendChild(menu)
+  }
+
+  const handle = mountRightDockEntry({ doc: dom.document })
+  const entry = pluginEntry(dom)
+
+  assert.ok(entry, '卡片必须插进列容器（root 的查询仍能命中）')
+  assert.equal(inner.children.length, 4, '插进 .guide 列容器，与三张原生卡片同列')
+  assert.equal(dom.guide.children.length, 1, 'root 仍只持有列容器一个子节点')
+  assert.ok(String(entry.className).includes('FlLRca_card'), '保留原生卡片的哈希类名（外观全靠它）')
+  assert.equal(entry.children.length, 1, '只留 cardMain，菜单按钮被丢掉')
+  assert.equal(entry.children[0].className, 'FlLRca_cardMain')
+  assert.equal(entry.querySelector('[class*="cardTitle"]').textContent, RIGHT_ENTRY_LABEL)
+  assert.equal(entry.querySelector('[class*="cardDesc"]').textContent, RIGHT_ENTRY_DESCRIPTION)
+
+  handle.dispose()
+})

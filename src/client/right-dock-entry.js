@@ -233,10 +233,13 @@ function cloneNativeEntry(doc) {
   }
   if (!clone || typeof clone.querySelector !== 'function') return undefined
 
-  // 去掉快捷键提示：按类名排除，只留图标槽与文案块（类名是哈希的，故用"保留白名单"）。
+  // 去掉快捷键提示/菜单按钮，只留图标槽与文案块（类名是哈希的，故用"保留白名单"）。
+  // 两种侧边栏形态的命名不同，白名单都要认：
+  //   shell 自带卡片  entryIcon / entryText
+  //   dsh-better-sidebar  cardMain > (cardIcon, cardText > cardTitle/cardDesc)
   for (const child of [...(clone.children ?? [])]) {
     const className = String(child?.className ?? '')
-    if (!/entryIcon|entryText/.test(className)) {
+    if (!/entryIcon|entryText|entryMain|cardIcon|cardText|cardMain/i.test(className)) {
       try {
         child.remove?.()
       } catch {
@@ -245,16 +248,18 @@ function cloneNativeEntry(doc) {
     }
   }
 
-  const icon = clone.querySelector('[class*="entryIcon"]')
+  const icon = clone.querySelector('[class*="entryIcon"], [class*="cardIcon"]')
   if (icon) icon.innerHTML = CARD_ICON
-  const title = clone.querySelector('[class*="entryTitle"]')
+  const title = clone.querySelector('[class*="entryTitle"], [class*="cardTitle"]')
   if (title) title.textContent = S.dockLabel
-  const description = clone.querySelector('[class*="entryDescription"]')
+  const description = clone.querySelector('[class*="entryDescription"], [class*="cardDesc"]')
   if (description) description.textContent = S.dockDescription
 
   clone.removeAttribute?.('data-sidebar-right-guide-entry')
   clone.removeAttribute?.('aria-keyshortcuts')
-  if (typeof clone.className === 'string' && !clone.className.includes('entry')) {
+  // 原生卡片的哈希类名**必须保留**：背景、边框、圆角、内边距与悬停效果全靠它。
+  // 只有连类名都没有的极简环境才补一个自己的类名。
+  if (typeof clone.className === 'string' && clone.className.trim() === '') {
     clone.className = 'dsh-ur-twin-right-entry'
   }
   return clone
@@ -355,6 +360,20 @@ export function mountRightDockEntry({
   const guideRoot = () => doc.querySelector(RIGHT_GUIDE_SELECTOR)
 
   /**
+   * 卡片实际要插进的容器。
+   *
+   * shell 自带的引导列**本身就是卡片列**（`guide > card*`）；而 dsh-better-sidebar 把它渲染成
+   * `root[data-dsh-guide-grid] > GuideGrid(列容器) > card*`。后者若插在 root 上，会落在这个
+   * 垂直居中的列容器之外（`.FlLRca_guide{margin-block:auto}`），卡片被挤到可视区外。
+   */
+  const entryHost = (guide) => {
+    if (!guide.hasAttribute?.('data-dsh-guide-grid')) return guide
+    const first = guide.children?.[0]
+    if (!first || first.hasAttribute?.('data-sidebar-right-guide-entry')) return guide
+    return first
+  }
+
+  /**
    * 入口卡片缺失或被 React 抹掉时重新插回（插在最后一张原生卡片之后）。
    *
    * 卡片**延迟到引导列就绪时才创建**：插件在客户端启动时就挂载，那时右栏往往还没渲染
@@ -396,7 +415,7 @@ export function mountRightDockEntry({
     }
 
     paintActive()
-    guide.appendChild(entry)
+    entryHost(guide).appendChild(entry)
   }
 
   /* ---------------- 右栏 3D 面板 ---------------- */
