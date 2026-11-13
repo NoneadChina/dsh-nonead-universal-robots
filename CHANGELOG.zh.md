@@ -46,6 +46,15 @@
 - **回归用例**：新增 `test/guide-entry.test.mjs`（12 条）覆盖定义结构、图标省略、正文组件、同步注册、服务晚到、注册抛错、无服务可等待、无 React、dispose 幂等与晚到不注册；`test/test-manifest.json` 的 `nodeOnly` 登记该文件（44 个测试文件：Python 11 / Node 33）。
 - **验证**：`node --test test/guide-entry.test.mjs` 12/12；`node scripts/run-tests.mjs --skip-python` 共 58 项（通过 42 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（691.4 KB，正文 sha256 `4e916562e4932834…`）。
 
+### 变更 —— 入口卡片图标改为「虚拟框 + 机械臂 + 关节点」
+
+- **替换旧的抽象图标**：原来是「一条轨道 + 圆心」，与机械臂、数字孪生都看不出关系。新图标同时表达两个语义 —— **虚线 L 形框**是数字孪生所在的虚拟空间（虚线即"非实体"），**实线折线 + 三个关节点**是 UR 机械臂的典型轮廓（基座柱 → 上臂 → 前臂；关节是 UR 的辨识特征）。
+- **为 16px 设计**：引导列图标实际显示约 16–22px，所以整图只保留 3 条路径 + 3 个圆点，去掉整圈外框（16px 下会糊成一团灰），只留左 + 上两条边形成"画布"感并留出呼吸位。
+- **跟随主题**：全部 `currentColor` + `fill: none` 纯描边，描边 1.7、`strokeLinecap/join: round`，在浅色/深色与 hover 态下都不需要单独配色。
+- **尺寸跟随宿主**：`createGuideIcon(react, size)` 保留；`guide[].icon` 现在把宿主传入的 `props.size` 透传给图标，缺省 16（宿主签名是 `ComponentType<{ size?: number }>`）。
+- **回归用例**：`test/guide-entry.test.mjs` 新增 2 条 —— 图标结构（虚线框 `strokeDasharray`、3 段折线、3 个关节点、`currentColor`、`aria-hidden`）与 `size` 透传（22/18/缺省 16）。
+- **验证**：`node --test test/guide-entry.test.mjs` 14/14；`node scripts/run-tests.mjs --skip-python` 共 58 项（通过 42 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（691.5 KB，正文 sha256 `408b40cec298dce2…`）。
+
 ## [0.8.6] - 2026-11-04
 
 ### 兼容性 —— 显式覆盖「当前宿主 + 历史宿主」，并把旧配置/旧数据的兼容性变成门禁

@@ -14,6 +14,7 @@ import {
   GUIDE_ENTRY_KIND,
   SLOT_TAB_BODY,
   createGuideDefinition,
+  createGuideIcon,
   createTabBody,
   getReact,
   registerGuideEntry,
@@ -105,6 +106,41 @@ test('createGuideDefinition：id/kind/标题与引导项结构', () => {
   const withReact = createGuideDefinition({ strings, react: fakeReact })
   assert.equal(typeof withReact.guide[0].icon, 'function')
   assert.equal(withReact.guide[0].icon().type, 'svg')
+})
+
+test('createGuideIcon：虚线虚拟空间 + 实线机械臂 + 三个关节点', () => {
+  const icon = createGuideIcon(fakeReact, 22)
+  assert.equal(icon.type, 'svg')
+  assert.equal(icon.props.width, 22)
+  assert.equal(icon.props.height, 22)
+  assert.equal(icon.props.viewBox, '0 0 24 24')
+  // 跟随主题：不写死颜色，也不给填充
+  assert.equal(icon.props.stroke, 'currentColor')
+  assert.equal(icon.props.fill, 'none')
+  assert.equal(icon.props['aria-hidden'], 'true')
+
+  const [frame, base, arm, ...joints] = icon.children
+  assert.equal(icon.children.length, 6) // 框 + 底座 + 臂 + 3 个关节点
+  // 虚拟空间用虚线区分实体；这是图标「数字孪生」语义的唯一来源，不能丢
+  assert.equal(frame.type, 'path')
+  assert.equal(frame.props.strokeDasharray, '2.4 2.2')
+  assert.equal(base.type, 'path')
+  assert.equal(arm.type, 'path')
+  // 机械臂是 3 段折线（起点 2 个坐标 + 立柱 1 个 + 两段折线各 2 个 = 7 个数）
+  assert.equal((arm.props.d.match(/-?\d*\.?\d+/g) ?? []).length, 7)
+  assert.equal(joints.length, 3)
+  for (const joint of joints) {
+    assert.equal(joint.type, 'circle')
+    assert.ok(joint.props.r > 0)
+  }
+})
+
+test('createGuideIcon：宿主按 size prop 渲染时尺寸跟随，缺省 16', () => {
+  const def = createGuideDefinition({ strings, react: fakeReact })
+  const icon = def.guide[0].icon
+  assert.equal(icon({ size: 22 }).props.width, 22)
+  assert.equal(icon({ size: 18 }).props.height, 18)
+  assert.equal(icon().props.width, 16)
 })
 
 test('getReact：无 require 的运行时返回 null（降级信号）', () => {

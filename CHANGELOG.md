@@ -46,6 +46,15 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **Regression tests**: new `test/guide-entry.test.mjs` (12 cases) covers definition shape, omitted icon, body component, synchronous registration, late service, throwing register, waitable-but-absent service, missing React, idempotent dispose and "no registration after dispose"; `test/test-manifest.json` lists it under `nodeOnly` (44 test files: Python 11 / Node 33).
 - **Verification**: `node --test test/guide-entry.test.mjs` 12/12; `node scripts/run-tests.mjs --skip-python` 58 items (42 passed / 0 failed / 16 skipped); `check-client-bundle` PASS (691.4 KB, body sha256 `4e916562e4932834…`).
 
+### Changed — the dock entry icon is now "virtual frame + robot arm + joints"
+
+- **Replaces the old abstract glyph**: the previous icon was "an orbit plus a centre dot", which said nothing about a robot arm or a digital twin. The new one carries both meanings — a **dashed L-shaped frame** is the virtual space the twin lives in (dashed = not physical), and a **solid polyline plus three joints** is the UR arm outline (base column → upper arm → forearm; the joints are what makes a UR recognisable).
+- **Designed for 16px**: the guide icon actually renders at roughly 16–22px, so the whole figure keeps only 3 paths and 3 dots, and drops a full outer frame (it turns into a grey blob at 16px). Leaving just the left and top edges reads as a "canvas" and keeps breathing room.
+- **Follows the theme**: entirely `currentColor` + `fill: none` strokes (width 1.7, round caps/joins), so light, dark and hover states need no separate colour.
+- **Size follows the host**: `createGuideIcon(react, size)` is unchanged, while `guide[].icon` now forwards the host's `props.size` and defaults to 16 (the host signature is `ComponentType<{ size?: number }>`).
+- **Regression tests**: two new cases in `test/guide-entry.test.mjs` — icon structure (dashed frame `strokeDasharray`, 3-segment polyline, 3 joints, `currentColor`, `aria-hidden`) and `size` forwarding (22 / 18 / default 16).
+- **Verification**: `node --test test/guide-entry.test.mjs` 14/14; `node scripts/run-tests.mjs --skip-python` 58 items (42 passed / 0 failed / 16 skipped); `check-client-bundle` PASS (691.5 KB, body sha256 `408b40cec298dce2…`).
+
 ## [0.8.6] - 2026-11-04
 
 ### Compatibility — declare the current host explicitly, keep every older host working, and gate both

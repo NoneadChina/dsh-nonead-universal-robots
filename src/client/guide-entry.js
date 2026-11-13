@@ -55,7 +55,19 @@ export function getReact() {
   return null
 }
 
-/** 入口图标：一条轨道 + 圆心，风格与宿主引导列一致（纯 stroke，跟随 currentColor）。 */
+/**
+ * 入口图标：「虚线框（虚拟空间）+ 实线机械臂 + 三个关节点」。
+ *
+ * 设计取舍（都在 16px 下实测过）：
+ * - **虚线 L 形框**代表数字孪生所在的虚拟空间，虚线是「非实体」的最短表达；
+ *   画整圈会让 16px 下变成一团灰，只留左+上两边的 L 形既有"画布"感又留出呼吸位。
+ * - **实线折线**是 UR 机械臂的典型轮廓（基座柱 → 上臂 → 前臂），三段折线在 16px 下仍可辨。
+ * - **三个关节点**是 UR 区别于普通"机器人"图标的关键特征（UR 的卖点就是关节力矩控制）。
+ * - 全部 `currentColor` + 纯 stroke，跟随宿主主题与 hover 态，不写死品牌色。
+ *
+ * @param {object} react React 实例（宿主 module loader 提供）
+ * @param {number} [size=16] 像素边长；宿主通常传 16/22
+ */
 export function createGuideIcon(react, size = 16) {
   const h = react.createElement
   return h(
@@ -66,13 +78,21 @@ export function createGuideIcon(react, size = 16) {
       viewBox: '0 0 24 24',
       fill: 'none',
       stroke: 'currentColor',
-      strokeWidth: 1.8,
+      strokeWidth: 1.7,
       strokeLinecap: 'round',
       strokeLinejoin: 'round',
       'aria-hidden': 'true',
     },
-    h('path', { d: 'M12 3v3.5M12 17.5V21M4.6 7.6l3 1.75M16.4 14.65l3 1.75M4.6 16.4l3-1.75M16.4 9.35l3-1.75' }),
-    h('circle', { cx: 12, cy: 12, r: 3.2 }),
+    // 虚拟空间：虚线 L 形框（左 + 上）
+    h('path', { d: 'M3.6 20.4V5.6A1.6 1.6 0 0 1 5.2 4h15.2', strokeDasharray: '2.4 2.2' }),
+    // 底座
+    h('path', { d: 'M5.6 19.6h11.2' }),
+    // 机械臂：基座柱 → 上臂 → 前臂
+    h('path', { d: 'M7.2 19.6v-4.4l4.8-3.9 3.9 2.9' }),
+    // 三个关节点（UR 的辨识特征）
+    h('circle', { cx: 7.2, cy: 15.2, r: 1 }),
+    h('circle', { cx: 12, cy: 11.3, r: 1 }),
+    h('circle', { cx: 15.9, cy: 14.2, r: 1 }),
   )
 }
 
@@ -85,7 +105,8 @@ export function createGuideIcon(react, size = 16) {
  * @param {{strings: {dockLabel: string, dockDescription: string}, react?: object|null}} options
  */
 export function createGuideDefinition({ strings, react }) {
-  const icon = react ? () => createGuideIcon(react) : undefined
+  // 宿主可能以 `{size}` 渲染图标（`ComponentType<{size?: number}>`），透传尺寸；缺省 16。
+  const icon = react ? (props) => createGuideIcon(react, props?.size ?? 16) : undefined
   return {
     id: GUIDE_ENTRY_ID,
     kind: GUIDE_ENTRY_KIND,
