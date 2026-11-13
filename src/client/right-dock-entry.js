@@ -406,11 +406,12 @@ export function mountRightDockEntry({
    */
   const entryMountPoint = (guide) => {
     const host = entryHost(guide)
-    const more = host.querySelector?.('[data-guide-more]')
+    // 「更多」不一定落在 host 的直接子树里（两列网格、额外包装层都可能），
+    // 从引导列根节点往下找更稳；找不到再退回 host。
+    const more = guide.querySelector?.('[data-guide-more]') ?? host.querySelector?.('[data-guide-more]')
     const moreSlot = more?.parentElement
-    const grid = moreSlot?.parentElement
-    if (moreSlot && grid && typeof grid.insertBefore === 'function') {
-      return { container: grid, before: moreSlot }
+    if (moreSlot && typeof moreSlot.parentElement?.insertBefore === 'function') {
+      return { container: moreSlot.parentElement, before: moreSlot }
     }
     return { container: host }
   }
@@ -428,13 +429,24 @@ export function mountRightDockEntry({
     const guide = guideRoot()
     if (!guide || typeof guide.appendChild !== 'function') return
 
+    const { container, before } = entryMountPoint(guide)
+
     const native = doc.querySelector(RIGHT_GUIDE_ENTRY_SELECTOR)
     // 只在**确实能克隆**时才升级，否则退回卡片会被每帧重建。
     const canClone = native !== null && typeof native.cloneNode === 'function'
     const upgradeable = entry !== undefined && !entryCloned && canClone
 
-    // 已在位且无需升级：什么都不做（自愈重插也必须复用同一个节点，不能每帧重建）。
-    if (entry !== undefined && isConnected(entry) && !upgradeable) return
+    // 已在位且无需升级：只在**位置确实不对**时纠一次，其余什么都不做
+    // （自愈重插也必须复用同一个节点，不能每帧重建）。
+    if (entry !== undefined && isConnected(entry) && !upgradeable) {
+      // React 重渲染可能把卡片挪到「更多」后面；它不是 detached，光靠 isConnected 看不出来。
+      const kids = container.children || []
+      const at = kids.indexOf(entry)
+      const ref = before ? kids.indexOf(before) : -1
+      if (before && entry.parentNode === container && at > ref) container.insertBefore(entry, before)
+      else if (before && entry.parentNode !== container) container.insertBefore(entry, before)
+      return
+    }
 
     if (upgradeable) {
       try {
@@ -458,7 +470,6 @@ export function mountRightDockEntry({
     }
 
     paintActive()
-    const { container, before } = entryMountPoint(guide)
     if (before) container.insertBefore(entry, before)
     else container.appendChild(entry)
   }

@@ -18,8 +18,8 @@
 - **克隆卡片兼容第三方卡片的类名**：旧白名单只保留 `entryIcon` / `entryText`，而 `dsh-better-sidebar` 的卡片结构是 `cardMain` > (`cardIcon`, `cardText` > `cardTitle` / `cardDesc`)。旧逻辑把唯一子节点 `cardMain` 当快捷键提示删掉，克隆结果是一张空的 56px 卡片。白名单与图标/标题/描述选择器都改为同时认两套命名。
 - **保留原生卡片的哈希类名**：旧逻辑在类名不含 `entry` 时把克隆结果改名为 `dsh-ur-twin-right-entry`，于是 `FlLRca_card` 上的背景、边框、圆角、内边距与悬停效果全丢；现在只在类名为空时补名。
 - **插入位置改为列容器**：`dsh-better-sidebar` 的结构是 `root[data-dsh-guide-grid] > 列容器 > card*`，且列容器带 `margin-block:auto` 参与垂直居中。旧逻辑把卡片追加到 `root` 上，会落在居中块之外被挤出可视区；现在识别 `data-dsh-guide-grid` 后追加到第一个子容器（列容器）内，与三张原生卡片同列同宽。
-- **排在「更多」卡片上面**：`dsh-better-sidebar` 在引导列溢出时会在网格末尾追加一张「更多」（`[data-guide-more]`，外层是 `FlLRca_moreSlot`）。直接追加到容器会排到它下面；新增 `entryMountPoint()`，在有「更多」时用 `insertBefore` 插到该槽位之前，无「更多」时仍追加到末尾。
-- **回归用例**：`test/right-dock-entry.test.mjs` 新增第 ⑪ 条（空串属性的引导列仍能插入）与第 ⑫ 条（`card*` 结构：插入列容器、保留卡片类名、`cardMain` 不被删）与第 ⑮ 条（「更多」存在时插在它上面，dispose 后网格恢复原样）。
+- **排在「更多」卡片上面**：`dsh-better-sidebar` 在引导列溢出时会在网格末尾追加一张「更多」（`[data-guide-more]`，外层是 `FlLRca_moreSlot`）。直接追加会排到它下面；新增 `entryMountPoint()`，从引导列根节点向下定位「更多」，并用 `insertBefore` 把卡片插到该槽位**正前方**。宿主重渲染若把卡片挪到「更多」后面（节点仍 connected，`isConnected` 看不出），下一次 flush 会按位置校验把它纠回来。
+- **回归用例**：`test/right-dock-entry.test.mjs` 新增第 ⑪ 条（空串属性的引导列仍能插入）、第 ⑫ 条（`card*` 结构：插入列容器、保留卡片类名、`cardMain` 不被删）、第 ⑮ 条（「更多」存在时插在它上面，dispose 后网格恢复原样）与第 ⑯ 条（卡片被挪到「更多」之后时 flush 纠回）。
 - **验证**：`node --test test/right-dock-entry.test.mjs` 12/12 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（`lib/client.js` 可由 `src/client/**` 逐字节重建）。
 
 ### 修复 —— 入口卡片文案跟随宿主语言实时切换

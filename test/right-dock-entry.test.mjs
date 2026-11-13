@@ -722,3 +722,43 @@ test('⑮ 「更多」卡片存在时，UR 卡片插在它上面而不是网格�
   handle.dispose()
   assert.equal(grid.children.length, 4, 'dispose 后网格恢复原样')
 })
+
+test('⑯ 卡片被 React 挪到「更多」之后时，下一次 flush 把它纠回来', () => {
+  const dom = createFakeDom()
+  dom.guide.setAttribute('data-sidebar-right-guide', '')
+  dom.guide.setAttribute('data-dsh-guide-grid', 'true')
+  const guide = dom.document.createElement('div')
+  guide.className = 'FlLRca_guide'
+  for (const card of [...dom.guide.children]) guide.appendChild(card)
+  dom.guide.appendChild(guide)
+  const grid = dom.document.createElement('div')
+  grid.className = 'FlLRca_grid FlLRca_gridOne'
+  for (const card of [...guide.children]) grid.appendChild(card)
+  guide.appendChild(grid)
+  const moreSlot = dom.document.createElement('div')
+  moreSlot.className = 'FlLRca_moreSlot'
+  const moreButton = dom.document.createElement('button')
+  moreButton.className = 'FlLRca_card FlLRca_moreCard'
+  moreButton.setAttribute('data-guide-more', 'true')
+  moreSlot.appendChild(moreButton)
+  grid.appendChild(moreSlot)
+
+  const handle = mountRightDockEntry({ doc: dom.document })
+  const entry = pluginEntry(dom)
+  assert.ok(grid.children.indexOf(entry) < grid.children.indexOf(moreSlot), '初始在「更多」上面')
+
+  // 模拟宿主重渲染把我们的节点挪到末尾（仍是 connected，isConnected 看不出来）。
+  grid.appendChild(entry)
+  assert.equal(grid.children.indexOf(entry), grid.children.length - 1)
+
+  dom.observers[0].trigger()
+
+  assert.equal(grid.children.length, 5, '不重复插入')
+  assert.ok(
+    grid.children.indexOf(entry) < grid.children.indexOf(moreSlot),
+    'flush 后重新回到「更多」上面',
+  )
+  assert.equal(grid.children.indexOf(entry), 3)
+
+  handle.dispose()
+})
