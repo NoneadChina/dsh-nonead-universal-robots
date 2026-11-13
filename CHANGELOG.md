@@ -30,6 +30,12 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **Regression cases**: `test/strings.test.mjs` gains "notify only on a real change / nothing after unsubscribe / one throwing subscriber does not affect the others" and "recognise `payload.active` when only `locale/change` is available"; `test/right-dock-entry.test.mjs` gains case ⑬ (switch to ja → card and overlay labels update immediately without rebuilding nodes, back to default gives Chinese) and case ⑭ (after dispose, locale changes no longer touch the DOM).
 - **Verification**: `node --test test/strings.test.mjs test/right-dock-entry.test.mjs` passes 30/30; `node scripts/run-tests.mjs --skip-python` reports 57 items (41 passed / 0 failed / 16 skipped); `check-client-bundle` passes (688.2 KB).
 
+### Changed — the dock entry label now carries the brand "拓德 / Nonead" (all 8 locales)
+
+- **Brand added to the title**: `dockLabel` changes from `UR digital twin` to `拓德UR数字孪生` in Chinese and to `Nonead`-prefixed titles in every other locale — `Nonead UR digital twin` (en), `Nonead UR デジタルツイン` (ja), `Gemelo digital UR de Nonead` (es), `Jumeau numérique UR de Nonead` (fr), `Nonead UR digitaler Zwilling` (de), `Цифровой двойник UR Nonead` (ru), `Gêmeo digital UR Nonead` (pt).
+- **One key, many surfaces**: the entry title text, the overlay panel heading, `aria-label` and `title` all read the same `dockLabel`, so the rename needs no injection changes; locale switches still refresh them in place through `syncEntryText()` / `syncOverlayText()`.
+- **Verification**: `node --test test/strings.test.mjs test/right-dock-entry.test.mjs` passes 32/32; `node scripts/run-tests.mjs --skip-python` reports 57 items (41 passed / 0 failed / 16 skipped); `check-client-bundle` passes (688.7 KB).
+
 ## [0.8.6] - 2026-11-04
 
 ### Compatibility — declare the current host explicitly, keep every older host working, and gate both

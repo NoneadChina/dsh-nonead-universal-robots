@@ -118,7 +118,7 @@ export const zh = {
   trajectoryResume: '继续记录',
   trajectoryExport: '导出轨迹',
 
-  dockLabel: 'UR 数字孪生',
+  dockLabel: '拓德UR数字孪生',
   dockDescription: '机器人实时孪生视图',
   dockCollapse: '收起',
 }
@@ -215,7 +215,7 @@ export const en = {
   trajectoryResume: 'Resume path',
   trajectoryExport: 'Export path',
 
-  dockLabel: 'UR digital twin',
+  dockLabel: 'Nonead UR digital twin',
   dockDescription: 'Live robot twin view',
   dockCollapse: 'Collapse',
 }
@@ -312,7 +312,7 @@ export const ja = {
   trajectoryResume: '記録を再開',
   trajectoryExport: '軌跡を書き出す',
 
-  dockLabel: 'UR デジタルツイン',
+  dockLabel: 'Nonead UR デジタルツイン',
   dockDescription: 'ロボットのリアルタイムツイン表示',
   dockCollapse: '折りたたむ',
 }
@@ -409,7 +409,7 @@ export const es = {
   trajectoryResume: 'Reanudar registro',
   trajectoryExport: 'Exportar trayectoria',
 
-  dockLabel: 'Gemelo digital UR',
+  dockLabel: 'Gemelo digital UR de Nonead',
   dockDescription: 'Vista en vivo del gemelo del robot',
   dockCollapse: 'Contraer',
 }
@@ -506,7 +506,7 @@ export const fr = {
   trajectoryResume: "Reprendre l'enregistrement",
   trajectoryExport: 'Exporter la trajectoire',
 
-  dockLabel: 'Jumeau numérique UR',
+  dockLabel: 'Jumeau numérique UR de Nonead',
   dockDescription: 'Vue en direct du jumeau du robot',
   dockCollapse: 'Replier',
 }
@@ -603,7 +603,7 @@ export const de = {
   trajectoryResume: 'Aufzeichnung fortsetzen',
   trajectoryExport: 'Bahn exportieren',
 
-  dockLabel: 'UR digitaler Zwilling',
+  dockLabel: 'Nonead UR digitaler Zwilling',
   dockDescription: 'Live-Ansicht des Roboter-Zwillings',
   dockCollapse: 'Einklappen',
 }
@@ -700,7 +700,7 @@ export const ru = {
   trajectoryResume: 'Продолжить запись',
   trajectoryExport: 'Экспорт траектории',
 
-  dockLabel: 'Цифровой двойник UR',
+  dockLabel: 'Цифровой двойник UR Nonead',
   dockDescription: 'Вид двойника робота в реальном времени',
   dockCollapse: 'Свернуть',
 }
@@ -797,7 +797,7 @@ export const pt = {
   trajectoryResume: 'Retomar gravação',
   trajectoryExport: 'Exportar trajetória',
 
-  dockLabel: 'Gêmeo digital UR',
+  dockLabel: 'Gêmeo digital UR Nonead',
   dockDescription: 'Visão ao vivo do gêmeo do robô',
   dockCollapse: 'Recolher',
 }

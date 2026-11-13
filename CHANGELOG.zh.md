@@ -30,6 +30,12 @@
 - **回归用例**：`test/strings.test.mjs` 新增「只在语言真正改变时通知 / 退订后不再收到 / 单订户抛错不影响其它」与「只有 `locale/change` 时认 `payload.active`」；`test/right-dock-entry.test.mjs` 新增第 ⑬ 条（切 ja → 卡片与覆盖层文案即时更新且节点不重建，回缺省变中文）与第 ⑭ 条（dispose 后语言变化不再触碰 DOM）。
 - **验证**：`node --test test/strings.test.mjs test/right-dock-entry.test.mjs` 30/30 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（688.2 KB）。
 
+### 变更 —— 入口卡片名加入品牌「拓德 / Nonead」（8 语言同步）
+
+- **标题统一加品牌**：`dockLabel` 从 `UR 数字孪生` 改为 `拓德UR数字孪生`；「拓德」在其它语言里按品牌名 `Nonead` 保持不译 —— `Nonead UR digital twin`（en）、`Nonead UR デジタルツイン`（ja）、`Gemelo digital UR de Nonead`（es）、`Jumeau numérique UR de Nonead`（fr）、`Nonead UR digitaler Zwilling`（de）、`Цифровой двойник UR Nonead`（ru）、`Gêmeo digital UR Nonead`（pt）。
+- **一处改动多处生效**：入口卡片的标题文本、覆盖层面板标题、`aria-label` 与 `title` 都取自同一个 `dockLabel`，因此改名不需要碰注入逻辑；语言切换时仍由 `syncEntryText()` / `syncOverlayText()` 就地刷新。
+- **验证**：`node --test test/strings.test.mjs test/right-dock-entry.test.mjs` 32/32 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（688.7 KB）。
+
 ## [0.8.6] - 2026-11-04
 
 ### 兼容性 —— 显式覆盖「当前宿主 + 历史宿主」，并把旧配置/旧数据的兼容性变成门禁
