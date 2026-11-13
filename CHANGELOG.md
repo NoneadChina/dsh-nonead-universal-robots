@@ -2,6 +2,16 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-11-13
+
+### Compatibility — narrow the supported window to DSH `0.2.1` – `<0.3.0` (breaking: drops 0.1.x / 0.2.0)
+
+- **`peerDependencies` collapsed into a single window**: `@deepseek-ai/dsh` / `dsh-tools` become `>=0.2.1-0 <0.3.0 || >=0.2.2-0 <0.2.3`; cordis becomes `>=4.0.5-0 <5.0.0 || >=4.0.6-0 <4.0.7`; schemastery becomes `>=3.18.5-0 <4.0.0 || >=3.18.6-0 <3.18.7`. The `-0` suffix covers every pre-release of that triple, so the alpha/rc builds of 0.2.1 and 0.2.2 (and cordis 4.0.5/4.0.6, schemastery 3.18.5/3.18.6) all install.
+- **The current host `0.2.2-rc.2` is inside the window** (cordis 4.1.0 / schemastery 3.19.0); the `<0.3.0` bound means `0.3.0` and later need a fresh declaration.
+- **`0.1.x` and `0.2.0` are no longer declared**: the backward-compatibility matrix drops the entries that only belonged to them (`0.1.2-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.2`, cordis 4.0.2, schemastery 3.18.2) and pins `0.2.1-alpha.1` / `0.2.1-rc.1` / `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` plus their cordis 4.0.5-alpha.1/alpha.2, 4.0.6-alpha.1/alpha.2 and schemastery 3.18.5-alpha.1/alpha.2, 3.18.6-alpha.1/alpha.2 as must-cover versions.
+- **Verification**: `npm run check:host:strict` passes end to end — 4 peers satisfied, 4 matrices green (10 versions for dsh/dsh-tools, 7 for cordis/schemastery), and all 104 tools register through the host's real DSL.
+- **Declaration, gate script and docs only**: `lib/`, `python/` and `src/` are untouched.
+
 ## [0.8.6] - 2026-11-04
 
 ### Compatibility — declare the current host explicitly, keep every older host working, and gate both

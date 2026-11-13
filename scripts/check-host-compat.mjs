@@ -457,8 +457,8 @@ else {
     /*
      * 失败时给**可直接粘贴**的修法。semver 对预发布的规则是：只有当范围里存在
      * 显式带同一 major.minor.patch 的预发布比较器时，该三元组的预发布版本才可能被匹配。
-     * 所以把上界写宽（例如 `>=0.1.2-rc.1 <0.3.0`）**并不能**覆盖 0.2.2-alpha.3 ——
-     * 必须为每个预发布三元组补一段 `>=X.Y.Z-pre <X.Y.(Z+1)`；正式版则由大区间自动覆盖。
+     * 所以把上界写宽（例如 `>=0.2.1-0 <0.3.0`）**并不能**覆盖 0.2.2-rc.2 ——
+     * 必须为每个预发布三元组补一段 `>=X.Y.Z-0 <X.Y.(Z+1)`；正式版则由大区间自动覆盖。
      */
     const parsed = semver.parse(installed)
     const hint = parsed?.prerelease?.length
@@ -474,10 +474,10 @@ else {
    * 预发布版本的纯区间时，这里立刻变红 —— 而不是等某个还在用旧宿主的用户装不上才发现。
    */
   const PEER_HISTORY = {
-    '@deepseek-ai/dsh': ['0.1.2-rc.1', '0.1.7-rc.2', '0.2.0-rc.2', '0.2.1-alpha.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2', '0.2.9'],
-    '@deepseek-ai/dsh-tools': ['0.1.2-rc.1', '0.1.7-rc.2', '0.2.0-rc.2', '0.2.1-alpha.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2', '0.2.9'],
-    '@deepseek-ai/cordis': ['4.0.2', '4.0.5-alpha.2', '4.0.6-alpha.1', '4.0.6-alpha.2', '4.0.6', '4.1.0'],
-    '@deepseek-ai/schemastery': ['3.18.2', '3.18.5-alpha.2', '3.18.6-alpha.1', '3.18.6-alpha.2', '3.18.6', '3.19.0'],
+    '@deepseek-ai/dsh': ['0.2.1-alpha.1', '0.2.1-alpha.5', '0.2.1-rc.1', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2', '0.2.9'],
+    '@deepseek-ai/dsh-tools': ['0.2.1-alpha.1', '0.2.1-alpha.5', '0.2.1-rc.1', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2', '0.2.9'],
+    '@deepseek-ai/cordis': ['4.0.5-alpha.1', '4.0.5-alpha.2', '4.0.5', '4.0.6-alpha.1', '4.0.6-alpha.2', '4.0.6', '4.1.0'],
+    '@deepseek-ai/schemastery': ['3.18.5-alpha.1', '3.18.5-alpha.2', '3.18.5', '3.18.6-alpha.1', '3.18.6-alpha.2', '3.18.6', '3.19.0'],
   }
   for (const [name, versions] of Object.entries(PEER_HISTORY)) {
     const declared = manifest.peerDependencies?.[name]
