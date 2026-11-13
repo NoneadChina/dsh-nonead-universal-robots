@@ -3,9 +3,17 @@
  *
  * ## 为什么仍是 DOM 注入（沿用 Ruling 30）
  * DSH 的右 dock 也没有向外部插件开放注册插槽，唯一可行做法是把入口卡片**插进 shell 的 DOM**。
- * 位置：`[data-sidebar-right-guide="true"]`（右栏「开始」面板的引导列）**最后一个原生入口之后**，
+ * 位置：`[data-sidebar-right-guide]`（右栏「开始」面板的引导列）**最后一个原生入口之后**，
  * 即「工作区文件 / 新建终端 / 浏览器」三张卡片的下面。锚点全部用 shell 的 `data-*` 钩子：
- * - `[data-sidebar-right-guide="true"]` 引导列容器（注入根）
+ * - `[data-sidebar-right-guide]` 引导列容器（注入根）
+ *
+ * ⚠️ 这个属性**不能带值限定**。同一个钩子有两种渲染形态：
+ * - shell 自带的 `ShippedGuide` 用 React 布尔属性 `data-sidebar-right-guide` ⇒ 落成 `="true"`；
+ * - 接管右栏「开始」面板的第三方侧边栏（实测 `dsh-better-sidebar` 0.32.1 的 `GuideRoot`）
+ *   写成 `data-sidebar-right-guide=""` ⇒ 落成**空串**。
+ * 早期这里写死了 `="true"`，于是前者能命中、后者永远命中不到：注入代码静默 return，
+ * 界面既没有卡片也没有报错（`mountRightDockEntry` 不抛错，entry 仍是"已激活"）。
+ * 因此改用无值选择器；`[data-sidebar-right-guide]` 不会误命中 `-entry` 属性（不同属性名）。
  * - `[data-sidebar-right-guide-entry]` 原生入口卡片（定位"最后一张"；也用于"点了别的卡片就收起"）
  * - `[data-sidebar-right-tab]` 右栏 tab 内容体（由 guide 向上 `closest` 取得，**不是**同名的标签标题节点）
  * 不要用 `NXjQza_*` / `_keys_*` 这类 CSS Modules 哈希类名做锚点：它们随构建变化。
@@ -51,8 +59,8 @@ import { liveStrings } from './strings.js'
  * 真实锚点与标记常量
  * ------------------------------------------------------------------ */
 
-/** 右栏「开始」面板的引导列容器（**注入根**）。 */
-export const RIGHT_GUIDE_SELECTOR = '[data-sidebar-right-guide="true"]'
+/** 右栏「开始」面板的引导列容器（**注入根**）；不限定属性值，见文件头注释。 */
+export const RIGHT_GUIDE_SELECTOR = '[data-sidebar-right-guide]'
 
 /** 原生引导卡片（三张：files / terminal / browser）。 */
 export const RIGHT_GUIDE_ENTRY_SELECTOR = '[data-sidebar-right-guide-entry]'

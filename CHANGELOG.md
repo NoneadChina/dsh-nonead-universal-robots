@@ -10,7 +10,13 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **The current host `0.2.2-rc.2` is inside the window** (cordis 4.1.0 / schemastery 3.19.0); the `<0.3.0` bound means `0.3.0` and later need a fresh declaration.
 - **`0.1.x` and `0.2.0` are no longer declared**: the backward-compatibility matrix drops the entries that only belonged to them (`0.1.2-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.2`, cordis 4.0.2, schemastery 3.18.2) and pins `0.2.1-alpha.1` / `0.2.1-rc.1` / `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` plus their cordis 4.0.5-alpha.1/alpha.2, 4.0.6-alpha.1/alpha.2 and schemastery 3.18.5-alpha.1/alpha.2, 3.18.6-alpha.1/alpha.2 as must-cover versions.
 - **Verification**: `npm run check:host:strict` passes end to end — 4 peers satisfied, 4 matrices green (10 versions for dsh/dsh-tools, 7 for cordis/schemastery), and all 104 tools register through the host's real DSL.
-- **Declaration, gate script and docs only**: `lib/`, `python/` and `src/` are untouched.
+- **Mostly declaration, gate script and docs work**, plus one client-side (`src/client/`) compatibility fix described below.
+
+### Fixed — the right-dock entry disappears when a third-party sidebar takes over the start panel
+
+- **The injection-root selector no longer pins the attribute value**: `[data-sidebar-right-guide="true"]` → `[data-sidebar-right-guide]`. The same right-dock guide hook is rendered two ways: the shell's own `ShippedGuide` uses a React boolean attribute (which lands as `="true"`), while a third-party sidebar that replaces the start panel (observed on `dsh-better-sidebar` 0.32.1's `GuideRoot`) writes `=""`. The value-pinned selector only matched the first form; under the second, `ensureEntry()` returned silently — no entry card and no error, because `apply()` never throws and the client entry still reports itself as activated.
+- **Regression case**: `test/right-dock-entry.test.mjs` gains case ⑪, which builds a guide root with the empty-string attribute and asserts the card is still injected.
+- **Verification**: `node --test test/right-dock-entry.test.mjs` passes 11/11; `node scripts/run-tests.mjs --skip-python` reports 57 items (41 passed / 0 failed / 16 skipped); `check-client-bundle` passes (`lib/client.js` rebuilds byte-for-byte from `src/client/**`).
 
 ## [0.8.6] - 2026-11-04
 

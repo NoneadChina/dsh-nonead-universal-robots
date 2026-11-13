@@ -10,7 +10,13 @@
 - **当前宿主 `0.2.2-rc.2` 在窗口内**（cordis 4.1.0 / schemastery 3.19.0）；`<0.3.0` 上界意味着 `0.3.0` 起需要重新声明。
 - **不再声明 `0.1.x` 与 `0.2.0`**：向后兼容矩阵同步移除仅属于它们的条目（`0.1.2-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.2`、cordis 4.0.2、schemastery 3.18.2），并补齐 `0.2.1-alpha.1` / `0.2.1-rc.1` / `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` 以及对应的 cordis 4.0.5-alpha.1/alpha.2、4.0.6-alpha.1/alpha.2，schemastery 3.18.5-alpha.1/alpha.2、3.18.6-alpha.1/alpha.2 为必须覆盖项。
 - **校验**：`npm run check:host:strict` 全部通过 —— 4 个 peer 满足、4 个兼容矩阵全绿（dsh/dsh-tools 各 10 个版本、cordis/schemastery 各 7 个）、104/104 工具在宿主真实 DSL 注册成功。
-- **仅依赖声明、门禁脚本与文档变更**：`lib/`、`python/`、`src/` 未改动。
+- **主体是依赖声明、门禁脚本与文档变更**；另含一处客户端（`src/client/`）兼容修复，见下节。
+
+### 修复 —— 右栏入口在第三方侧边栏接管「开始」面板时不出现
+
+- **注入根选择器去掉值限定**：`[data-sidebar-right-guide="true"]` → `[data-sidebar-right-guide]`。同一个右栏引导列钩子有两种渲染形态：shell 自带的 `ShippedGuide` 用布尔属性（落成 `="true"`），而接管「开始」面板的第三方侧边栏（实测 `dsh-better-sidebar` 0.32.1 的 `GuideRoot`）写成 `=""`。带值的旧选择器只命中前者；后者下 `ensureEntry()` 静默返回 —— 界面既没有入口卡片，也没有任何报错（`apply()` 不抛错，client entry 仍显示"已激活"）。
+- **回归用例**：`test/right-dock-entry.test.mjs` 新增第 ⑪ 条，用空串属性的引导列断言卡片仍被插入。
+- **验证**：`node --test test/right-dock-entry.test.mjs` 11/11 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（`lib/client.js` 可由 `src/client/**` 逐字节重建）。
 
 ## [0.8.6] - 2026-11-04
 

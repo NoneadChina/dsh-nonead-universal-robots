@@ -546,5 +546,19 @@ test('⑩ 全局单例 observer：再次挂载不新建 observer', () => {
 
   first.dispose()
   second.dispose()
-  assert.equal(RIGHT_GUIDE_SELECTOR, '[data-sidebar-right-guide="true"]')
+})
+
+test('⑪ 引导列渲染成空串属性（第三方侧边栏形态）时仍能插入卡片', () => {
+  const dom = createFakeDom()
+  // dsh-better-sidebar 的 GuideRoot 写 `data-sidebar-right-guide=""`，
+  // 而 shell 自带的 ShippedGuide 是布尔属性 ⇒ "true"。选择器不能带值限定。
+  dom.guide.setAttribute('data-sidebar-right-guide', '')
+
+  const handle = mountRightDockEntry({ doc: dom.document })
+
+  assert.equal(RIGHT_GUIDE_SELECTOR, '[data-sidebar-right-guide]')
+  assert.ok(pluginEntry(dom), '空串属性的引导列也必须命中注入根')
+  assert.equal(dom.guide.children.length, 4, '四张卡片：三张原生 + 本插件')
+
+  handle.dispose()
 })
