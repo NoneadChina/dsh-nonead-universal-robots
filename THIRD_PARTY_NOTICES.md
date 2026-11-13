@@ -95,6 +95,9 @@
 |---|---|---|
 | [three.js](https://threejs.org/) | 客户端 3D 渲染（`GLTFLoader` / `ColladaLoader` / `OrbitControls`） | MIT |
 | [esbuild](https://esbuild.github.io/) | 仅构建期：打包客户端 bundle | MIT |
+| [React](https://react.dev/) / [react-dom](https://react.dev/) | 入口卡片图标与右栏 tab 正文（`require("react")`） | MIT |
+
+> `react` / `react-dom` **不随本包分发**，也不打进 `lib/client.js`：构建时以 `--external:react` 交给宿主，运行期由 DSH 宿主的模块加载器提供。宿主没有 React 时，插件自动退回纯 DOM 路径（不注册 tab 正文，卡片仍可用）。
 
 ---
 
@@ -102,7 +105,7 @@
 
 本插件本体（`lib/`、`python/ur_worker.py`）的许可见仓库根 `LICENSE`。
 `python/URBasic`（vendored）保持其自身 **MIT** 许可，不在本项目双许可范围内。
-`lib/client.js` 是 esbuild 打包产物，**内嵌了 three.js（MIT）的代码**，因此 three.js 的 MIT 声明也必须随包分发。
+`lib/client.js` 是 esbuild 打包产物，**内嵌了 three.js（MIT）的代码**，因此 three.js 的 MIT 声明也必须随包分发；`react` / `react-dom` 保持 external，由宿主在运行期提供，不内嵌。
 
 > 本文件通过 `package.json` 的 `files` 白名单随 npm 包发布；`python/URBasic/**/*.py` 也随包发布。
 

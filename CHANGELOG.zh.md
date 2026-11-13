@@ -55,6 +55,13 @@
 - **回归用例**：`test/guide-entry.test.mjs` 新增 2 条 —— 图标结构（虚线框 `strokeDasharray`、3 段折线、3 个关节点、`currentColor`、`aria-hidden`）与 `size` 透传（22/18/缺省 16）。
 - **验证**：`node --test test/guide-entry.test.mjs` 14/14；`node scripts/run-tests.mjs --skip-python` 共 58 项（通过 42 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（691.5 KB，正文 sha256 `408b40cec298dce2…`）。
 
+### 文档 —— README 与第三方许可同步到 0.9.0
+
+- 两份 README 的安装版本标更新为 `0.9.0`，并注明 0.9.0 尚在发布流程中、注册表上最新的已发布版仍是 `0.8.6`（取不到 0.9.0 时改用 `0.8.6`，或按「方式二」从本地检出安装）。
+- 「只读 3D 数字孪生」段改写入口说明：卡片已**正式注册**到宿主的开始页类型表（`ctx.sidebarRightTabs.register`），与原生卡片同列、排在「更多」卡片之上，并可在侧边栏插件的「调整顺序」里排序/隐藏；图标是「虚线虚拟框 + UR 机械臂折线 + 三个关节点」；宿主没有 React 时退回 DOM 克隆路径。
+- 「语言」段补充 0.9.0 的品牌文案与**免刷新即时切换**，并改正 locale 服务的读取方式（`ctx.get('locale')`；`dsh.client.inject` 已在 0.8.2 移除）。
+- 测试徽章与「健康检查 / 测试」段更新为 **58 项 / 44 个测试文件**（Python 11 / Node 33）。
+- `THIRD_PARTY_NOTICES.md` 的「前端与构建依赖」补充 React / react-dom（MIT；由宿主以 external 提供，不随包分发、不打进 `lib/client.js`）。
 ## [0.8.6] - 2026-11-04
 
 ### 兼容性 —— 显式覆盖「当前宿主 + 历史宿主」，并把旧配置/旧数据的兼容性变成门禁

@@ -55,6 +55,13 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **Regression tests**: two new cases in `test/guide-entry.test.mjs` — icon structure (dashed frame `strokeDasharray`, 3-segment polyline, 3 joints, `currentColor`, `aria-hidden`) and `size` forwarding (22 / 18 / default 16).
 - **Verification**: `node --test test/guide-entry.test.mjs` 14/14; `node scripts/run-tests.mjs --skip-python` 58 items (42 passed / 0 failed / 16 skipped); `check-client-bundle` PASS (691.5 KB, body sha256 `408b40cec298dce2…`).
 
+### Docs — READMEs and third-party notices synced to 0.9.0
+
+- Both READMEs now advertise **0.9.0** and state that 0.9.0 is still in the release pipeline (the latest published release on the registry is **0.8.6**; if 0.9.0 is not served yet, pin `0.8.6` or install from a local checkout via Option 2).
+- The "Read-only 3D digital twin" section now describes the card as **registered** with the host's start-page type table (`ctx.sidebarRightTabs.register`): same grid as the native cards, directly above "More", sortable/hideable from the sidebar plugin's "Reorder" dialog, with the dashed-virtual-frame + UR-arm + joint-dots icon, and a DOM-clone fallback when the host does not expose React.
+- The "Languages" section documents the 0.9.0 brand copy and **reload-free language switching**, and corrects how the locale service is reached (`ctx.get('locale')`; `dsh.client.inject` was removed in 0.8.2).
+- Test badge and "Health check / testing" now read **58 items / 44 test files** (Python 11 / Node 33).
+- `THIRD_PARTY_NOTICES.md` lists React / react-dom (MIT; supplied as a host external, not redistributed and not bundled into `lib/client.js`).
 ## [0.8.6] - 2026-11-04
 
 ### Compatibility — declare the current host explicitly, keep every older host working, and gate both

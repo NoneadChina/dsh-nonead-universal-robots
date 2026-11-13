@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/dsh-nonead-universal-robots.svg?logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/dsh-nonead-universal-robots) [![npm downloads](https://img.shields.io/npm/dm/dsh-nonead-universal-robots.svg?logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/dsh-nonead-universal-robots) [![CI](https://img.shields.io/github/actions/workflow/status/NoneadChina/dsh-nonead-universal-robots/ci.yml?branch=main&label=CI&logo=github)](https://github.com/NoneadChina/dsh-nonead-universal-robots/actions) [![tag](https://img.shields.io/github/v/tag/NoneadChina/dsh-nonead-universal-robots?label=tag&logo=git&logoColor=white)](https://github.com/NoneadChina/dsh-nonead-universal-robots/tags) [![stars](https://img.shields.io/github/stars/NoneadChina/dsh-nonead-universal-robots?logo=github)](https://github.com/NoneadChina/dsh-nonead-universal-robots/stargazers) [![license](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-orange)](./LICENSE)
 
-[![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org) [![python](https://img.shields.io/badge/python-3.9%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org) [![tools](https://img.shields.io/badge/tools-104-blue)](#工具命名与示例) [![languages](https://img.shields.io/badge/languages-8-8A2BE2)](./src/client/strings.js) [![robot](https://img.shields.io/badge/Universal%20Robots-UR3e%20~%20UR30-00A3E0)](#工具命名与示例) [![tests](https://img.shields.io/badge/tests-57%20items-brightgreen)](#健康检查--测试)
+[![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org) [![python](https://img.shields.io/badge/python-3.9%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org) [![tools](https://img.shields.io/badge/tools-104-blue)](#工具命名与示例) [![languages](https://img.shields.io/badge/languages-8-8A2BE2)](./src/client/strings.js) [![robot](https://img.shields.io/badge/Universal%20Robots-UR3e%20~%20UR30-00A3E0)](#工具命名与示例) [![tests](https://img.shields.io/badge/tests-58%20items-brightgreen)](#健康检查--测试)
 
 **一个让 DSH 用自然语言直接控制 Universal Robots（UR）机械臂的插件，由拓德科技（Nonead）基于自研的 nUR MCP Server 同源逻辑开发。**（[Suzhou Nonead Robot Technology Co., Ltd.](https://www.nonead.com)）
 
@@ -71,7 +71,7 @@
 
 ## 只读 3D 数字孪生
 
-插件还内置机器人的**只读 3D 数字孪生**（three.js 渲染）：入口是**右侧栏**「开始」面板里的一张卡片，位置在「工作区文件 / 新建终端 / 浏览器」三张卡片下面；点击后 3D 视图占满右侧栏的内容区。视图订阅宿主的 **SSE 实时流**（`/twin/stream`，100 ms 一帧），始终与真机同步显示**关节姿态、TCP 坐标系与近期运动轨迹**。数字孪生**严格只读，绝不下发任何机器人指令** —— 它只订阅 host 的只读路由并渲染收到的数据。工具栏提供「重置视角」与等轴测/前视/侧视/俯视四个预设，且相机与基座网格按模型包围盒取景 —— UR3 与 UR20 都能正确入画。数值面板还会显示 dashboard 侧状态（安全模式、机器人模式、程序状态、速度倍率、关节温度、母线电压电流），同样走这条路由、按较慢的节拍取。
+插件还内置机器人的**只读 3D 数字孪生**（three.js 渲染）：入口是**右侧栏**「开始」面板里的一张卡片 —— 它**正式注册**到宿主的开始页类型表（`ctx.sidebarRightTabs.register(...)`），因此与原生卡片同列、排在「更多」卡片**之上**，也会出现在侧边栏插件的**「调整顺序」**对话框里（可排序、可隐藏），图标是「虚线虚拟框 + UR 机械臂折线 + 三个关节点」；若宿主未提供 React，插件退回 DOM 克隆卡片的旧路径，功能不变；点击后 3D 视图占满右侧栏的内容区。视图订阅宿主的 **SSE 实时流**（`/twin/stream`，100 ms 一帧），始终与真机同步显示**关节姿态、TCP 坐标系与近期运动轨迹**。数字孪生**严格只读，绝不下发任何机器人指令** —— 它只订阅 host 的只读路由并渲染收到的数据。工具栏提供「重置视角」与等轴测/前视/侧视/俯视四个预设，且相机与基座网格按模型包围盒取景 —— UR3 与 UR20 都能正确入画。数值面板还会显示 dashboard 侧状态（安全模式、机器人模式、程序状态、速度倍率、关节温度、母线电压电流），同样走这条路由、按较慢的节拍取。
 
 运动期间也不会停更：遥测由 worker **主动推送**（20 Hz），孪生的每一帧优先读这份推送缓存、**不经过那条单线程命令队列** —— 机器人运动时，运动确认循环占住的是命令队列，而 RTDE 缓存由 URBasic 自己的接收线程持续更新，推送因此照常到达（协议上是一条不带 `id` 的 JSON 行，旧宿主只会把它当成匹配不上的响应，向后兼容）。缓存过期（>300 ms）或缺失时才回退到显式读；孪生的读仍只带 **2.5 s 的专用预算且超时不杀 worker**：一条只读可视化读**绝不能**把整条机器人会话（RTDE/Dashboard）带走。万一真的停滞，流里仍会推 `stale` 事件、面板写出「数据已停止更新 Ns · 正在重试」，绝不静静冻住。断线后无限重连（指数退避封顶 30 s），窗口重新可见或停滞过久时立即重试。诊断时可用 `DSH_UR_TWIN_PUSH=0` 关掉推送做对照。
 
@@ -92,12 +92,12 @@ host 侧路由（均限定 loopback 调用方）：
 
 ## 语言（界面文案）
 
-自 **0.8.0** 起，孪生面板与右栏入口卡片已本地化为**八种语言**：
+自 **0.8.0** 起，孪生面板与右栏入口卡片已本地化为**八种语言**；自 **0.9.0** 起卡片名带品牌（中文「拓德UR数字孪生」，其余语言用 `Nonead`），且**切换语言后卡片与面板文字即时更新、无需刷新页面**：
 
 > 简体中文 · English · 日本語 · Español · Français · Deutsch · Русский · Português (Brasil)
 
 语言**跟随 DSH 桌面程序的语言**：八份字典通过宿主自带的 `@deepseek-ai/dsh-client-locale` 注册
-（`dsh.client.inject` + `ctx.locale.register('ur-twin', …)`），由宿主的 `locale.preference` 决定用哪份。
+（`ctx.get('locale')` + `ctx.locale.register('ur-twin', …)`；未经 `inject` 声明的服务只能经 `ctx.get` 读取），由宿主的 `locale.preference` 决定用哪份。
 在**设置 → 界面语言**里切换，面板**无需刷新页面**即生效。宿主没有 locale 服务时，回退顺序是
 `navigator.languages` → `navigator.language` → 简体中文。
 
@@ -109,7 +109,7 @@ host 侧路由（均限定 loopback 调用方）：
 ## 安装到 DSH profile
 
 > 📦 **已发布到 npm**：[`dsh-nonead-universal-robots`](https://www.npmjs.com/package/dsh-nonead-universal-robots)
-> —— 当前版本 **0.8.6**。最快的是下面的「方式零」：不需要从 GitHub 下 tarball，也不需要本地检出。
+> —— 本仓库当前版本 **0.9.0**（0.9.0 仍在发布流程中；注册表上最新的已发布版是 **0.8.6**，若取不到 0.9.0 请把下文版本号换成 `0.8.6`，或改用「方式二」从本地检出安装）。最快的是下面的「方式零」：不需要从 GitHub 下 tarball，也不需要本地检出。
 
 ### 方式零：从 npm 安装（推荐）
 
@@ -117,14 +117,14 @@ host 侧路由（均限定 loopback 调用方）：
 # DSH Desktop 会为每个 profile 生成一个 CLI 包装器，它会自己补上 --profile：
 dsh.cmd plugin add dsh-nonead-universal-robots
 # 需要锁定版本时：
-dsh.cmd plugin add dsh-nonead-universal-robots@0.8.6
+dsh.cmd plugin add dsh-nonead-universal-robots@0.9.0
 # 其他环境：dsh plugin --profile <profile> add dsh-nonead-universal-robots
 ```
 
 也可以直接写进 profile 的 `package.json` —— 默认就从注册表取：
 
 ```jsonc
-"dependencies": { "dsh-nonead-universal-robots": "^0.8.6" }
+"dependencies": { "dsh-nonead-universal-robots": "^0.9.0" }
 ```
 
 如果要把 tarball 内联进别的包，`npm install dsh-nonead-universal-robots` 同样可用。安装进来的副本包含
@@ -161,7 +161,7 @@ dsh.cmd plugin add "file:D:/path/to/dsh-nonead-universal-robots"
    // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.8.6"
+       "dsh-nonead-universal-robots": "^0.9.0"
        // 离线/内网环境的退路："file:D:/path/to/dsh-nonead-universal-robots"
        // 或（GitHub 可达时）："github:NoneadChina/dsh-nonead-universal-robots"
      },
@@ -210,7 +210,7 @@ pip install -r requirements.txt
 
 ```sh
 npm run test:python   # python ur_worker.py --selfcheck：校验 Python/numpy/paramiko/URBasic/RTDE 配置
-npm test              # 56 项：42 个测试文件 + 9 条门禁 + 5 个离线探针，最后汇总
+npm test              # 58 项：44 个测试文件 + 9 条门禁 + 5 个离线探针，最后汇总
 npm run test:node     # 只跑 Node 侧：跳过需要 Python 的测试文件**与门禁**
 npm run check         # 只跑静态 + 跨语言门禁，不跑测试文件
 npm run verify:host   # 用宿主真实的 schema DSL 校验全部工具注册与 peer 版本
@@ -219,9 +219,9 @@ npm run verify:models # 校验 14 个 GLB 的结构契约
 
 `npm test` 跑两类东西，两类都必须过：
 
-- **42 个测试文件**（端到端协议自检、审批门禁、孪生路由、客户端状态机、FK、vendored 库回归）。名单来自 `test/test-manifest.json`，并由 `check:manifest` 保证"会调用 Python 的用例"不会被漏登记。
+- **44 个测试文件**（端到端协议自检、审批门禁、孪生路由、客户端状态机、FK、vendored 库回归）。名单来自 `test/test-manifest.json`，并由 `check:manifest` 保证"会调用 Python 的用例"不会被漏登记。
 - **9 条门禁** 加上 **5 个离线探针**：`check-test-manifest` / `check-package-metadata` / `check-client-bundle` / `check-doc-tools`（Node），`check-worker-ops` / `check-tool-params` / `check-rtde-recipe` / `check-approval-gate` / `check-new-ops`（Python），随后是 `scripts/probe-*.mjs` 那几个孪生/SSE 探针。
-- **宿主兼容检查**也会被尝试（`check-host-compat --allow-missing-host`）。它是**环境项**，因此在汇总里单独占一行、**不计入上面的 56 项**：没装 DSH Desktop 的机器得到一条带原因的响亮 `SKIP`（绝不静默放行）；提供了宿主的机器/CI 会变成 `PASS`。
+- **宿主兼容检查**也会被尝试（`check-host-compat --allow-missing-host`）。它是**环境项**，因此在汇总里单独占一行、**不计入上面的 58 项**：没装 DSH Desktop 的机器得到一条带原因的响亮 `SKIP`（绝不静默放行）；提供了宿主的机器/CI 会变成 `PASS`。
 
 **被跳过不等于通过。** 只要有项目被跳过，整轮就以非零退出 —— 想接受跳过必须显式要求（`--allow-skip`，或 Node-only 的 `--skip-python`），而**全部被跳过时无论如何都算失败**。两个探针需要全局 `EventSource`，用 `--experimental-eventsource` 运行（Node ≥22.3）；再加上 `module.registerHooks`（Node ≥22.15），真实的开发下限记录在 `devEngines` 里。
 

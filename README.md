@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/dsh-nonead-universal-robots.svg?logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/dsh-nonead-universal-robots) [![npm downloads](https://img.shields.io/npm/dm/dsh-nonead-universal-robots.svg?logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/dsh-nonead-universal-robots) [![CI](https://img.shields.io/github/actions/workflow/status/NoneadChina/dsh-nonead-universal-robots/ci.yml?branch=main&label=CI&logo=github)](https://github.com/NoneadChina/dsh-nonead-universal-robots/actions) [![tag](https://img.shields.io/github/v/tag/NoneadChina/dsh-nonead-universal-robots?label=tag&logo=git&logoColor=white)](https://github.com/NoneadChina/dsh-nonead-universal-robots/tags) [![stars](https://img.shields.io/github/stars/NoneadChina/dsh-nonead-universal-robots?logo=github)](https://github.com/NoneadChina/dsh-nonead-universal-robots/stargazers) [![license](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-orange)](./LICENSE)
 
-[![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org) [![python](https://img.shields.io/badge/python-3.9%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org) [![tools](https://img.shields.io/badge/tools-104-blue)](#tool-naming--examples) [![languages](https://img.shields.io/badge/languages-8-8A2BE2)](./src/client/strings.js) [![robot](https://img.shields.io/badge/Universal%20Robots-UR3e%20~%20UR30-00A3E0)](#tool-naming--examples) [![tests](https://img.shields.io/badge/tests-57%20items-brightgreen)](#health-check--testing)
+[![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org) [![python](https://img.shields.io/badge/python-3.9%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org) [![tools](https://img.shields.io/badge/tools-104-blue)](#tool-naming--examples) [![languages](https://img.shields.io/badge/languages-8-8A2BE2)](./src/client/strings.js) [![robot](https://img.shields.io/badge/Universal%20Robots-UR3e%20~%20UR30-00A3E0)](#tool-naming--examples) [![tests](https://img.shields.io/badge/tests-58%20items-brightgreen)](#health-check--testing)
 
 **A DeepSeek Harness (DSH) plugin that lets you control Universal Robots (UR) collaborative arms directly from natural language, developed by Suzhou Nonead Robot Technology Co., Ltd. based on the same logic as the company's own nUR MCP Server.** ([Suzhou Nonead Robot Technology Co., Ltd.](https://www.nonead.com))
 
@@ -71,7 +71,7 @@ Every tool except `connect` takes an `ip` argument and requires that IP to be **
 
 ## Read-only 3D digital twin
 
-The plugin also ships a **read-only 3D digital twin** of the robot, rendered with three.js: the entry is a card in the **right sidebar's Start panel**, directly below the "Workspace files / New terminal / Browser" cards, and selecting it fills the right sidebar's content area with the live 3D view. The view subscribes to the host's **SSE stream** (`/twin/stream`, one frame every 100 ms) and stays in sync with the live robot's **joint poses, tool (TCP) coordinate frame and recent motion trajectory**. The twin is **strictly read-only — it never sends a command to the robot**: it only subscribes to the host's read-only routes and renders what it receives. A toolbar offers a reset-view control plus isometric / front / side / top presets, and the camera and base grid are framed from the model's bounding box, so a UR3 and a UR20 are both framed correctly. The numeric panel also shows the dashboard-side state (safety mode, robot mode, program state, speed scaling, joint temperatures, bus voltage/current), taken from the same route on a slower cadence.
+The plugin also ships a **read-only 3D digital twin** of the robot, rendered with three.js: the entry is a card in the **right sidebar's Start panel** — it is **registered** with the host's start-page type table (`ctx.sidebarRightTabs.register(...)`), so it sits in the same grid as the native cards, directly **above** the "More" card, and shows up in the sidebar plugin's **"Reorder"** dialog (sortable and hideable); its icon is a dashed virtual frame plus a UR arm polyline and three joint dots. If the host does not expose React, the plugin falls back to the old DOM-cloned card path with the same behaviour, and selecting it fills the right sidebar's content area with the live 3D view. The view subscribes to the host's **SSE stream** (`/twin/stream`, one frame every 100 ms) and stays in sync with the live robot's **joint poses, tool (TCP) coordinate frame and recent motion trajectory**. The twin is **strictly read-only — it never sends a command to the robot**: it only subscribes to the host's read-only routes and renders what it receives. A toolbar offers a reset-view control plus isometric / front / side / top presets, and the camera and base grid are framed from the model's bounding box, so a UR3 and a UR20 are both framed correctly. The numeric panel also shows the dashboard-side state (safety mode, robot mode, program state, speed scaling, joint temperatures, bus voltage/current), taken from the same route on a slower cadence.
 
 The feed does not stall while the robot moves: telemetry is **pushed by the worker** at 20 Hz, and every twin frame reads that push cache first — **without touching the single-threaded command queue**, which is what a running motion confirmation loop occupies. On the wire a push is simply a JSON line without `id`, so an older host treats it as an unmatched response and nothing breaks. Only when the cache is stale (>300 ms) or missing does the twin fall back to an explicit read, and twin reads still use a dedicated **2.5 s budget with `killOnTimeout:false`** — a read-only visualisation read must never destroy the robot session (RTDE/Dashboard) just because it was busy. If a stall does happen, the stream emits `stale` events and the panel says "data stopped updating Ns · retrying" rather than leaving a silently frozen arm on screen. After a disconnect the stream reconnects indefinitely (exponential backoff capped at 30 s) and retries immediately when the window becomes visible again or the feed has been stalled too long. Set `DSH_UR_TWIN_PUSH=0` to turn the push channel off for comparison.
 
@@ -92,12 +92,12 @@ Failure responses carry a **machine-readable `code`** (`no_robot` / `robot_not_c
 
 ## Languages (UI copy)
 
-Since **0.8.0** the twin panel and the right-dock entry are localised into **eight languages**:
+Since **0.8.0** the twin panel and the right-dock entry are localised into **eight languages**; since **0.9.0** the card name carries the brand (中文「拓德UR数字孪生」, `Nonead` elsewhere) and the card/panel copy updates **immediately on a language switch, with no reload**:
 
 > 简体中文 · English · 日本語 · Español · Français · Deutsch · Русский · Português (Brasil)
 
 The language **follows the DSH Desktop app language**: the eight dictionaries are registered with the
-host's `@deepseek-ai/dsh-client-locale` (`dsh.client.inject` + `ctx.locale.register('ur-twin', …)`),
+host's `@deepseek-ai/dsh-client-locale` (`ctx.get('locale')` + `ctx.locale.register('ur-twin', …)`; a service not declared in `inject` must be reached through `ctx.get`),
 and the host's `locale.preference` decides which one is used. Switching the language in
 **Settings → 界面语言 / Language** updates the panel **without a reload**. Without a host locale
 service the plugin falls back to `navigator.languages` → `navigator.language` → Simplified Chinese.
@@ -110,7 +110,7 @@ adding a language means adding one dictionary — the key set is enforced by tes
 ## Install into a DSH profile
 
 > 📦 **Published on npm** as [`dsh-nonead-universal-robots`](https://www.npmjs.com/package/dsh-nonead-universal-robots)
-> — current release **0.8.6**. The npm route (Option 0) is the simplest: no GitHub tarball download
+> — this repository is at **0.9.0** (0.9.0 is still in the release pipeline; the latest published release on the registry is **0.8.6** — use `0.8.6` in the commands below, or install from a local checkout via Option 2, if 0.9.0 is not served yet). The npm route (Option 0) is the simplest: no GitHub tarball download
 > and no local checkout.
 
 ### Option 0 — from npm (recommended)
@@ -119,14 +119,14 @@ adding a language means adding one dictionary — the key set is enforced by tes
 # DSH Desktop ships a CLI wrapper per profile; it adds --profile itself:
 dsh.cmd plugin add dsh-nonead-universal-robots
 # pin an exact version if you prefer:
-dsh.cmd plugin add dsh-nonead-universal-robots@0.8.6
+dsh.cmd plugin add dsh-nonead-universal-robots@0.9.0
 # on other setups: dsh plugin --profile <profile> add dsh-nonead-universal-robots
 ```
 
 Or write the range into the profile's `package.json` yourself — the registry is the default source:
 
 ```jsonc
-"dependencies": { "dsh-nonead-universal-robots": "^0.8.6" }
+"dependencies": { "dsh-nonead-universal-robots": "^0.9.0" }
 ```
 
 `npm install dsh-nonead-universal-robots` also works if you want to vendor the tarball into another
@@ -163,7 +163,7 @@ This is the same path the plugin page uses: it writes the dependency **and** the
    // <DSH_HOME>/profiles/<profile>/package.json
    {
      "dependencies": {
-       "dsh-nonead-universal-robots": "^0.8.6"
+       "dsh-nonead-universal-robots": "^0.9.0"
        // offline / air-gapped fallbacks: "file:D:/path/to/dsh-nonead-universal-robots"
        // or, once GitHub is reachable: "github:NoneadChina/dsh-nonead-universal-robots"
      },
@@ -213,7 +213,7 @@ Verify the plugin and Python runtime without touching a real robot:
 
 ```sh
 npm run test:python   # python ur_worker.py --selfcheck: verify Python/numpy/paramiko/URBasic/RTDE config
-npm test              # 56 items: all 42 test files + 9 gates + 5 offline probes, then a summary
+npm test              # 58 items: all 44 test files + 9 gates + 5 offline probes, then a summary
 npm run test:node     # Node side only: skip the test files *and* the gates that need Python
 npm run check         # all static + cross-language gates without running the test files
 npm run verify:host   # validate every tool schema through the host's real value-schema DSL, plus peer ranges
@@ -222,9 +222,9 @@ npm run verify:models # validate the structural contract of the 14 GLBs
 
 `npm test` runs two kinds of thing, and both must pass:
 
-- **42 test files** under `test/` (end-to-end protocol self-check, approval gate, twin routes, client state machine, FK, vendored-library regressions) — enumerated from `test/test-manifest.json`, which `check:manifest` keeps honest so a Python-using file can never be silently unlisted.
+- **44 test files** under `test/` (end-to-end protocol self-check, approval gate, twin routes, client state machine, FK, vendored-library regressions) — enumerated from `test/test-manifest.json`, which `check:manifest` keeps honest so a Python-using file can never be silently unlisted.
 - **9 check gates** plus **5 offline probes**: `check-test-manifest` / `check-package-metadata` / `check-client-bundle` / `check-doc-tools` (Node) and `check-worker-ops` / `check-tool-params` / `check-rtde-recipe` / `check-approval-gate` / `check-new-ops` (Python), then the `scripts/probe-*.mjs` twin/SSE probes.
-- The **host compatibility check** is also attempted (`check-host-compat --allow-missing-host`). It is an *environment* check, so it is reported on its own summary line and **excluded from the 56-item count**: a machine without DSH Desktop gets a loud `SKIP` with the reason, never a silent pass; a machine (or CI) that provides a host turns it into `PASS — 宿主真实 value-schema DSL 校验通过`.
+- The **host compatibility check** is also attempted (`check-host-compat --allow-missing-host`). It is an *environment* check, so it is reported on its own summary line and **excluded from the 58-item count**: a machine without DSH Desktop gets a loud `SKIP` with the reason, never a silent pass; a machine (or CI) that provides a host turns it into `PASS — 宿主真实 value-schema DSL 校验通过`.
 
 **Skipped is not green.** A run with any skipped item exits non-zero — the only way to accept skips is to ask for them explicitly (`--allow-skip`, or `--skip-python` for the Node-only run), and a run in which *everything* was skipped always fails. Two probes need a global `EventSource` and run with `--experimental-eventsource` (Node ≥22.3); between that and `module.registerHooks` (Node ≥22.15) the real development floor is recorded in `devEngines`.
 
