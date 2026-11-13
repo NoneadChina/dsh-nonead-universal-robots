@@ -36,6 +36,16 @@
 - **一处改动多处生效**：入口卡片的标题文本、覆盖层面板标题、`aria-label` 与 `title` 都取自同一个 `dockLabel`，因此改名不需要碰注入逻辑；语言切换时仍由 `syncEntryText()` / `syncOverlayText()` 就地刷新。
 - **验证**：`node --test test/strings.test.mjs test/right-dock-entry.test.mjs` 32/32 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（688.7 KB）。
 
+### 修复 —— 入口卡片改为正式注册，出现在侧边栏「调整顺序」里
+
+- **根因**：卡片此前是用 DOM 克隆塞进引导列网格的，但它不是宿主 `sidebarRightTabs.guide()` 的 live entry。`dsh-better-sidebar` 的「调整顺序 / 隐藏 / 行预算 / 『更多』卡片」全部作用在这份 catalog 上（`orderGuideEntries(guideInventory, prefs.guideOrder)`），所以克隆卡片能显示，却永远进不了排序对话框。
+- **改为正式注册**：新增 `src/client/guide-entry.js`，通过 `ctx.sidebarRightTabs.register({ id, kind, title, guide })` 把「拓德UR数字孪生」注册成开始页 catalog 的成员（id = `dsh-nonead-universal-robots/twin`，kind = `nonead-ur-twin`）。注册后卡片由宿主渲染，位置、顺序、隐藏、行预算与「更多」调度全部归宿主管，本插件不再克隆任何原生卡片。
+- **同时注册 tab 正文**：点击引导卡片走的是 `tab.actions.openTab(kind, { replaceTab: true })`（`guide.commandId` 不是点击行为），只注册 guide 会点开一张空白页。正文通过 `ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name, key }, Body))` 注册成 React 组件，组件内部再把现有 `mountTwinPanel` 的 DOM 挂进去 —— 3D 场景代码保持纯 DOM，不改成 React。
+- **React 由宿主提供**：插件 bundle 由 `window.__ModuleLoader__.load({ factory: (require) => … })` 执行，`react` 是宿主 external（与官方插件一致）。构建脚本新增 `--external:react`（CLI 与 JS API 两条路径），产物里原样保留 `require("react")`，不把 React 打进 bundle。
+- **降级路径保留**：宿主没有 React、没有 `sidebarRightTabs`、或同 id 注册抛错时，`registerGuideEntry()` 返回空值，装配回退到原来的 DOM 克隆；服务晚到时先挂克隆兜底，注册成功的那一刻通过 `onRegistered()` 拆掉克隆，避免出现两张卡片。
+- **回归用例**：新增 `test/guide-entry.test.mjs`（12 条）覆盖定义结构、图标省略、正文组件、同步注册、服务晚到、注册抛错、无服务可等待、无 React、dispose 幂等与晚到不注册；`test/test-manifest.json` 的 `nodeOnly` 登记该文件（44 个测试文件：Python 11 / Node 33）。
+- **验证**：`node --test test/guide-entry.test.mjs` 12/12；`node scripts/run-tests.mjs --skip-python` 共 58 项（通过 42 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（691.4 KB，正文 sha256 `4e916562e4932834…`）。
+
 ## [0.8.6] - 2026-11-04
 
 ### 兼容性 —— 显式覆盖「当前宿主 + 历史宿主」，并把旧配置/旧数据的兼容性变成门禁

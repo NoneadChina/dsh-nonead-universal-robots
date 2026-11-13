@@ -18,6 +18,7 @@
     "fallback-arm.test.mjs",
     "fk.test.mjs",
     "ghost-arm.test.mjs",
+    "guide-entry.test.mjs",
     "interpolate.test.mjs",
     "loader.test.mjs",
     "model-contract.test.mjs",

@@ -31,7 +31,8 @@
 import { createTwinState } from './state.js'
 import { mountRightDockEntry } from './right-dock-entry.js'
 import { mountTwinPanel } from './twin-panel.js'
-import { bindHostLocale } from './strings.js'
+import { bindHostLocale, liveStrings } from './strings.js'
+import { registerGuideEntry } from './guide-entry.js'
 
 export const name = 'ur-digital-twin-client'
 
@@ -96,6 +97,7 @@ export function apply(ctx, config) {
     at: Date.now(),
     ip,
     state,
+    guide: undefined,
     entry: undefined,
     error: null,
   }
@@ -104,20 +106,63 @@ export function apply(ctx, config) {
   ctx.logger?.info?.('[ur-twin] client half loaded')
 
   let entryHandle
+  let guideHandle
+
+  /** 面板挂载：guide tab 正文与保底覆盖层共用同一份实现。 */
+  const mountPanel = (container) => mountTwinPanel({ container, state })
 
   try {
     state.start()
 
-    entryHandle = mountRightDockEntry({
-      doc,
-      onToggle: (active) => {
-        info.active = active
-      },
-      mountPanel: (container) => mountTwinPanel({ container, state }),
-    })
+    /*
+     * 首选路径：把卡片注册成宿主开始页 catalog 的**正式成员**
+     * （`sidebarRightTabs.guide()` → better-sidebar 的 `guideCatalog` 只是它的镜像）。
+     *
+     * 只有进 catalog，卡片才会出现在「调整顺序 / 隐藏」对话框里，并受宿主的行预算、双列布局
+     * 与「更多」卡片调度。注册成功后卡片由宿主渲染，我们**不再克隆**原生卡片。
+     */
+    try {
+      guideHandle = registerGuideEntry({
+        ctx,
+        strings: liveStrings(),
+        mountPanel,
+        onRegistered: () => {
+          // 服务晚到、保底克隆已经挂上时，宿主接管后立刻撤掉克隆，避免出现两张卡片。
+          try {
+            entryHandle?.dispose?.()
+          } catch {
+            /* 忽略 */
+          }
+          entryHandle = undefined
+          info.entry = undefined
+          ctx.logger?.info?.('[ur-twin] guide entry registered — host owns the card')
+        },
+      })
+    } catch (error) {
+      guideHandle = undefined
+      ctx.logger?.warn?.(
+        `[ur-twin] guide 注册失败，回退 DOM 克隆：${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
 
+    /*
+     * 保底路径：宿主没有 `sidebarRightTabs`（旧宿主 / 未装侧边栏插件）时，继续克隆一张原生卡片。
+     * `immediate === false` 表示注册还在等服务就绪，也先挂上克隆，等 `onRegistered` 再拆。
+     */
+    if (!guideHandle?.immediate) {
+      entryHandle = mountRightDockEntry({
+        doc,
+        onToggle: (active) => {
+          info.active = active
+        },
+        mountPanel,
+      })
+    }
+
+    info.guide = guideHandle ?? null
     info.entry = entryHandle
-    ctx.logger?.info?.(`[ur-twin] mounted (ip=${ip}, surface=right-dock)`)
+    const surface = guideHandle?.immediate ? 'guide-entry' : 'right-dock'
+    ctx.logger?.info?.(`[ur-twin] mounted (ip=${ip}, surface=${surface})`)
   } catch (error) {
     // 客户端半装配失败不得拖垮 shell：如实记录到调试标记，清理函数照常返回。
     info.error = error instanceof Error ? error.message : String(error)
@@ -131,6 +176,11 @@ export function apply(ctx, config) {
       /* 忽略 */
     }
     try {
+      guideHandle?.dispose?.()
+    } catch {
+      /* 忽略 */
+    }
+    try {
       entryHandle?.dispose?.()
     } catch {
       /* 忽略 */
@@ -140,6 +190,7 @@ export function apply(ctx, config) {
     } catch {
       /* 忽略 */
     }
+    guideHandle = undefined
     entryHandle = undefined
     delete globalThis.__UR_TWIN__
   }

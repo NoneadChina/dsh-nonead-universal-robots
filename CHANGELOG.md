@@ -36,6 +36,16 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **One key, many surfaces**: the entry title text, the overlay panel heading, `aria-label` and `title` all read the same `dockLabel`, so the rename needs no injection changes; locale switches still refresh them in place through `syncEntryText()` / `syncOverlayText()`.
 - **Verification**: `node --test test/strings.test.mjs test/right-dock-entry.test.mjs` passes 32/32; `node scripts/run-tests.mjs --skip-python` reports 57 items (41 passed / 0 failed / 16 skipped); `check-client-bundle` passes (688.7 KB).
 
+### Fixed — the dock entry is now a registered member of the start page (appears in "Reorder")
+
+- **Root cause**: the card used to be a DOM clone inserted into the guide grid, but it was never a live entry of the host's `sidebarRightTabs.guide()`. `dsh-better-sidebar` drives "Reorder / hide / row budget / the More card" from that catalog (`orderGuideEntries(guideInventory, prefs.guideOrder)`), so a cloned card could render yet never appear in the reorder dialog.
+- **Registered properly**: new `src/client/guide-entry.js` registers "拓德UR数字孪生" through `ctx.sidebarRightTabs.register({ id, kind, title, guide })` (id `dsh-nonead-universal-robots/twin`, kind `nonead-ur-twin`). The host now owns the card, so its position, order, hidden state, row budget and More-card scheduling all belong to the host; the plugin no longer clones any native card.
+- **Tab body registered too**: clicking a guide card runs `tab.actions.openTab(kind, { replaceTab: true })` (`guide.commandId` is not the click behaviour), so registering only the guide entry would open a blank page. The body is registered as a React component through `ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name, key }, Body))`, and that component mounts the existing `mountTwinPanel` DOM inside itself — the 3D code stays plain DOM rather than being rewritten in React.
+- **React comes from the host**: the bundle runs inside `window.__ModuleLoader__.load({ factory: (require) => … })`, where `react` is a host external (same as official plugins). The build script now passes `--external:react` on both the CLI and JS API paths, so `require("react")` is preserved verbatim instead of bundling React.
+- **Fallback kept**: when the host has no React, no `sidebarRightTabs`, or registration throws (duplicate id), `registerGuideEntry()` returns nothing and assembly falls back to the previous DOM clone. If the service arrives late, the clone is mounted first and removed through `onRegistered()` the moment registration succeeds, so two cards never coexist.
+- **Regression tests**: new `test/guide-entry.test.mjs` (12 cases) covers definition shape, omitted icon, body component, synchronous registration, late service, throwing register, waitable-but-absent service, missing React, idempotent dispose and "no registration after dispose"; `test/test-manifest.json` lists it under `nodeOnly` (44 test files: Python 11 / Node 33).
+- **Verification**: `node --test test/guide-entry.test.mjs` 12/12; `node scripts/run-tests.mjs --skip-python` 58 items (42 passed / 0 failed / 16 skipped); `check-client-bundle` PASS (691.4 KB, body sha256 `4e916562e4932834…`).
+
 ## [0.8.6] - 2026-11-04
 
 ### Compatibility — declare the current host explicitly, keep every older host working, and gate both

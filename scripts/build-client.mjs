@@ -65,6 +65,13 @@ function runEsbuild({ headBanner, tailFooter }) {
       '--target=chrome110',
       '--minify',
       '--sourcemap',
+      // React 由宿主 module loader 提供（`window.__ModuleLoader__.load({ factory: (require) => … })`），
+      // 与官方插件一致：`dsh-better-sidebar/lib/client.js` 首部就是 `require("react")`。
+      // 标成 external 才会在产物里原样保留 require，而不是尝试把 react 打进 bundle。
+      '--external:react',
+      '--external:react-dom',
+      '--external:react-dom/client',
+      '--external:react/jsx-runtime',
       // ⚠️ CLI 的 `--banner:js=` 收的是**内联文本**，不是文件路径：
       // 传路径时 esbuild 会把"路径"本身当横幅写进产物（首行就变成路径）。
       // 用 spawnSync 的数组参数传值，不经过 shell，换行/引号都不会被解释。
@@ -87,6 +94,8 @@ function runEsbuild({ headBanner, tailFooter }) {
       target: ['chrome110'],
       minify: true,
       sourcemap: true,
+      // 与 CLI 分支同义：React 由宿主提供，不打进 bundle。
+      external: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime'],
       logLevel: 'info',
       // Ruling 32（更正 Ruling 12 的范围）：esbuild **根本没有 `intro` 选项** —— 不止 CLI，
       // JS API 同样会直接抛 `Invalid option in build() call: "intro"`（此前误判为沙箱 spawn EPERM）。
