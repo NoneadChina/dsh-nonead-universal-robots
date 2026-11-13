@@ -53,7 +53,7 @@
  */
 
 import { subscribeMutations } from './mutation-hub.js'
-import { liveStrings } from './strings.js'
+import { liveStrings, onLocaleChange } from './strings.js'
 
 /* ------------------------------------------------------------------ *
  * 真实锚点与标记常量
@@ -86,8 +86,9 @@ export const RIGHT_PANEL_HOST_ATTRIBUTE = 'data-dsh-ur-twin-right-panel'
 /**
  * 入口卡片文案（跟随当前语言）。
  *
- * ⚠️ 这三个导出常量是**模块求值期**取到的值（默认语言），只用于对外断言/测试；界面上的
- * 文案一律在构造 DOM 时读 `S.*`（`liveStrings` 的 Proxy），这样宿主切换语言后能立即生效。
+ * ⚠️ 下面三个导出常量是**模块求值期**取到的值（默认语言），只用于对外断言/测试；界面上的
+ * 文案一律在构造 DOM 时读 `S.*`（`liveStrings` 的 Proxy），并在宿主切换语言时由
+ * `onLocaleChange` → `syncEntryText` 就地重写，因此**不要**拿这些常量去渲染任何界面文本。
  */
 const S = liveStrings()
 
@@ -97,7 +98,7 @@ export const RIGHT_ENTRY_LABEL = S.dockLabel
 /** 入口卡片描述（对齐原生卡片的「浏览网页」「在会话工作区运行命令」语气）。 */
 export const RIGHT_ENTRY_DESCRIPTION = S.dockDescription
 
-/** 覆盖层标题。 */
+/** 覆盖层标题（默认语言下的取值，仅供外部断言）。 */
 export const RIGHT_PANEL_TITLE = S.dockLabel
 
 /* ------------------------------------------------------------------ *
@@ -294,6 +295,25 @@ function buildEntryElement(doc) {
 }
 
 /**
+ * 把**当前语言**的文案刷到已存在的入口卡片上（就地改文本，不重建节点）。
+ *
+ * 语言热切换时 `liveStrings` 只会让「下一次取属性」变成新语言，已经写进 DOM 的 textContent
+ * 不会自己变 —— 所以要有人主动重刷。这里同时覆盖两种卡片形态的类名，并保持
+ * `aria-label` / `title`（悬停提示、读屏）与可见标题一致。
+ *
+ * @param {Element|undefined} element
+ */
+function syncEntryText(element) {
+  if (!element || typeof element.querySelector !== 'function') return
+  const title = element.querySelector('[class*="entryTitle"], [class*="cardTitle"]')
+  if (title) title.textContent = S.dockLabel
+  const description = element.querySelector('[class*="entryDescription"], [class*="cardDesc"]')
+  if (description) description.textContent = S.dockDescription
+  element.setAttribute?.('aria-label', S.dockLabel)
+  element.setAttribute?.('title', S.dockLabel)
+}
+
+/**
  * 造入口卡片：优先克隆原生卡片（含哈希类名 ⇒ 观感/主题与三张卡片一致），
  * 原生卡片不可用时退回自建卡片。
  *
@@ -305,9 +325,8 @@ function createEntryElement(doc) {
   const entry = cloned ?? buildEntryElement(doc)
   entry.setAttribute(RIGHT_ENTRY_ATTRIBUTE, '')
   entry.setAttribute('data-dsh-plugin', 'ur-digital-twin')
-  entry.setAttribute('aria-label', S.dockLabel)
-  entry.setAttribute('title', S.dockLabel)
   entry.setAttribute('aria-pressed', 'false')
+  syncEntryText(entry)
   return { element: entry, cloned: cloned !== undefined }
 }
 
@@ -348,11 +367,14 @@ export function mountRightDockEntry({
   let entry
   let entryCloned = false
   let overlay
+  let overlayTitle
+  let overlayClose
   let panelHost
   let panel
   let hiddenGuide
   let hiddenGuideDisplay
   let unsubscribeMutations = () => {}
+  let unsubscribeLocale = () => {}
 
   /* ---------------- 入口卡片 ---------------- */
 
@@ -460,7 +482,7 @@ export function mountRightDockEntry({
     const header = doc.createElement('div')
     setStyle(header, HEADER_STYLE)
     const title = doc.createElement('span')
-    title.textContent = RIGHT_PANEL_TITLE
+    title.textContent = S.dockLabel
     setStyle(title, TITLE_STYLE)
     const close = doc.createElement('button')
     close.setAttribute('type', 'button')
@@ -479,8 +501,19 @@ export function mountRightDockEntry({
 
     root.appendChild(header)
     root.appendChild(host)
+    overlayTitle = title
+    overlayClose = close
     panelHost = host
     return root
+  }
+
+  /** 覆盖层标题与关闭按钮的读屏/悬停文案跟着语言走（节点不重建）。 */
+  const syncOverlayText = () => {
+    if (overlayTitle) overlayTitle.textContent = S.dockLabel
+    if (overlayClose) {
+      overlayClose.setAttribute('aria-label', S.dockCollapse)
+      overlayClose.setAttribute('title', S.dockCollapse)
+    }
   }
 
   const teardownOverlay = () => {
@@ -500,6 +533,8 @@ export function mountRightDockEntry({
       }
       overlay = undefined
     }
+    overlayTitle = undefined
+    overlayClose = undefined
     panelHost = undefined
     showGuide()
   }
@@ -586,6 +621,10 @@ export function mountRightDockEntry({
   const reconcile = () => {
     if (disposed) return
     ensureEntry()
+    // 语言可能刚刚切换过：`liveStrings` 只让「下一次取属性」变成新语言，已经写进 DOM 的
+    // textContent 不会自己变 —— 这里就地重刷，不重建节点。
+    syncEntryText(entry)
+    syncOverlayText()
     if (active) {
       if (guideRoot() === null || guideRoot() === undefined) setActive(false)
       else ensureOverlay()
@@ -596,6 +635,8 @@ export function mountRightDockEntry({
 
   doc.addEventListener?.('click', onDocumentClick, true)
   unsubscribeMutations = subscribeMutations(doc, options, reconcile)
+  // 宿主切换语言（设置里的语言选择）会经 strings.js 通知到这里，文案即时跟着变；无需刷新页面。
+  unsubscribeLocale = onLocaleChange(reconcile)
   ensureEntry()
 
   return {
@@ -611,6 +652,12 @@ export function mountRightDockEntry({
         /* 忽略 */
       }
       unsubscribeMutations = () => {}
+      try {
+        unsubscribeLocale()
+      } catch {
+        /* 忽略 */
+      }
+      unsubscribeLocale = () => {}
       try {
         doc.removeEventListener?.('click', onDocumentClick, true)
       } catch {

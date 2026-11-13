@@ -967,9 +967,47 @@ export function useHostLocale(ctx) {
  */
 let hostLocale
 
+/**
+ * 语言变化的订阅者。`setHostLocale` 在语言**确实改变**时逐个通知，供已经渲染到 DOM 的
+ * 文案（入口卡片、面板标题、关闭按钮）就地重写 —— `liveStrings` 只保证「下一次取属性」
+ * 是新语言，不会自己去改已经写死的 textContent。
+ * @type {Set<(locale: string|undefined) => void>}
+ */
+const localeListeners = new Set()
+
+/**
+ * 订阅宿主语言变化，返回退订函数。
+ *
+ * 回调只在语言**真正改变**时触发（重复写入同一语言不会通知），单个订阅者抛错不影响其余订阅者。
+ *
+ * @param {(locale: string|undefined) => void} listener
+ * @returns {() => void}
+ */
+export function onLocaleChange(listener) {
+  if (typeof listener !== 'function') return () => {}
+  localeListeners.add(listener)
+  return () => {
+    localeListeners.delete(listener)
+  }
+}
+
+/** 通知所有订阅者（语言已写入 `hostLocale`）。 */
+function notifyLocaleChange() {
+  for (const listener of [...localeListeners]) {
+    try {
+      listener(hostLocale)
+    } catch {
+      /* 单个订阅者的问题不该影响其它订阅者：UI 刷新失败不能拖垮整个客户端 */
+    }
+  }
+}
+
 /** 写入宿主语言（语言切换时调用；`undefined` 表示回退浏览器线索）。 */
 export function setHostLocale(locale) {
-  hostLocale = typeof locale === 'string' && locale.trim() !== '' ? locale : undefined
+  const next = typeof locale === 'string' && locale.trim() !== '' ? locale : undefined
+  if (next === hostLocale) return
+  hostLocale = next
+  notifyLocaleChange()
 }
 
 /** 读回当前宿主语言（调试/测试用）。 */
@@ -1098,7 +1136,9 @@ export function bindHostLocale(ctx, namespace = 'ur-twin') {
   if (typeof locale?.subscribe === 'function') {
     try {
       const off = locale.subscribe((snapshot) => {
-        const next = snapshot?.locale ?? snapshot?.current ?? snapshot?.active
+        // 宿主 LocaleRuntime 的快照字段是 `active`（`ctx.on('locale/change', s => s.active)`）；
+        // `locale`/`current` 是更早版本或第三方实现的写法，作为兜底保留。
+        const next = snapshot?.active ?? snapshot?.locale ?? snapshot?.current
         if (typeof next === 'string') apply(next)
       })
       if (typeof off === 'function') disposers.push(off)
@@ -1108,7 +1148,12 @@ export function bindHostLocale(ctx, namespace = 'ur-twin') {
   }
   if (typeof ctx?.on === 'function') {
     try {
-      const off = ctx.on('locale/change', (payload) => apply(payload?.locale ?? payload?.current))
+      const off = ctx.on('locale/change', (payload) => {
+        // 与 subscribe 分支同一套字段优先级：宿主推的是 `{ active }`；
+        // 只认 `locale`/`current` 会让这台宿主上的切换被静默丢弃。
+        const next = payload?.active ?? payload?.locale ?? payload?.current
+        if (typeof next === 'string') apply(next)
+      })
       if (typeof off === 'function') disposers.push(off)
     } catch {
       /* 事件名不存在：忽略 */
@@ -1122,6 +1167,8 @@ export function bindHostLocale(ctx, namespace = 'ur-twin') {
         /* 清理失败不该抛到调用方 */
       }
     }
-    hostLocale = undefined
+    // 走 setHostLocale（而不是直接赋 hostLocale）：语言回到缺省时也让订阅者刷新一次，
+    // 否则卸载前后残留在 DOM 上的文案会停在上一次宿主语言。
+    setHostLocale(undefined)
   }
 }

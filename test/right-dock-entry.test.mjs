@@ -29,6 +29,7 @@ import {
   mountRightDockEntry,
 } from '../src/client/right-dock-entry.js'
 import { resetMutationHub } from '../src/client/mutation-hub.js'
+import { de, ja, setHostLocale, zh } from '../src/client/strings.js'
 
 /* ================================================================== *
  * 假 DOM
@@ -614,4 +615,58 @@ test('⑫ 第三方侧边栏的 card* 结构：插进列容器、保留卡片外
   assert.equal(entry.querySelector('[class*="cardDesc"]').textContent, RIGHT_ENTRY_DESCRIPTION)
 
   handle.dispose()
+})
+
+test('⑬ 宿主切换语言后，卡片与覆盖层文案就地刷新（不重建节点）', () => {
+  const dom = createFakeDom()
+  const handle = mountRightDockEntry({ doc: dom.document })
+  const entry = pluginEntry(dom)
+
+  try {
+    // 切到日语：可见标题/描述与读屏/悬停文案一起变，节点还是同一个
+    setHostLocale('ja')
+    assert.equal(pluginEntry(dom), entry, '只改文案，不重建节点')
+    assert.equal(entry.querySelector('[class*="entryTitle"]').textContent, ja.dockLabel)
+    assert.equal(entry.querySelector('[class*="entryDescription"]').textContent, ja.dockDescription)
+    assert.equal(entry.getAttribute('aria-label'), ja.dockLabel)
+    assert.equal(entry.getAttribute('title'), ja.dockLabel)
+
+    // 覆盖层是按当前语言新建的
+    entry.dispatchEvent({ type: 'click' })
+    const overlay = overlayOf(dom)
+    assert.ok(overlay, '激活后应出现覆盖层')
+    assert.equal(overlay.children[0].children[0].textContent, ja.dockLabel, '面板标题用当前语言')
+    const close = overlay.querySelector(`[${RIGHT_CLOSE_ATTRIBUTE}]`)
+    assert.equal(close.getAttribute('aria-label'), ja.dockCollapse)
+    assert.equal(close.getAttribute('title'), ja.dockCollapse)
+
+    // 面板开着时再切德语：标题与关闭按钮的读屏文案同步（无需重新打开）
+    setHostLocale('de')
+    assert.equal(overlayOf(dom), overlay, '语言切换不该重建覆盖层')
+    assert.equal(overlay.children[0].children[0].textContent, de.dockLabel)
+    assert.equal(close.getAttribute('aria-label'), de.dockCollapse)
+
+    // 回到缺省语言：卡片跟着回中文
+    handle.setActive(false)
+    setHostLocale(undefined)
+    assert.equal(entry.querySelector('[class*="entryTitle"]').textContent, zh.dockLabel)
+    assert.equal(entry.querySelector('[class*="entryDescription"]').textContent, zh.dockDescription)
+  } finally {
+    handle.dispose()
+    setHostLocale(undefined)
+  }
+})
+
+test('⑭ dispose 后语言变化不再触碰 DOM（订户已退订）', () => {
+  const dom = createFakeDom()
+  const handle = mountRightDockEntry({ doc: dom.document })
+  const entry = pluginEntry(dom)
+
+  handle.dispose()
+  assert.equal(pluginEntry(dom), null, 'dispose 要摘掉卡片')
+  assert.doesNotThrow(() => setHostLocale('ru'), '退订后语言变化不该抛错')
+  setHostLocale(undefined)
+  // 卡片已摘除，不应被重新插回
+  assert.equal(pluginEntry(dom), null)
+  assert.equal(entry.isConnected, false)
 })

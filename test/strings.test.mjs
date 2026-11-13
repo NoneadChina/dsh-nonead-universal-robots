@@ -26,6 +26,7 @@ import {
   liveNested,
   liveStrings,
   LOCALES,
+  onLocaleChange,
   pt,
   registerWithLocale,
   resolveLocale,
@@ -186,6 +187,35 @@ test('liveNested：嵌套枚举表同样跟随语言热切换', () => {
   assert.equal(safety.NORMAL, zh.safetyMode.NORMAL)
 })
 
+test('onLocaleChange：只在语言真正改变时通知，退订后不再收到，单个订户抛错不影响其它订户', () => {
+  const seen = []
+  const offA = onLocaleChange((locale) => seen.push(locale))
+  const offBoom = onLocaleChange(() => {
+    throw new Error('boom')
+  })
+  const offC = onLocaleChange((locale) => seen.push(`c:${locale}`))
+
+  setHostLocale('ja')
+  setHostLocale('ja') // 同一语言重复写入：不重复通知
+  setHostLocale('ru')
+  setHostLocale(undefined) // 回到缺省也算变化
+  assert.deepEqual(seen, ['ja', 'c:ja', 'ru', 'c:ru', undefined, 'c:undefined'])
+
+  offA()
+  offC()
+  offBoom()
+  setHostLocale('fr')
+  assert.equal(seen.length, 6, '退订后不该再收到通知')
+  assert.equal(getHostLocale(), 'fr', '退订只影响回调，不影响当前语言状态')
+  setHostLocale(undefined)
+})
+
+test('onLocaleChange：非函数参数返回安全空转退订函数', () => {
+  const off = onLocaleChange(undefined)
+  assert.equal(typeof off, 'function')
+  assert.doesNotThrow(() => off())
+})
+
 test('registerWithLocale / useHostLocale / bindHostLocale：宿主可用时注册并跟随，不可用时安全回退', () => {
   // 宿主不可用（没有 locale 服务）
   assert.equal(registerWithLocale(undefined), false)
@@ -267,4 +297,40 @@ test('cordis 严格上下文：locale 只能经 ctx.get 取，属性读取抛错
   assert.equal(useHostLocale(strict), 'en')
   assert.doesNotThrow(() => bindHostLocale(strict), '语言绑定失败不得拖垮客户端 entry')
   assert.equal(registerWithLocale(undefined), false)
+})
+
+test('bindHostLocale：只有 locale/change 事件时要认 payload.active（宿主 LocaleRuntime 的实际字段）', () => {
+  const handlers = new Map()
+  const ctx = {
+    get: (name) =>
+      name === 'locale'
+        ? { register: () => () => {}, getSnapshot: () => ({ active: 'zh' }) }
+        : undefined,
+    on: (event, fn) => {
+      handlers.set(event, fn)
+      return () => handlers.delete(event)
+    },
+  }
+  const dispose = bindHostLocale(ctx, 'ur-twin')
+  assert.equal(getHostLocale(), 'zh', '初始语言取快照的 active')
+  assert.equal(typeof handlers.get('locale/change'), 'function')
+
+  // 宿主真正发出的事件负载是 { active }；只认 locale/current 会让这次切换被静默丢弃。
+  handlers.get('locale/change')({ active: 'fr' })
+  assert.equal(getHostLocale(), 'fr', '必须识别 payload.active')
+  assert.equal(liveStrings().dockLabel, fr.dockLabel)
+
+  // 第三方/旧实现可能只给 locale 或 current，仍要兜底。
+  handlers.get('locale/change')({ locale: 'de' })
+  assert.equal(getHostLocale(), 'de')
+  handlers.get('locale/change')({ current: 'ja' })
+  assert.equal(getHostLocale(), 'ja')
+
+  // 空负载与非法负载不得把语言打回 undefined。
+  handlers.get('locale/change')({})
+  assert.equal(getHostLocale(), 'ja')
+
+  dispose()
+  assert.equal(getHostLocale(), undefined, 'dispose 复位')
+  assert.equal(handlers.has('locale/change'), false, 'dispose 必须退订')
 })

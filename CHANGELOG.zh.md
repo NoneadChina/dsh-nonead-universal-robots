@@ -10,7 +10,7 @@
 - **当前宿主 `0.2.2-rc.2` 在窗口内**（cordis 4.1.0 / schemastery 3.19.0）；`<0.3.0` 上界意味着 `0.3.0` 起需要重新声明。
 - **不再声明 `0.1.x` 与 `0.2.0`**：向后兼容矩阵同步移除仅属于它们的条目（`0.1.2-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.2`、cordis 4.0.2、schemastery 3.18.2），并补齐 `0.2.1-alpha.1` / `0.2.1-rc.1` / `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` 以及对应的 cordis 4.0.5-alpha.1/alpha.2、4.0.6-alpha.1/alpha.2，schemastery 3.18.5-alpha.1/alpha.2、3.18.6-alpha.1/alpha.2 为必须覆盖项。
 - **校验**：`npm run check:host:strict` 全部通过 —— 4 个 peer 满足、4 个兼容矩阵全绿（dsh/dsh-tools 各 10 个版本、cordis/schemastery 各 7 个）、104/104 工具在宿主真实 DSL 注册成功。
-- **主体是依赖声明、门禁脚本与文档变更**；另含一处客户端（`src/client/`）兼容修复，见下节。
+- **主体是依赖声明、门禁脚本与文档变更**；另含两处客户端（`src/client/`）修复，见下两节。
 
 ### 修复 —— 右栏入口在第三方侧边栏接管「开始」面板时不出现
 
@@ -20,6 +20,14 @@
 - **插入位置改为列容器**：`dsh-better-sidebar` 的结构是 `root[data-dsh-guide-grid] > 列容器 > card*`，且列容器带 `margin-block:auto` 参与垂直居中。旧逻辑把卡片追加到 `root` 上，会落在居中块之外被挤出可视区；现在识别 `data-dsh-guide-grid` 后追加到第一个子容器（列容器）内，与三张原生卡片同列同宽。
 - **回归用例**：`test/right-dock-entry.test.mjs` 新增第 ⑪ 条（空串属性的引导列仍能插入）与第 ⑫ 条（`card*` 结构：插入列容器、保留卡片类名、`cardMain` 不被删）。
 - **验证**：`node --test test/right-dock-entry.test.mjs` 12/12 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（`lib/client.js` 可由 `src/client/**` 逐字节重建）。
+
+### 修复 —— 入口卡片文案跟随宿主语言实时切换
+
+- **补齐语言变化通知**：`src/client/strings.js` 新增 `onLocaleChange()` 订阅接口；`setHostLocale()` 只在语言**确实改变**时赋值并通知（同一语言重复设置直接返回）。退订幂等，单个订户抛错不影响其它订户。
+- **已写入 DOM 的文案重新同步**：`liveStrings()` 的 Proxy 只保证「下一次取属性」是新语言；已经写进 `textContent` 的标题/描述不会自己变，MutationObserver 也不会因语言切换触发。`src/client/right-dock-entry.js` 新增 `syncEntryText()` 与 `syncOverlayText()`，在 `reconcile()` 里对已挂载的卡片与覆盖层就地刷新（不重建节点、不丢事件监听），并同步 `aria-label` / `title`。
+- **认宿主的真实事件字段**：宿主 `LocaleRuntime` 的 `locale/change` 负载字段是 `active`（`ctx.on('locale/change', s => s.active)`）；旧代码只读 `payload.locale ?? payload.current`，此前靠 `subscribe` 分支的兜底才没暴露。现在两个分支统一按 `active → locale → current` 取值。
+- **回归用例**：`test/strings.test.mjs` 新增「只在语言真正改变时通知 / 退订后不再收到 / 单订户抛错不影响其它」与「只有 `locale/change` 时认 `payload.active`」；`test/right-dock-entry.test.mjs` 新增第 ⑬ 条（切 ja → 卡片与覆盖层文案即时更新且节点不重建，回缺省变中文）与第 ⑭ 条（dispose 后语言变化不再触碰 DOM）。
+- **验证**：`node --test test/strings.test.mjs test/right-dock-entry.test.mjs` 30/30 通过；`node scripts/run-tests.mjs --skip-python` 共 57 项（通过 41 / 失败 0 / 跳过 16）；`check-client-bundle` PASS（688.2 KB）。
 
 ## [0.8.6] - 2026-11-04
 

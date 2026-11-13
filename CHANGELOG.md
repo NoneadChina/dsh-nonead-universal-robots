@@ -10,7 +10,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **The current host `0.2.2-rc.2` is inside the window** (cordis 4.1.0 / schemastery 3.19.0); the `<0.3.0` bound means `0.3.0` and later need a fresh declaration.
 - **`0.1.x` and `0.2.0` are no longer declared**: the backward-compatibility matrix drops the entries that only belonged to them (`0.1.2-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.2`, cordis 4.0.2, schemastery 3.18.2) and pins `0.2.1-alpha.1` / `0.2.1-rc.1` / `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` plus their cordis 4.0.5-alpha.1/alpha.2, 4.0.6-alpha.1/alpha.2 and schemastery 3.18.5-alpha.1/alpha.2, 3.18.6-alpha.1/alpha.2 as must-cover versions.
 - **Verification**: `npm run check:host:strict` passes end to end — 4 peers satisfied, 4 matrices green (10 versions for dsh/dsh-tools, 7 for cordis/schemastery), and all 104 tools register through the host's real DSL.
-- **Mostly declaration, gate script and docs work**, plus one client-side (`src/client/`) compatibility fix described below.
+- **Mostly declaration, gate script and docs work**, plus two client-side (`src/client/`) fixes described in the next two sections.
 
 ### Fixed — the right-dock entry disappears when a third-party sidebar takes over the start panel
 
@@ -20,6 +20,14 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Sem
 - **The card is appended to the column container**: `dsh-better-sidebar` renders `root[data-dsh-guide-grid] > column > card*`, and the column carries `margin-block:auto` for vertical centering. Appending to `root` put the card outside that centered block, off the visible area; when `data-dsh-guide-grid` is present the card now goes into the first child container, sharing the native cards' column and width.
 - **Regression cases**: `test/right-dock-entry.test.mjs` gains case ⑪ (an empty-string guide attribute still receives the card) and case ⑫ (`card*` structure: appended to the column, hashed class preserved, `cardMain` kept).
 - **Verification**: `node --test test/right-dock-entry.test.mjs` passes 12/12; `node scripts/run-tests.mjs --skip-python` reports 57 items (41 passed / 0 failed / 16 skipped); `check-client-bundle` passes (`lib/client.js` rebuilds byte-for-byte from `src/client/**`).
+
+### Fixed — the entry card's labels follow the host language live
+
+- **Locale-change notification added**: `src/client/strings.js` gains `onLocaleChange()`; `setHostLocale()` now assigns and notifies only when the locale actually changes (setting the same locale returns early). Unsubscribing is idempotent, and one throwing subscriber does not stop the others.
+- **Text already written to the DOM is re-synced**: the `liveStrings()` Proxy only guarantees that the *next* property read uses the new language — `textContent` already committed to the card never changes by itself, and the MutationObserver does not fire on a locale switch. `src/client/right-dock-entry.js` adds `syncEntryText()` and `syncOverlayText()`, called from `reconcile()` to refresh the mounted card and overlay in place (no node rebuild, no lost listeners), including `aria-label` / `title`.
+- **The host's real event field is honoured**: the host `LocaleRuntime` emits `locale/change` with `active` (`ctx.on('locale/change', s => s.active)`); the old code read only `payload.locale ?? payload.current` and worked solely because the `subscribe` branch had a fallback. Both branches now resolve `active → locale → current`.
+- **Regression cases**: `test/strings.test.mjs` gains "notify only on a real change / nothing after unsubscribe / one throwing subscriber does not affect the others" and "recognise `payload.active` when only `locale/change` is available"; `test/right-dock-entry.test.mjs` gains case ⑬ (switch to ja → card and overlay labels update immediately without rebuilding nodes, back to default gives Chinese) and case ⑭ (after dispose, locale changes no longer touch the DOM).
+- **Verification**: `node --test test/strings.test.mjs test/right-dock-entry.test.mjs` passes 30/30; `node scripts/run-tests.mjs --skip-python` reports 57 items (41 passed / 0 failed / 16 skipped); `check-client-bundle` passes (688.2 KB).
 
 ## [0.8.6] - 2026-11-04
 
