@@ -474,10 +474,10 @@ else {
    * 预发布版本的纯区间时，这里立刻变红 —— 而不是等某个还在用旧宿主的用户装不上才发现。
    */
   const PEER_HISTORY = {
-    '@deepseek-ai/dsh': ['0.2.1-alpha.1', '0.2.1-alpha.5', '0.2.1-rc.1', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2', '0.2.9'],
-    '@deepseek-ai/dsh-tools': ['0.2.1-alpha.1', '0.2.1-alpha.5', '0.2.1-rc.1', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2', '0.2.9'],
-    '@deepseek-ai/cordis': ['4.0.5-alpha.1', '4.0.5-alpha.2', '4.0.5', '4.0.6-alpha.1', '4.0.6-alpha.2', '4.0.6', '4.1.0'],
-    '@deepseek-ai/schemastery': ['3.18.5-alpha.1', '3.18.5-alpha.2', '3.18.5', '3.18.6-alpha.1', '3.18.6-alpha.2', '3.18.6', '3.19.0'],
+    '@deepseek-ai/dsh': ['0.2.1-alpha.1', '0.2.1-alpha.5', '0.2.1-rc.1', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2', '0.2.3-alpha.2', '0.2.9'],
+    '@deepseek-ai/dsh-tools': ['0.2.1-alpha.1', '0.2.1-alpha.5', '0.2.1-rc.1', '0.2.1-rc.5', '0.2.2-alpha.2', '0.2.2-alpha.3', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2', '0.2.3-alpha.2', '0.2.9'],
+    '@deepseek-ai/cordis': ['4.0.5-alpha.1', '4.0.5-alpha.2', '4.0.5', '4.0.6-alpha.1', '4.0.6-alpha.2', '4.0.6', '4.1.0', '4.2.0-alpha.1'],
+    '@deepseek-ai/schemastery': ['3.18.5-alpha.1', '3.18.5-alpha.2', '3.18.5', '3.18.6-alpha.1', '3.18.6-alpha.2', '3.18.6', '3.19.0', '3.20.0-alpha.1'],
   }
   for (const [name, versions] of Object.entries(PEER_HISTORY)) {
     const declared = manifest.peerDependencies?.[name]

@@ -2,6 +2,16 @@
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] - 2026-11-27
+
+### Compatibility — widen the window to host DSH `0.2.3-alpha.2` (non-breaking; every older version stays covered)
+
+- **One pre-release clause appended per peer**: `@deepseek-ai/dsh` / `dsh-tools` gain `|| >=0.2.3-0 <0.2.4`, cordis gains `|| >=4.2.0-0 <4.2.1`, schemastery gains `|| >=3.20.0-0 <3.20.1`. The `-0` form covers **every** pre-release of that triple rather than pinning the one alpha that was observed.
+- **The current host `0.2.3-alpha.2` (cordis 4.2.0-alpha.1 / schemastery 3.20.0-alpha.1) is inside the window**; the previous `0.2.1`–`0.2.2` clauses and cordis `4.0.5`/`4.0.6`, schemastery `3.18.5`/`3.18.6` are kept verbatim — nothing was narrowed to adopt the new host.
+- **The backward-compatibility matrix grows to 11/11/8/8 versions**: `0.2.3-alpha.2` for dsh and dsh-tools, `4.2.0-alpha.1` for cordis, `3.20.0-alpha.1` for schemastery.
+- **Verification**: `npm run check:host:strict` passes — 4 peers satisfied against the installed host, 4 matrices green, all 104 tools register through the host's real DSL, the 4 twin read-only routes and the `dsh.client` declaration pass; `npm test` is 58/58.
+- **Declaration and docs only** — no runtime behaviour change.
+
 ## [0.9.0] - 2026-11-13
 
 ### Compatibility — narrow the supported window to DSH `0.2.1` – `<0.3.0` (breaking: drops 0.1.x / 0.2.0)
